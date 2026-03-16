@@ -1,73 +1,100 @@
-# React + TypeScript + Vite
+# 课程河流 (Curriculum Roadmap)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+AI 驱动的课程规划与管理系统，帮助教育工作者自动化课程单元数据的创建与管理。支持多用户账号隔离、云端数据同步与多种可视化视图。
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 技术栈
 
-## React Compiler
+| 层级 | 技术 |
+|------|------|
+| 前端 | React 18 + TypeScript、Vite、Tailwind CSS + shadcn/ui、自定义 i18n（中/英） |
+| 后端 | Node.js + Express.js |
+| 数据 | PostgreSQL（如 Zeabur Neon） |
+| 其他 | pdfjs-dist（PDF 解析）、HTML5 Canvas（概念网络图） |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the ESLint configuration
+## 核心功能
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- **课程管理**：创建/编辑/删除课程，分类与双语支持，自定义颜色与周课时，年级范围与教材版本。
+- **单元管理**：手动或 AI 生成单元，Excel 批量导入，拖拽排序，单元与关键概念关联。
+- **可视化**：整体视图（课程河流）、单元视图、概念视图（力导向图）。
+- **AI**：单元生成（DeepSeek/GLM/Kimi）、教材上传（TXT/PDF）、基于课程上下文的聊天助手。
+- **数据**：云端同步（课程、学期数据、关键概念），本地缓存与离线回退，JSON 导入/导出，多用户数据隔离。
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+---
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+## 项目结构（Monorepo）
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+├── apps/
+│   ├── web/          # 前端 (React + Vite)
+│   └── api/          # 后端 (Express)，并托管前端静态资源
+├── libs/
+│   └── shared/       # 共享类型与常量
+├── package.json      # 根 workspace 脚本
+└── README.md
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- **前端**：`apps/web`（组件、contexts、lib、类型定义）。
+- **后端**：`apps/api`（路由、数据库配置、静态资源来自构建后的 `apps/web`）。
+- **共享**：`libs/shared` 供前后端共用。
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+---
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## 数据流简述
+
+- **写入**：用户操作 → 先写本地缓存 → 若启用云端则调 API → 后端按 `X-User-Id` 识别用户并写入 PostgreSQL。
+- **读取**：优先从云端加载 → 成功则更新本地缓存 → 失败则回退本地。
+- **隔离**：所有存储键通过 `getUserStorageKey()` 加用户 ID 前缀；云端查询按 `user_id` 过滤。
+
+---
+
+## 本地开发与构建
+
+```bash
+# 安装依赖
+npm install
+
+# 开发（同时起前端 + 后端）
+npm run dev
+
+# 仅前端
+npm run dev:web
+
+# 仅后端
+npm run dev:api
+
+# 构建并运行（先构建 shared → web → 复制到 api/public → 构建 api）
+npm run build
+npm start
 ```
+
+---
+
+## 版本与状态
+
+- **当前版本**：1.3  
+- **状态**：已部署 Zeabur，稳定运行。  
+- **历史**：
+  - v1.0.0 初始发布。
+  - v1.0.1 跨设备同步与 PDF 支持。
+  - v1.0.2 导入修复与关键概念云端同步、设置菜单与 AI 助手优化。
+  - v1.0.3 AI 导入与跨学科设计优化；课程河流整体视图布局与响应式优化（居中、两侧信息贴框、框体随浏览器动态缩小）。
+  - **v1.1 架构优化**：迁至 Monorepo（`apps/web`、`apps/api`、`libs/shared`）；移除老架构目录 `src/`、`server/` 及根目录仅服务于旧前端的配置（`vite.config.ts`、`tsconfig.*`、`tailwind.config.js`、`postcss.config.js`、`components.json`、`index.html`），构建与运行以当前结构为准。**《愿景与优化》第 1–3 项已落地**：① AI 请求全部走后端代理（密钥仅存服务端）；② 认证升级（密码 bcrypt 存储 + 登录签发 JWT，请求带 token）；③ 用户账号仅从数据库读取，不再写死在前端。
+  - **v1.2 全局 AI**：AI 能力与助手在应用内全局可用，与课程、单元等上下文结合。
+  - **v1.3 后台管理 & 全局课程河流**：  
+    - **后台管理整合**：用户管理、学年管理、班级管理、学生管理统一入口；用户管理支持角色（系统管理员/管理员/教师）与部门；学年管理（仅系统管理员可创建/修改学年）、学年按年份排序；班级管理支持班主任/负责人、按学年建班与添加学生，并在学年管理中展示当前学年的班级清单与人数统计。  
+    - **我的班级**：原「班级管理」入口改名为「我的班级」；管理员/系统管理员可看全部班级并编辑；教师仅可查看与自己关联的班级（班主任），只读。  
+    - **学生与学籍**：学生增加「年级」字段；统一创建学生弹窗（年级必填，当前学年，可选加入班级）；班级管理仅支持「从班级移出」学生，删除学生仅在后台学生管理中由管理员/系统管理员操作；学生管理支持当前学年选择、创建学生、筛选与排序、编辑/删除。  
+    - **权限**：管理员只可见教师账号（看不到系统管理员账号），且不可编辑系统管理员/管理员的数据；仅系统管理员可创建/修改学年、可修改用户角色；后台管理入口仅对管理员/系统管理员可见。  
+    - **课程河流全局共享**：课程与单元数据不再按用户隔离，整个校区共用一套课程河流；仅系统管理员和管理员可以创建/编辑/删除课程与单元，教师端只读（可查看与使用 AI 分析）；本地与云端缓存策略已调整为按全局课程表同步。  
+    - **UI**：学生管理页面与班级管理统一设计（学年选择块 + 列表标题与主操作 + 筛选栏 + 表格）；班级管理顶部只显示当前学年，不再重复提供学年切换（唯一入口在后台学年管理）。
+
+---
+
+## 文档与协作
+
+- **程序说明**：以本 README 为准。
+- **AI 与开发者**：修改或扩展功能前请阅读 **[AI编程避坑指南](./AI编程避坑指南.md)**，避免已知的数据、布局与部署坑点。

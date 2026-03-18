@@ -114,3 +114,52 @@ CREATE TABLE IF NOT EXISTS student_enrollments (
 );
 CREATE INDEX IF NOT EXISTS idx_enrollments_class_id ON student_enrollments(class_id);
 CREATE INDEX IF NOT EXISTS idx_enrollments_student_id ON student_enrollments(student_id);
+
+-- 课堂助手（1.4）：分组方案、小组、成员、积分事件
+CREATE TABLE IF NOT EXISTS class_group_schemes (
+  id VARCHAR(80) PRIMARY KEY,
+  class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  name VARCHAR(100) NOT NULL,
+  scope VARCHAR(30) NOT NULL DEFAULT 'class-default',
+  subject VARCHAR(100),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_class_group_schemes_class_id ON class_group_schemes(class_id);
+
+CREATE TABLE IF NOT EXISTS class_groups (
+  id VARCHAR(80) PRIMARY KEY,
+  class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  scheme_id VARCHAR(80) NOT NULL REFERENCES class_group_schemes(id) ON DELETE CASCADE,
+  name VARCHAR(100) NOT NULL,
+  scope VARCHAR(30) NOT NULL DEFAULT 'class-default',
+  subject VARCHAR(100),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_class_groups_class_scheme ON class_groups(class_id, scheme_id);
+
+CREATE TABLE IF NOT EXISTS class_group_members (
+  id VARCHAR(80) PRIMARY KEY,
+  class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  scheme_id VARCHAR(80) NOT NULL REFERENCES class_group_schemes(id) ON DELETE CASCADE,
+  group_id VARCHAR(80) NOT NULL REFERENCES class_groups(id) ON DELETE CASCADE,
+  student_id VARCHAR(50) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  left_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_class_group_members_class_scheme ON class_group_members(class_id, scheme_id);
+
+CREATE TABLE IF NOT EXISTS class_point_events (
+  id VARCHAR(80) PRIMARY KEY,
+  class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  scheme_id VARCHAR(80) REFERENCES class_group_schemes(id) ON DELETE CASCADE,
+  type VARCHAR(20) NOT NULL CHECK (type IN ('individual', 'group')),
+  student_id VARCHAR(50) REFERENCES students(id) ON DELETE SET NULL,
+  group_id VARCHAR(80) REFERENCES class_groups(id) ON DELETE SET NULL,
+  delta INTEGER NOT NULL,
+  reason VARCHAR(200),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_class_point_events_class_id ON class_point_events(class_id);
+CREATE INDEX IF NOT EXISTS idx_class_point_events_class_scheme ON class_point_events(class_id, scheme_id);

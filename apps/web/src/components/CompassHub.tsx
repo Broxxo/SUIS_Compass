@@ -1,5 +1,5 @@
 /**
- * SUIS COMPASS 主入口：16 单位网格，仅 2x2 与 1x1 入口，错落排布。
+ * SUIS COMPASS 主入口：16 单位网格，2x2 与 1x1 入口错落排布，随窗口自适应。
  */
 import { useLanguage } from '../contexts/LanguageContext';
 import AppTopBar from './AppTopBar';
@@ -9,7 +9,6 @@ type HubView = 'suis-ai' | 'curriculum-roadmap' | 'student-portrait' | 'class-as
 
 const GRID_COLS = 4;
 const GRID_ROWS = 4;
-const GAP = 12;
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
 const tileBase =
@@ -41,27 +40,26 @@ export default function CompassHub({
           </Button>
         }
       />
-      <div className="p-4 sm:p-6">
-
-      {/* 16 单位网格：4x4，错落有致 */}
+      <div className="p-4 sm:p-6 flex justify-center min-h-0">
+      {/* 16 单位网格：4x4，随窗口自适应，一屏内完整显示 */}
       <div
-        className="mx-auto max-w-2xl"
+        className="w-full"
         style={{
           display: 'grid',
           gridTemplateColumns: `repeat(${GRID_COLS}, 1fr)`,
           gridTemplateRows: `repeat(${GRID_ROWS}, 1fr)`,
-          gap: GAP,
+          gap: 'clamp(6px, 1.5vw, 16px)',
           aspectRatio: '1',
-          minHeight: 280,
-          maxHeight: 'min(90vmin, 420px)',
+          width: 'min(clamp(240px, 85vw, 720px), calc(100vh - 8rem))',
         }}
       >
         {/* SUIS AI - 2x2，左上 */}
         <button
           type="button"
           onClick={() => onNavigate('suis-ai')}
-          className={`${tileBase} text-xl sm:text-2xl p-4`}
+          className={`${tileBase} p-2 sm:p-4`}
           style={{
+            fontSize: 'clamp(1rem, 2.5vw, 1.5rem)',
             background: 'linear-gradient(145deg, #6366f1 0%, #7c3aed 50%, #6d28d9 100%)',
             boxShadow: '0 8px 24px -4px rgba(99, 102, 241, 0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
             gridColumn: '1 / span 2',
@@ -75,8 +73,9 @@ export default function CompassHub({
         <button
           type="button"
           onClick={() => onNavigate('curriculum-roadmap')}
-          className={`${tileBase} text-sm sm:text-base p-2`}
+          className={`${tileBase} p-1.5 sm:p-2`}
           style={{
+            fontSize: 'clamp(0.75rem, 1.8vw, 1rem)',
             background: 'linear-gradient(145deg, #0ea5e9 0%, #0284c7 50%, #0369a1 100%)',
             boxShadow: '0 6px 16px -2px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
             gridColumn: '3 / span 1',
@@ -102,8 +101,9 @@ export default function CompassHub({
         <button
           type="button"
           onClick={() => onNavigate('student-portrait')}
-          className={`${tileBase} text-xl sm:text-2xl p-4`}
+          className={`${tileBase} p-2 sm:p-4`}
           style={{
+            fontSize: 'clamp(1rem, 2.5vw, 1.5rem)',
             background: 'linear-gradient(145deg, #10b981 0%, #059669 50%, #047857 100%)',
             boxShadow: '0 8px 24px -4px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
             gridColumn: '2 / span 2',
@@ -120,8 +120,9 @@ export default function CompassHub({
         <button
           type="button"
           onClick={() => onNavigate('class-assistant')}
-          className={`${tileBase} text-sm sm:text-base p-2`}
+          className={`${tileBase} p-1.5 sm:p-2`}
           style={{
+            fontSize: 'clamp(0.75rem, 1.8vw, 1rem)',
             background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
             boxShadow: '0 6px 16px -2px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
             gridColumn: '4 / span 1',
@@ -138,8 +139,9 @@ export default function CompassHub({
         <button
           type="button"
           onClick={() => onNavigate('class-management')}
-          className={`${tileBase} text-sm sm:text-base p-2`}
+          className={`${tileBase} p-1.5 sm:p-2`}
           style={{
+            fontSize: 'clamp(0.75rem, 1.8vw, 1rem)',
             background: 'linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%)',
             boxShadow: '0 6px 16px -2px rgba(71, 85, 105, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
             gridColumn: '4',

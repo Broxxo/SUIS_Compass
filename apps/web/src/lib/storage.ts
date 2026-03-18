@@ -186,11 +186,11 @@ export async function loadCourses(): Promise<Course[]> {
 
 /**
  * 同步版本（用于向后兼容，但会返回空数组，建议使用异步版本）
+ * 课程河流全局共享，使用全局 key 与 loadCourses/saveCourses 一致
  */
 export function loadCoursesSync(): Course[] {
   try {
-    const userId = getCurrentUserId();
-    const key = getUserStorageKey(STORAGE_KEYS.COURSES, userId);
+    const key = STORAGE_KEYS.COURSES;
     const stored = localStorage.getItem(key);
     if (stored) {
       const parsedCourses = JSON.parse(stored);

@@ -97,16 +97,17 @@ router.post('/users', async (req: AuthedRequest, res: Response) => {
       return res.status(403).json({ error: 'Admin can only create teacher accounts' });
     }
 
-    const existing = await pool.query('SELECT 1 FROM users WHERE username = $1', [username]);
+    const existing = await pool.query('SELECT 1 FROM users WHERE LOWER(TRIM(username)) = LOWER(TRIM($1))', [username]);
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: 'Username already exists' });
     }
 
     const hash = await bcrypt.hash(password, 10);
     const dept = department && String(department).trim() ? String(department).trim() : null;
+    const newId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const result = await pool.query(
-      'INSERT INTO users (username, display_name, role, password_hash, password, department, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id, username, role, display_name, password, department, created_at',
-      [username, displayName ?? username, role, hash, password, dept],
+      'INSERT INTO users (id, username, display_name, role, password_hash, password, department, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id, username, role, display_name, password, department, created_at',
+      [newId, username.trim(), (displayName ?? username).trim(), role, hash, password, dept],
     );
 
     const row = result.rows[0] as {

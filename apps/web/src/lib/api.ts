@@ -1,5 +1,14 @@
 import type { Course, SemesterData, User } from '../types';
-import type { AcademicYear, ClassItem, Student, Enrollment } from '../types/classManagement';
+import type {
+  AcademicYear,
+  ClassItem,
+  Student,
+  Enrollment,
+  ClassGroupScheme,
+  ClassGroup,
+  ClassGroupMembership,
+  ClassPointEvent,
+} from '../types/classManagement';
 import { getCurrentUserId, getToken } from './authUtils';
 
 // 同源部署时为空，开发时可设为 VITE_API_URL（如 http://localhost:8080/api）
@@ -234,7 +243,14 @@ export const api = {
     });
     if (!response.ok) {
       const text = await response.text().catch(() => 'Failed to create user');
-      throw new Error(text || 'Failed to create user');
+      let msg = text;
+      try {
+        const err = JSON.parse(text) as { error?: string };
+        if (err?.error) msg = err.error;
+      } catch {
+        // use text as msg
+      }
+      throw new Error(msg || 'Failed to create user');
     }
     const data = await response.json();
     return data.user as User & { createdAt?: string; password?: string | null; department?: string | null };
@@ -418,6 +434,104 @@ export const api = {
       headers: getHeaders(),
     });
     if (!response.ok) throw new Error('Failed to remove enrollment');
+  },
+
+  /**
+   * 课堂助手 API：分组方案、小组、成员、积分事件
+   */
+  async getClassAssistantSchemes(classId: string): Promise<ClassGroupScheme[]> {
+    const response = await fetch(apiUrl(`/api/classes/assistant/schemes?classId=${encodeURIComponent(classId)}`), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) throw new Error('Failed to fetch group schemes');
+    const data = await response.json();
+    return (data.schemes ?? data) as ClassGroupScheme[];
+  },
+
+  async createClassAssistantScheme(scheme: ClassGroupScheme): Promise<ClassGroupScheme> {
+    const response = await fetch(apiUrl('/api/classes/assistant/schemes'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(scheme),
+    });
+    if (!response.ok) throw new Error('Failed to create group scheme');
+    return response.json();
+  },
+
+  async deleteClassAssistantScheme(schemeId: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/classes/assistant/schemes/${encodeURIComponent(schemeId)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) throw new Error('Failed to delete group scheme');
+  },
+
+  async getClassAssistantGroups(classId: string, schemeId: string): Promise<ClassGroup[]> {
+    const response = await fetch(
+      apiUrl(`/api/classes/assistant/groups?classId=${encodeURIComponent(classId)}&schemeId=${encodeURIComponent(schemeId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch groups');
+    const data = await response.json();
+    return (data.groups ?? data) as ClassGroup[];
+  },
+
+  async putClassAssistantGroups(classId: string, schemeId: string, groups: ClassGroup[]): Promise<void> {
+    const response = await fetch(apiUrl('/api/classes/assistant/groups'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ classId, schemeId, groups }),
+    });
+    if (!response.ok) throw new Error('Failed to save groups');
+  },
+
+  async getClassAssistantMembers(classId: string, schemeId: string): Promise<ClassGroupMembership[]> {
+    const response = await fetch(
+      apiUrl(`/api/classes/assistant/members?classId=${encodeURIComponent(classId)}&schemeId=${encodeURIComponent(schemeId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch group members');
+    const data = await response.json();
+    return (data.members ?? data) as ClassGroupMembership[];
+  },
+
+  async putClassAssistantMembers(classId: string, schemeId: string, members: ClassGroupMembership[]): Promise<void> {
+    const response = await fetch(apiUrl('/api/classes/assistant/members'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ classId, schemeId, members }),
+    });
+    if (!response.ok) throw new Error('Failed to save group members');
+  },
+
+  async getClassAssistantPointEvents(classId: string, schemeId?: string | null): Promise<ClassPointEvent[]> {
+    let url = `/api/classes/assistant/point-events?classId=${encodeURIComponent(classId)}`;
+    if (schemeId != null && schemeId !== '') {
+      url += `&schemeId=${encodeURIComponent(schemeId)}`;
+    }
+    const response = await fetch(apiUrl(url), { headers: getHeaders() });
+    if (!response.ok) throw new Error('Failed to fetch point events');
+    const data = await response.json();
+    return (data.events ?? data) as ClassPointEvent[];
+  },
+
+  async postClassAssistantPointEvents(events: ClassPointEvent | ClassPointEvent[]): Promise<void> {
+    const arr = Array.isArray(events) ? events : [events];
+    const response = await fetch(apiUrl('/api/classes/assistant/point-events'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(arr),
+    });
+    if (!response.ok) throw new Error('Failed to save point events');
+  },
+
+  async putClassAssistantPointEvents(classId: string, events: ClassPointEvent[]): Promise<void> {
+    const response = await fetch(apiUrl('/api/classes/assistant/point-events'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ classId, events }),
+    });
+    if (!response.ok) throw new Error('Failed to save point events');
   },
 };
 

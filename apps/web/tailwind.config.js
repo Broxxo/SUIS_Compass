@@ -46,13 +46,33 @@ export default {
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
   			ring: 'hsl(var(--ring))',
-  			chart: {
+  		chart: {
   				'1': 'hsl(var(--chart-1))',
   				'2': 'hsl(var(--chart-2))',
   				'3': 'hsl(var(--chart-3))',
   				'4': 'hsl(var(--chart-4))',
   				'5': 'hsl(var(--chart-5))'
   			}
+  		},
+  		keyframes: {
+  			'float-up': {
+  				'0%': { transform: 'translate(-50%, 0)', opacity: '1' },
+  				'100%': { transform: 'translate(-50%, -28px)', opacity: '0' }
+  			},
+  			'bar-in': {
+  				'0%': { opacity: '0' },
+  				'100%': { opacity: '1' }
+  			},
+  			'shake': {
+  				'0%, 100%': { transform: 'translateX(0)' },
+  				'25%': { transform: 'translateX(-4px)' },
+  				'75%': { transform: 'translateX(4px)' }
+  			}
+  		},
+  		animation: {
+  			'float-up': 'float-up 0.9s ease-out forwards',
+  			'bar-in': 'bar-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards',
+  			'shake': 'shake 0.4s ease-in-out'
   		}
   	}
   },

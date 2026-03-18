@@ -70,6 +70,12 @@ export const STORAGE_KEYS = {
   CLASSES: 'class-mgmt-classes',
   STUDENTS: 'class-mgmt-students',
   ENROLLMENTS: 'class-mgmt-enrollments',
+  // 课堂助手：小组与积分事件（全校共享）
+  CLASS_GROUP_SCHEMES: 'class-assistant-group-schemes',
+  LAST_SELECTED_CLASS_ID: 'class-assistant-last-selected-class-id',
+  CLASS_GROUPS: 'class-assistant-groups',
+  CLASS_GROUP_MEMBERS: 'class-assistant-group-members',
+  CLASS_POINT_EVENTS: 'class-assistant-point-events',
   // 后台用户管理（本地测试）
   ADMIN_USERS: 'admin-panel-users',
 } as const;

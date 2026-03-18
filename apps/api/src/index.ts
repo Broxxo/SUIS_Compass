@@ -10,6 +10,7 @@ import settingsRoutes from './routes/settings.js';
 import aiRoutes from './routes/ai.js';
 import adminRoutes from './routes/admin.js';
 import classesRoutes from './routes/classes.js';
+import classAssistantRoutes from './routes/classAssistant.js';
 import { requireValidUser } from './middleware/requireUser.js';
 
 dotenv.config();
@@ -29,6 +30,7 @@ app.use('/api/semester', requireValidUser, semesterRoutes);
 app.use('/api/settings', requireValidUser, settingsRoutes);
 app.use('/api/ai', requireValidUser, aiRoutes);
 app.use('/api/admin', requireValidUser, adminRoutes);
+app.use('/api/classes/assistant', requireValidUser, classAssistantRoutes);
 app.use('/api/classes', requireValidUser, classesRoutes);
 
 app.get('/health', (_, res) => {

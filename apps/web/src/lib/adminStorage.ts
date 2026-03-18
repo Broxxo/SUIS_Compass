@@ -101,6 +101,7 @@ export async function createUser(input: {
       return { ...created, password: input.password };
     } catch (e) {
       logError('createUser to cloud', e);
+      throw e;
     }
   }
   return user;

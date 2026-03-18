@@ -20,7 +20,6 @@ import {
   Send,
   User,
   Bot,
-  ArrowLeft,
   Loader2,
   Paperclip,
   Globe,
@@ -32,6 +31,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
+import AppTopBar from './AppTopBar';
 
 const CHAT_LIST_KEY = 'ai-chat-list';
 const CHAT_MSGS_PREFIX = 'ai-chat-msgs-';
@@ -129,9 +129,9 @@ interface AIPanelProps {
   onClose: () => void;
 }
 
-export default function AIPanel({ fullScreen: _fullScreen, fromHub, onClose }: AIPanelProps) {
+export default function AIPanel({ fullScreen: _fullScreen, fromHub: _fromHub, onClose }: AIPanelProps) {
   const { user } = useAuth();
-  const { t, language } = useLanguage();
+  const { t, language, setLanguage } = useLanguage();
   const { screenId, setScreenId, contextPayload, setContextPayload } = useAIContext();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [enableWeb, setEnableWeb] = useState(false);
@@ -371,32 +371,25 @@ export default function AIPanel({ fullScreen: _fullScreen, fromHub, onClose }: A
 
   const content = (
     <div className="flex flex-col h-full bg-white">
-      {/* Top bar: 返回（左）+ SUIS AI（中）+ 占位（右） */}
-      <div className="flex-shrink-0 h-14 border-b border-slate-200 grid grid-cols-3 items-center px-4">
-        <div className="flex justify-start">
-          {fromHub && (
-            <Button variant="outline" size="icon" onClick={onClose} className="h-9 w-9 rounded-lg" title={t('ai.panel.back')}>
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          )}
-        </div>
-        <span className="font-semibold text-slate-800 text-center">SUIS AI</span>
-        <div className="flex justify-end">
-          {!fromHub && (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onClose}
-              className="h-9 w-9 rounded-lg text-slate-500 hover:text-slate-700"
-              title={isZh ? '关闭' : 'Close'}
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          )}
-        </div>
-      </div>
+      {/* 统一使用 AppTopBar，与其他入口一致 */}
+      <AppTopBar
+        title="SUIS AI"
+        showBack
+        onBack={onClose}
+        rightChildren={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setLanguage(isZh ? 'en' : 'zh')}
+            className="h-9 rounded-lg px-3 min-w-[2.5rem]"
+            title={isZh ? 'Switch to English' : '切换到中文'}
+          >
+            {isZh ? 'EN' : '中'}
+          </Button>
+        }
+      />
 
-      <div className="flex flex-1 min-h-0 relative">
+      <div className="flex flex-1 min-h-0 relative pt-14">
         {/* 抽屉打开时的遮罩，点击关闭；过渡与抽屉一致，主界面不参与布局 */}
         <div
           role="button"

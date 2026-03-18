@@ -8,6 +8,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { AIContextProvider, useAIContext } from './contexts/AIContext'
 import AdminPanel from './components/AdminPanel'
 import ClassManagement from './components/ClassManagement'
+import ClassAssistant from './components/ClassAssistant'
 
 type HubView = 'suis-ai' | 'curriculum-roadmap' | 'student-portrait' | 'class-assistant' | 'class-management' | 'admin';
 
@@ -43,7 +44,7 @@ function AppContent() {
         delete win.__openAdminPanel;
       }
     };
-  }, []);
+  }, [user?.role]);
 
   // 登录 / 注销 或角色变化时，重置视图，防止教师继承上一次的 admin 视图
   useEffect(() => {
@@ -129,6 +130,10 @@ function AppContent() {
         hideYearGear
       />
     );
+  }
+
+  if (view === 'class-assistant') {
+    return <ClassAssistant onBackToHub={() => setView('hub')} />
   }
 
   // 其他入口暂未实现

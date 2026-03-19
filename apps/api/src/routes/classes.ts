@@ -3,6 +3,35 @@ import pool from '../config/database.js';
 
 type ReqWithUserId = Request & { userId?: string };
 
+function createId(prefix: string) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+let ensuredClassTeacherAssignments = false;
+async function ensureClassTeacherAssignmentsTable(): Promise<void> {
+  if (ensuredClassTeacherAssignments) return;
+  // Local dev DB may not have run the latest migration yet; keep endpoints functional.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS class_teacher_assignments (
+      id VARCHAR(80) PRIMARY KEY,
+      class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+      teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role VARCHAR(30) NOT NULL DEFAULT 'co-teacher',
+      assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      unassigned_at TIMESTAMP
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_class_active
+      ON class_teacher_assignments(class_id) WHERE unassigned_at IS NULL;
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_teacher_active
+      ON class_teacher_assignments(teacher_id) WHERE unassigned_at IS NULL;
+  `);
+  ensuredClassTeacherAssignments = true;
+}
+
 async function isAdmin(req: ReqWithUserId): Promise<boolean> {
   const userId = req.userId;
   if (!userId) return false;
@@ -148,6 +177,7 @@ router.delete('/academic-years/:yearId', requireSystemAdmin(async (req: ReqWithU
 // ---------- 班级 ----------
 router.get('/', async (req: ReqWithUserId, res: Response) => {
   try {
+    await ensureClassTeacherAssignmentsTable();
     const academicYearId = req.query.academicYearId as string | undefined;
     let sql = 'SELECT id, academic_year_id, grade, name, teacher_id FROM classes';
     const params: string[] = [];
@@ -157,13 +187,36 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
     }
     sql += ' ORDER BY grade ASC, name ASC';
     const result = await pool.query(sql, params.length ? params : undefined);
-    const classes = result.rows.map((r) => ({
-      id: r.id,
-      academicYearId: r.academic_year_id,
-      grade: r.grade,
-      name: r.name,
-      teacherId: r.teacher_id,
-    }));
+    const classIds = result.rows.map((r) => r.id as string);
+    const teacherMap = new Map<string, string[]>();
+    if (classIds.length) {
+      const assigns = await pool.query(
+        `SELECT class_id, teacher_id
+         FROM class_teacher_assignments
+         WHERE class_id = ANY($1::varchar[]) AND unassigned_at IS NULL`,
+        [classIds]
+      );
+      for (const row of assigns.rows) {
+        const cid = row.class_id as string;
+        const tid = row.teacher_id as string;
+        const arr = teacherMap.get(cid) ?? [];
+        arr.push(tid);
+        teacherMap.set(cid, arr);
+      }
+    }
+    const classes = result.rows.map((r) => {
+      const legacyTeacherId = (r.teacher_id as string | null) ?? null;
+      const assigned = teacherMap.get(r.id as string) ?? [];
+      const teacherIds = legacyTeacherId && !assigned.includes(legacyTeacherId) ? [legacyTeacherId, ...assigned] : assigned;
+      return {
+        id: r.id,
+        academicYearId: r.academic_year_id,
+        grade: r.grade,
+        name: r.name,
+        teacherId: legacyTeacherId,
+        teacherIds,
+      };
+    });
     res.json({ classes });
   } catch (e) {
     console.error('get classes', e);
@@ -173,15 +226,94 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
 
 router.post('/', requireAdmin(async (req: ReqWithUserId, res: Response) => {
   try {
+    await ensureClassTeacherAssignmentsTable();
     const { id, academicYearId, grade, name, teacherId } = req.body || {};
     if (!id || !academicYearId || grade == null || !name) { res.status(400).json({ error: 'id, academicYearId, grade, name required' }); return; }
     await pool.query(
       'INSERT INTO classes (id, academic_year_id, grade, name, teacher_id) VALUES ($1, $2, $3, $4, $5)',
       [id, academicYearId, Number(grade), name, teacherId || null]
     );
+    if (teacherId) {
+      await pool.query(
+        `INSERT INTO class_teacher_assignments (id, class_id, teacher_id, role)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO NOTHING`,
+        [createId('cta'), id, teacherId, 'homeroom']
+      );
+    }
     res.status(201).json({ id, academicYearId, grade: Number(grade), name, teacherId: teacherId || null });
   } catch (e) {
     console.error('post class', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+// ---------- 班级-教师关联 ----------
+router.get('/:classId/teachers', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureClassTeacherAssignmentsTable();
+    const { classId } = req.params;
+    if (!classId) { res.status(400).json({ error: 'classId required' }); return; }
+    const result = await pool.query(
+      `SELECT a.teacher_id, a.role, u.display_name
+       FROM class_teacher_assignments a
+       JOIN users u ON u.id = a.teacher_id
+       WHERE a.class_id = $1 AND a.unassigned_at IS NULL
+       ORDER BY CASE WHEN a.role = 'homeroom' THEN 0 ELSE 1 END, u.display_name ASC`,
+      [classId]
+    );
+    const teachers = result.rows.map((r) => ({
+      teacherId: r.teacher_id,
+      role: r.role,
+      displayName: r.display_name,
+    }));
+    res.json({ teachers });
+  } catch (e) {
+    console.error('get class teachers', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/:classId/teachers', requireAdmin(async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureClassTeacherAssignmentsTable();
+    const { classId } = req.params;
+    const { teacherId, role } = req.body || {};
+    if (!classId || !teacherId) { res.status(400).json({ error: 'classId, teacherId required' }); return; }
+    const normalizedRole = (role as string | undefined) ?? 'co-teacher';
+    await pool.query(
+      `UPDATE class_teacher_assignments
+       SET unassigned_at = CURRENT_TIMESTAMP
+       WHERE class_id = $1 AND teacher_id = $2 AND unassigned_at IS NULL`,
+      [classId, teacherId]
+    );
+    const id = createId('cta');
+    await pool.query(
+      `INSERT INTO class_teacher_assignments (id, class_id, teacher_id, role)
+       VALUES ($1, $2, $3, $4)`,
+      [id, classId, teacherId, normalizedRole]
+    );
+    res.status(201).json({ id, classId, teacherId, role: normalizedRole });
+  } catch (e) {
+    console.error('post class teacher assignment', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+router.delete('/:classId/teachers/:teacherId', requireAdmin(async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureClassTeacherAssignmentsTable();
+    const { classId, teacherId } = req.params;
+    if (!classId || !teacherId) { res.status(400).json({ error: 'classId, teacherId required' }); return; }
+    await pool.query(
+      `UPDATE class_teacher_assignments
+       SET unassigned_at = CURRENT_TIMESTAMP
+       WHERE class_id = $1 AND teacher_id = $2 AND unassigned_at IS NULL`,
+      [classId, teacherId]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    console.error('delete class teacher assignment', e);
     res.status(500).json({ error: 'Internal server error' });
   }
 }));

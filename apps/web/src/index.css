@@ -68,6 +68,19 @@
 }
 
 @layer utilities {
+  /* HUB edit mode jiggle (iOS-like) */
+  @keyframes hub-jiggle {
+    0% { transform: rotate(-1.2deg); }
+    50% { transform: rotate(1.2deg); }
+    100% { transform: rotate(-1.2deg); }
+  }
+
+  .hub-jiggle {
+    /* slower, closer to iOS home screen */
+    animation: hub-jiggle 0.26s ease-in-out infinite;
+    transform-origin: 50% 60%;
+  }
+
   /* Torn edge effect for bookmark */
   .torn-edge {
     position: relative;

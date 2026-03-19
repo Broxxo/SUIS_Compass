@@ -26,12 +26,17 @@ import {
   deleteClass,
   addEnrollment,
   removeEnrollment,
+  loadClassTeachersLocalSync,
+  assignTeacherToClassLocal,
+  unassignTeacherFromClassLocal,
+  getTeacherIdsForClassLocalSync,
 } from '../lib/classStorage';
 import { loadUsers } from '../lib/adminStorage';
 import type { AdminUser } from '../lib/adminStorage';
 import { ChevronDown, ChevronRight, Plus, Settings, Trash2, UserMinus } from 'lucide-react';
 import { GRADES } from '../lib/constants';
 import CreateStudentDialog from './CreateStudentDialog';
+import { api, USE_CLOUD_STORAGE } from '../lib/api';
 
 interface ClassManagementProps {
   onBackToHub: () => void;
@@ -75,11 +80,22 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const [teachers, setTeachers] = useState<AdminUser[]>([]);
   const [newClassTeacherId, setNewClassTeacherId] = useState<string>('');
+  const [classTeachers, setClassTeachers] = useState<Record<string, { teacherId: string; role: string; displayName: string }[]>>({});
+  const [assignTeacherClass, setAssignTeacherClass] = useState<ClassItem | null>(null);
+  const [assignTeacherTeacherId, setAssignTeacherTeacherId] = useState('');
+  const [assignTeacherRole, setAssignTeacherRole] = useState<'homeroom' | 'co-teacher'>('co-teacher');
 
   /** 我的班级下教师仅看与自己关联的班级；管理员看全部 */
   const displayedClasses = useMemo(() => {
     if (!isTeacherOnly || !user?.id) return classes;
-    return classes.filter((c) => c.teacherId === user.id);
+    return classes.filter((c) => {
+      const ids = c.teacherIds ?? (c.teacherId ? [c.teacherId] : []);
+      if (ids.includes(user.id)) return true;
+      if (!USE_CLOUD_STORAGE) {
+        return getTeacherIdsForClassLocalSync(c.id).includes(user.id);
+      }
+      return false;
+    });
   }, [classes, isTeacherOnly, user?.id]);
 
   /** 是否可编辑（管理员可编辑；我的班级下教师只读） */
@@ -119,6 +135,26 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
     setClasses(cls);
     setEnrollments(loadEnrollmentsSync(currentYearId));
   }, [currentYearId]);
+
+  useEffect(() => {
+    if (!canEdit) return;
+    const classId = expandedClassId;
+    if (!classId) return;
+    if (USE_CLOUD_STORAGE) {
+      api.getClassTeachers(classId)
+        .then((list) => setClassTeachers((prev) => ({ ...prev, [classId]: list })))
+        .catch(() => {});
+      return;
+    }
+    setClassTeachers((prev) => ({
+      ...prev,
+      [classId]: loadClassTeachersLocalSync(classId).map((t) => ({
+        teacherId: t.teacherId,
+        role: t.role,
+        displayName: t.displayName || teachers.find((u) => u.id === t.teacherId)?.displayName || '',
+      })),
+    }));
+  }, [canEdit, expandedClassId]);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -406,43 +442,116 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                         )}
                       </div>
                       {expanded && (
-                        <div className="px-3 py-2 border-t border-slate-100">
-                          {canEdit && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="mb-2"
-                              onClick={() => setDialogAddStudent(c)}
-                            >
-                              <Plus className="h-3.5 w-3.5 mr-1" />
-                              {isZh ? '添加学生' : 'Add student'}
-                            </Button>
-                          )}
-                          {enrolls.length === 0 ? (
-                            <p className="text-sm text-slate-500">{isZh ? '暂无学生。' : 'No students.'}</p>
-                          ) : (
-                            <ul className="space-y-1">
-                              {enrolls.map((e) => {
-                                const stu = getStudent(e.studentId);
-                                if (!stu) return null;
-                                return (
-                                  <li key={e.id} className="flex items-center justify-between py-1.5 text-sm">
-                                    <span>{stu.name} {stu.studentNumber ? `(${stu.studentNumber})` : ''} · {stu.gender === 'male' ? (isZh ? '男' : 'M') : stu.gender === 'female' ? (isZh ? '女' : 'F') : (isZh ? '其他' : 'Other')}</span>
-                                    {canEdit && (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleRemoveFromClass(e)}
-                                        className="text-slate-500 hover:text-amber-600"
-                                        title={isZh ? '从本班移除' : 'Remove from class'}
-                                      >
-                                        <UserMinus className="h-4 w-4" />
-                                      </button>
-                                    )}
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          )}
+                        <div className="px-3 py-2 border-t border-slate-100 space-y-3">
+                          {/* 教师：更醒目，突出班主任 */}
+                          <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-xs font-semibold text-amber-900">
+                                  {isZh ? '班级教师' : 'Teachers'}
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {(classTeachers[c.id] ?? []).length === 0 ? (
+                                    <span className="text-xs text-amber-900/70">{isZh ? '暂无关联教师' : 'No teachers assigned'}</span>
+                                  ) : (
+                                    [...(classTeachers[c.id] ?? [])]
+                                      .sort((a, b) => (a.role === 'homeroom' ? -1 : 1) - (b.role === 'homeroom' ? -1 : 1))
+                                      .map((t) => {
+                                        const isHomeroom = t.role === 'homeroom';
+                                        return (
+                                          <span
+                                            key={t.teacherId}
+                                            className={
+                                              isHomeroom
+                                                ? 'inline-flex items-center gap-1 rounded-full bg-amber-600 text-white px-2.5 py-1 text-xs font-semibold shadow-sm'
+                                                : 'inline-flex items-center gap-1 rounded-full bg-white text-amber-900 px-2.5 py-1 text-xs font-medium border border-amber-200'
+                                            }
+                                            title={isHomeroom ? (isZh ? '班主任/负责人' : 'Homeroom') : (isZh ? '任课教师' : 'Co-teacher')}
+                                          >
+                                            {isHomeroom && (
+                                              <span className="rounded-full bg-white/20 px-1 py-0.5 text-[10px]">
+                                                {isZh ? '班主任' : 'HR'}
+                                              </span>
+                                            )}
+                                            <span className="truncate max-w-[220px]">{t.displayName}</span>
+                                          </span>
+                                        );
+                                      })
+                                  )}
+                                </div>
+                              </div>
+                              {canEdit && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 text-xs border-amber-300 text-amber-900 hover:bg-amber-100"
+                                  onClick={() => {
+                                    setAssignTeacherClass(c);
+                                    setAssignTeacherTeacherId('');
+                                    setAssignTeacherRole('co-teacher');
+                                  }}
+                                >
+                                  {isZh ? '关联教师' : 'Assign'}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 学生：更紧凑，网格排布 */}
+                          <div className="rounded-xl border border-slate-200 bg-white p-3">
+                            <div className="flex items-center justify-between gap-2 mb-2">
+                              <div className="text-xs font-semibold text-slate-800">
+                                {isZh ? '学生' : 'Students'} <span className="text-slate-500 font-medium">({enrolls.length})</span>
+                              </div>
+                              {canEdit && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 text-xs"
+                                  onClick={() => setDialogAddStudent(c)}
+                                >
+                                  <Plus className="h-3.5 w-3.5 mr-1" />
+                                  {isZh ? '添加' : 'Add'}
+                                </Button>
+                              )}
+                            </div>
+                            {enrolls.length === 0 ? (
+                              <p className="text-sm text-slate-500">{isZh ? '暂无学生。' : 'No students.'}</p>
+                            ) : (
+                              <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
+                                {enrolls.map((e) => {
+                                  const stu = getStudent(e.studentId);
+                                  if (!stu) return null;
+                                  const genderLabel = stu.gender === 'male' ? (isZh ? '男' : 'M') : stu.gender === 'female' ? (isZh ? '女' : 'F') : (isZh ? '其他' : 'Other');
+                                  return (
+                                    <li
+                                      key={e.id}
+                                      className="group flex items-center justify-between gap-2 py-1 text-sm"
+                                    >
+                                      <span className="min-w-0 truncate text-slate-800">
+                                        {stu.name}
+                                        <span className="text-slate-400"> · </span>
+                                        <span className="text-slate-600">{genderLabel}</span>
+                                        {stu.studentNumber ? (
+                                          <span className="text-slate-400"> ({stu.studentNumber})</span>
+                                        ) : null}
+                                      </span>
+                                      {canEdit && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRemoveFromClass(e)}
+                                          className="opacity-70 group-hover:opacity-100 text-slate-400 hover:text-amber-700"
+                                          title={isZh ? '从本班移除' : 'Remove from class'}
+                                        >
+                                          <UserMinus className="h-4 w-4" />
+                                        </button>
+                                      )}
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            )}
+                          </div>
                         </div>
                       )}
                     </li>
@@ -625,6 +734,150 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogYearManagement(false)}>{isZh ? '关闭' : 'Close'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!assignTeacherClass} onOpenChange={(open) => !open && setAssignTeacherClass(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{isZh ? '关联教师' : 'Assign teacher'}</DialogTitle>
+            <DialogDescription>
+              {assignTeacherClass
+                ? (isZh ? `为「G${assignTeacherClass.grade} ${assignTeacherClass.name}」关联教师（关联后教师可在“我的班级”看到并使用课堂助手）`
+                  : `Assign teachers to "G${assignTeacherClass.grade} ${assignTeacherClass.name}"`)
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {assignTeacherClass && (
+            <div className="space-y-2">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择教师' : 'Teacher'}</label>
+                <select
+                  value={assignTeacherTeacherId}
+                  onChange={(e) => setAssignTeacherTeacherId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
+                >
+                  <option value="">—</option>
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id}>{t.displayName || t.username}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '角色' : 'Role'}</label>
+                <select
+                  value={assignTeacherRole}
+                  onChange={(e) => setAssignTeacherRole(e.target.value as 'homeroom' | 'co-teacher')}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
+                >
+                  <option value="homeroom">{isZh ? '班主任/负责人' : 'Homeroom'}</option>
+                  <option value="co-teacher">{isZh ? '任课教师' : 'Co-teacher'}</option>
+                </select>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-xs font-medium text-slate-700 mb-2">{isZh ? '当前已关联' : 'Currently assigned'}</div>
+                {(classTeachers[assignTeacherClass.id] ?? []).length === 0 ? (
+                  <div className="text-xs text-slate-500">{isZh ? '暂无关联教师。' : 'No teachers assigned.'}</div>
+                ) : (
+                  <ul className="space-y-1">
+                    {(classTeachers[assignTeacherClass.id] ?? []).map((t) => (
+                      <li key={t.teacherId} className="flex items-center justify-between gap-2 text-sm">
+                        <span className="text-slate-700">
+                          {t.displayName}
+                          <span className="ml-1 text-xs text-slate-500">
+                            ({t.role === 'homeroom' ? (isZh ? '负责人' : 'Homeroom') : (isZh ? '任课' : 'Co')})
+                          </span>
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          onClick={async () => {
+                            if (!canEdit) return;
+                            try {
+                              if (USE_CLOUD_STORAGE) {
+                                await api.removeClassTeacher(assignTeacherClass.id, t.teacherId);
+                                const list = await api.getClassTeachers(assignTeacherClass.id);
+                                setClassTeachers((prev) => ({ ...prev, [assignTeacherClass.id]: list }));
+                              } else {
+                                unassignTeacherFromClassLocal(assignTeacherClass.id, t.teacherId);
+                                const list = loadClassTeachersLocalSync(assignTeacherClass.id).map((x) => ({
+                                  teacherId: x.teacherId,
+                                  role: x.role,
+                                  displayName: x.displayName || teachers.find((u) => u.id === x.teacherId)?.displayName || '',
+                                }));
+                                setClassTeachers((prev) => ({ ...prev, [assignTeacherClass.id]: list }));
+                              }
+                              if (currentYearId) setClasses(loadClassesSync(currentYearId));
+                            } catch (e: unknown) {
+                              const msg = (e as Error)?.message || 'Failed to remove teacher';
+                              setError(
+                                msg.includes('404')
+                                  ? (isZh
+                                      ? '后端接口未找到（404）。请确认后端已部署包含“班级关联教师”接口的版本。'
+                                      : 'API endpoint not found (404). Deploy backend with class-teacher endpoints.')
+                                  : msg
+                              );
+                            }
+                          }}
+                        >
+                          {isZh ? '取消关联' : 'Unassign'}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAssignTeacherClass(null)}>{isZh ? '关闭' : 'Close'}</Button>
+            <Button
+              onClick={async () => {
+                if (!assignTeacherClass || !assignTeacherTeacherId) return;
+                setSubmitLoading(true);
+                setError(null);
+                try {
+                  if (USE_CLOUD_STORAGE) {
+                    await api.addClassTeacher(assignTeacherClass.id, { teacherId: assignTeacherTeacherId, role: assignTeacherRole });
+                    const list = await api.getClassTeachers(assignTeacherClass.id);
+                    setClassTeachers((prev) => ({ ...prev, [assignTeacherClass.id]: list }));
+                  } else {
+                    const teacher = teachers.find((t) => t.id === assignTeacherTeacherId);
+                    assignTeacherToClassLocal(assignTeacherClass.id, {
+                      teacherId: assignTeacherTeacherId,
+                      role: assignTeacherRole,
+                      displayName: teacher?.displayName || teacher?.username || null,
+                    });
+                    const list = loadClassTeachersLocalSync(assignTeacherClass.id).map((x) => ({
+                      teacherId: x.teacherId,
+                      role: x.role,
+                      displayName: x.displayName || teachers.find((u) => u.id === x.teacherId)?.displayName || '',
+                    }));
+                    setClassTeachers((prev) => ({ ...prev, [assignTeacherClass.id]: list }));
+                  }
+                  if (currentYearId) setClasses(loadClassesSync(currentYearId));
+                  setAssignTeacherTeacherId('');
+                  setAssignTeacherRole('co-teacher');
+                } catch (e: unknown) {
+                  const msg = (e as Error)?.message || 'Failed to assign teacher';
+                  setError(
+                    msg.includes('404')
+                      ? (isZh
+                          ? '后端接口未找到（404）。请确认后端已部署包含“班级关联教师”接口的版本。'
+                          : 'API endpoint not found (404). Deploy backend with class-teacher endpoints.')
+                      : msg
+                  );
+                } finally {
+                  setSubmitLoading(false);
+                }
+              }}
+              disabled={!assignTeacherClass || !assignTeacherTeacherId || submitLoading}
+            >
+              {submitLoading ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存关联' : 'Save'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

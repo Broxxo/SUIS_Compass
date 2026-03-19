@@ -70,6 +70,7 @@ export const STORAGE_KEYS = {
   CLASSES: 'class-mgmt-classes',
   STUDENTS: 'class-mgmt-students',
   ENROLLMENTS: 'class-mgmt-enrollments',
+  CLASS_TEACHER_ASSIGNMENTS: 'class-mgmt-class-teacher-assignments',
   // 课堂助手：小组与积分事件（全校共享）
   CLASS_GROUP_SCHEMES: 'class-assistant-group-schemes',
   LAST_SELECTED_CLASS_ID: 'class-assistant-last-selected-class-id',

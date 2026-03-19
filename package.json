@@ -1,7 +1,7 @@
 {
   "name": "curriculum-roadmap",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.5",
   "type": "module",
   "scripts": {
     "build": "npm run build:shared && npm run build:web && npm run copy:web && npm run build -w @repo/api",

@@ -18,6 +18,13 @@ import { getCurrentUserId } from './authUtils';
 import { api, USE_CLOUD_STORAGE } from './api';
 import { logError } from './errorHandler';
 
+export type LocalClassTeacherAssignment = {
+  classId: string;
+  teacherId: string;
+  role: 'homeroom' | 'co-teacher';
+  displayName?: string | null;
+};
+
 /** 班级管理存储 key：始终全校共用，不按用户分（本地与服务器端一致） */
 function getClassStorageKey(baseKey: string): string {
   return baseKey;
@@ -259,6 +266,54 @@ function saveAllEnrollmentsLocal(enrollments: Enrollment[]): void {
   localStorage.setItem(key, JSON.stringify(enrollments));
 }
 
+// ---------- 班级-教师关联（本地模式） ----------
+function loadAllClassTeacherAssignmentsLocal(): LocalClassTeacherAssignment[] {
+  migrateFromLegacyUserKeyIfNeeded(STORAGE_KEYS.CLASS_TEACHER_ASSIGNMENTS);
+  const key = getClassStorageKey(STORAGE_KEYS.CLASS_TEACHER_ASSIGNMENTS);
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as LocalClassTeacherAssignment[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAllClassTeacherAssignmentsLocal(assignments: LocalClassTeacherAssignment[]): void {
+  const key = getClassStorageKey(STORAGE_KEYS.CLASS_TEACHER_ASSIGNMENTS);
+  try {
+    localStorage.setItem(key, JSON.stringify(assignments));
+  } catch (_) {}
+}
+
+export function loadClassTeachersLocalSync(classId: string): LocalClassTeacherAssignment[] {
+  return loadAllClassTeacherAssignmentsLocal()
+    .filter((a) => a.classId === classId)
+    .sort((a, b) => (a.role === 'homeroom' ? -1 : 1) - (b.role === 'homeroom' ? -1 : 1));
+}
+
+export function assignTeacherToClassLocal(
+  classId: string,
+  teacher: { teacherId: string; role: 'homeroom' | 'co-teacher'; displayName?: string | null }
+): void {
+  const all = loadAllClassTeacherAssignmentsLocal();
+  const filtered = all.filter((a) => !(a.classId === classId && a.teacherId === teacher.teacherId));
+  filtered.push({ classId, teacherId: teacher.teacherId, role: teacher.role, displayName: teacher.displayName ?? null });
+  saveAllClassTeacherAssignmentsLocal(filtered);
+}
+
+export function unassignTeacherFromClassLocal(classId: string, teacherId: string): void {
+  const all = loadAllClassTeacherAssignmentsLocal();
+  saveAllClassTeacherAssignmentsLocal(all.filter((a) => !(a.classId === classId && a.teacherId === teacherId)));
+}
+
+export function getTeacherIdsForClassLocalSync(classId: string): string[] {
+  return loadAllClassTeacherAssignmentsLocal()
+    .filter((a) => a.classId === classId)
+    .map((a) => a.teacherId);
+}
+
 // ---------- 创建/删除（统一走本地 + 可选云端） ----------
 export async function createAcademicYear(year: AcademicYear): Promise<AcademicYear> {
   const years = loadAcademicYearsSync();
@@ -349,6 +404,11 @@ export async function deleteClass(classId: string): Promise<void> {
   } catch (_) {}
   enrollments = enrollments.filter((e) => e.classId !== classId);
   saveAllEnrollmentsLocal(enrollments);
+  // also clean local teacher assignments
+  if (!USE_CLOUD_STORAGE) {
+    const assigns = loadAllClassTeacherAssignmentsLocal();
+    saveAllClassTeacherAssignmentsLocal(assigns.filter((a) => a.classId !== classId));
+  }
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
       await api.deleteClass(classId);

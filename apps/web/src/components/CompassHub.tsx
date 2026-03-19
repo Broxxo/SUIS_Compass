@@ -1,20 +1,292 @@
 /**
  * SUIS COMPASS 主入口：16 单位网格，2x2 与 1x1 入口错落排布，随窗口自适应。
  */
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  TouchSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragOverEvent,
+  type DragEndEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  arrayMove,
+  defaultAnimateLayoutChanges,
+  rectSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { restrictToParentElement } from '@dnd-kit/modifiers';
 import { useLanguage } from '../contexts/LanguageContext';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 
-type HubView = 'suis-ai' | 'curriculum-roadmap' | 'student-portrait' | 'class-assistant' | 'class-management';
-
-const GRID_COLS = 4;
-const GRID_ROWS = 4;
+type HubView =
+  | 'suis-ai'
+  | 'curriculum-roadmap'
+  | 'student-portrait'
+  | 'teacher-portrait'
+  | 'class-assistant'
+  | 'class-management';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
 const tileBase =
   'rounded-2xl flex flex-col items-center justify-center text-white font-semibold transition-all duration-200 ' +
   'border border-white/20 shadow-lg hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 active:shadow-md ' +
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-400';
+
+type HubTileId =
+  | 'class-management'
+  | 'class-assistant'
+  | 'suis-ai'
+  | 'curriculum-roadmap'
+  | 'student-portrait'
+  | 'teacher-portrait'
+  | `placeholder-${number}`;
+
+type HubTile = {
+  id: HubTileId;
+  kind: 'app' | 'placeholder';
+  view?: HubView;
+  spanX: 1 | 2;
+  spanY: 1 | 2;
+  /** 1x1 小格字体、2x2 大格字体分别控制 */
+  fontSize: string;
+  className?: string;
+  style?: React.CSSProperties;
+  renderLabel?: (isZh: boolean) => React.ReactNode;
+};
+
+const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v2';
+
+function reorderBySavedIds<T extends { id: string }>(items: T[], savedIds: string[] | null) {
+  if (!savedIds || savedIds.length === 0) return items;
+  const map = new Map(items.map((x) => [x.id, x] as const));
+  const result: T[] = [];
+  for (const id of savedIds) {
+    const hit = map.get(id);
+    if (hit) {
+      result.push(hit);
+      map.delete(id);
+    }
+  }
+  // append any new items
+  for (const x of items) {
+    if (map.has(x.id)) result.push(x);
+  }
+  return result;
+}
+
+type PackedPos = {
+  col: number; // 1-based
+  row: number; // 1-based
+  spanX: 1 | 2;
+  spanY: 1 | 2;
+};
+
+function packTilesIntoGrid(tiles: HubTile[], columns: number, rows: number): Map<HubTileId, PackedPos> | null {
+  const out = new Map<HubTileId, PackedPos>();
+  const occ: boolean[][] = Array.from({ length: rows }, () => Array.from({ length: columns }, () => false));
+
+  const canPlace = (r: number, c: number, spanX: number, spanY: number) => {
+    if (c + spanX > columns) return false;
+    if (r + spanY > rows) return false;
+    for (let rr = r; rr < r + spanY; rr++) {
+      for (let cc = c; cc < c + spanX; cc++) {
+        if (occ[rr][cc]) return false;
+      }
+    }
+    return true;
+  };
+
+  const mark = (r: number, c: number, spanX: number, spanY: number, v: boolean) => {
+    for (let rr = r; rr < r + spanY; rr++) {
+      for (let cc = c; cc < c + spanX; cc++) {
+        occ[rr][cc] = v;
+      }
+    }
+  };
+
+  const candidates: Array<{ r: number; c: number }> = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < columns; c++) {
+      candidates.push({ r, c });
+    }
+  }
+
+  // Order-sensitive backtracking: place tiles in the same order as `tiles`.
+  // This is what makes a 2x2 tile able to "insert" into a region of 1x1 tiles after reordering.
+  const placeAtIndex = (i: number): boolean => {
+    if (i >= tiles.length) return true;
+    const t = tiles[i];
+    const spanX = t.spanX;
+    const spanY = t.spanY;
+
+    for (const { r, c } of candidates) {
+      if (!canPlace(r, c, spanX, spanY)) continue;
+      mark(r, c, spanX, spanY, true);
+      out.set(t.id, { row: r + 1, col: c + 1, spanX, spanY });
+      if (placeAtIndex(i + 1)) return true;
+      out.delete(t.id);
+      mark(r, c, spanX, spanY, false);
+    }
+    return false;
+  };
+
+  if (!placeAtIndex(0)) return null;
+  return out;
+}
+
+function useLongPress(options: { delayMs: number; tolerancePx: number; onLongPress: () => void }) {
+  const { delayMs, tolerancePx, onLongPress } = options;
+  const timerRef = useRef<number | null>(null);
+  const startRef = useRef<{ x: number; y: number } | null>(null);
+  const firedRef = useRef(false);
+
+  const clear = () => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    startRef.current = null;
+    firedRef.current = false;
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    firedRef.current = false;
+    startRef.current = { x: e.clientX, y: e.clientY };
+    timerRef.current = window.setTimeout(() => {
+      firedRef.current = true;
+      onLongPress();
+    }, delayMs);
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!startRef.current || firedRef.current) return;
+    const dx = e.clientX - startRef.current.x;
+    const dy = e.clientY - startRef.current.y;
+    if (Math.hypot(dx, dy) > tolerancePx) {
+      clear();
+    }
+  };
+
+  const onPointerUp = () => clear();
+  const onPointerCancel = () => clear();
+
+  return { onPointerDown, onPointerMove, onPointerUp, onPointerCancel };
+}
+
+function SortableTile({
+  tile,
+  isZh,
+  editing,
+  activeId,
+  packed,
+  onClick,
+  onLongPress,
+}: {
+  tile: HubTile;
+  isZh: boolean;
+  editing: boolean;
+  activeId: HubTileId | null;
+  packed: PackedPos;
+  onClick?: () => void;
+  onLongPress: (tileId: HubTileId) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: tile.id,
+    disabled: !editing,
+    animateLayoutChanges: (args) => {
+      // smoother reflow when sorting in a dense grid
+      return defaultAnimateLayoutChanges({
+        ...args,
+        wasDragging: true,
+      });
+    },
+  });
+
+  const longPress = useLongPress({
+    delayMs: 380,
+    tolerancePx: 8,
+    onLongPress: () => onLongPress(tile.id),
+  });
+
+  const dndStyle: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition: transition ?? 'transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)',
+    zIndex: isDragging ? 50 : undefined,
+    willChange: 'transform',
+    touchAction: 'none',
+  };
+
+  const baseStyle: React.CSSProperties = {
+    gridColumnStart: packed.col,
+    gridColumnEnd: `span ${packed.spanX}`,
+    gridRowStart: packed.row,
+    gridRowEnd: `span ${packed.spanY}`,
+    fontSize: tile.fontSize,
+    ...tile.style,
+  };
+
+  const commonClass =
+    (tile.kind === 'placeholder'
+      ? 'rounded-xl bg-slate-200/60 border border-slate-200'
+      : tileBase) +
+    ' select-none';
+
+  const jiggleClass =
+    editing && tile.kind === 'app' && tile.id !== activeId ? ' hub-jiggle' : '';
+
+  if (tile.kind === 'placeholder') {
+    return (
+      <div
+        ref={setNodeRef}
+        data-hub-tile
+        className={commonClass}
+        style={{
+          ...baseStyle,
+          ...dndStyle,
+          aspectRatio: '1',
+        }}
+        {...attributes}
+        {...(editing ? listeners : undefined)}
+        {...(!editing ? longPress : undefined)}
+        aria-hidden
+      />
+    );
+  }
+
+  return (
+    <button
+      ref={setNodeRef}
+      type="button"
+      onClick={onClick}
+      data-hub-tile
+      className={`${commonClass}${jiggleClass} ${tile.className ?? ''}`}
+      style={{
+        ...baseStyle,
+        ...dndStyle,
+      }}
+      {...attributes}
+      {...(editing ? listeners : undefined)}
+      {...(!editing ? longPress : undefined)}
+    >
+      {tile.renderLabel ? tile.renderLabel(isZh) : null}
+    </button>
+  );
+}
 
 export default function CompassHub({
   onNavigate,
@@ -23,6 +295,252 @@ export default function CompassHub({
 }) {
   const { language, setLanguage } = useLanguage();
   const isZh = language === 'zh';
+  const [editing, setEditing] = useState(false);
+  const [activeId, setActiveId] = useState<HubTileId | null>(null);
+  const lastOverIdRef = useRef<HubTileId | null>(null);
+
+  const [isPortrait, setIsPortrait] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return window.matchMedia('(orientation: portrait)').matches;
+  });
+
+  useEffect(() => {
+    const mql = window.matchMedia('(orientation: portrait)');
+    const handler = (e: MediaQueryListEvent) => setIsPortrait(e.matches);
+    // Safari fallback: addListener/removeListener
+    if ('addEventListener' in mql) mql.addEventListener('change', handler);
+    else (mql as any).addListener(handler);
+    setIsPortrait(mql.matches);
+    return () => {
+      if ('removeEventListener' in mql) mql.removeEventListener('change', handler);
+      else (mql as any).removeListener(handler);
+    };
+  }, []);
+
+  const columns = isPortrait ? 3 : 5;
+  const rows = isPortrait ? 5 : 3;
+
+  const defaultTiles: HubTile[] = useMemo(
+    () => [
+      {
+        id: 'class-management',
+        kind: 'app',
+        view: 'class-management',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%)',
+          boxShadow: '0 6px 16px -2px rgba(71, 85, 105, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '我的' : 'My'}</span>
+            <span>{zh ? '班级' : 'Classes'}</span>
+          </span>
+        ),
+      },
+      { id: 'placeholder-1', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+
+      {
+        id: 'class-assistant',
+        kind: 'app',
+        view: 'class-assistant',
+        spanX: 2,
+        spanY: 2,
+        fontSize: 'clamp(1.25rem, 3vw, 1.85rem)',
+        className: 'p-2 sm:p-4',
+        style: {
+          background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
+          boxShadow: '0 8px 24px -4px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '课堂' : 'Class'}</span>
+            <span>{zh ? '助手' : 'Assistant'}</span>
+          </span>
+        ),
+      },
+      {
+        id: 'suis-ai',
+        kind: 'app',
+        view: 'suis-ai',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #6366f1 0%, #7c3aed 50%, #6d28d9 100%)',
+          boxShadow: '0 6px 16px -2px rgba(99, 102, 241, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+        },
+        renderLabel: () => <span>SUIS AI</span>,
+      },
+      {
+        id: 'curriculum-roadmap',
+        kind: 'app',
+        view: 'curriculum-roadmap',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #0ea5e9 0%, #0284c7 50%, #0369a1 100%)',
+          boxShadow: '0 6px 16px -2px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '课程' : 'Curriculum'}</span>
+            <span>{zh ? '河流' : 'Roadmap'}</span>
+          </span>
+        ),
+      },
+      { id: 'placeholder-3', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+
+      {
+        id: 'student-portrait',
+        kind: 'app',
+        view: 'student-portrait',
+        spanX: 2,
+        spanY: 2,
+        fontSize: 'clamp(1.25rem, 3vw, 1.85rem)',
+        className: 'p-2 sm:p-4',
+        style: {
+          background: 'linear-gradient(145deg, #10b981 0%, #059669 50%, #047857 100%)',
+          boxShadow: '0 8px 24px -4px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '学生' : 'Student'}</span>
+            <span>{zh ? '画像' : 'Portrait'}</span>
+          </span>
+        ),
+      },
+      {
+        id: 'teacher-portrait',
+        kind: 'app',
+        view: 'teacher-portrait',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'aspect-square p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #ec4899 0%, #db2777 55%, #be185d 100%)',
+          boxShadow: '0 6px 16px -2px rgba(190, 24, 93, 0.35), inset 0 1px 0 rgba(255,255,255,0.22)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '教师' : 'Teacher'}</span>
+            <span>{zh ? '画像' : 'Portrait'}</span>
+          </span>
+        ),
+      },
+    ],
+    []
+  );
+
+  const [tiles, setTiles] = useState<HubTile[]>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem(HUB_LAYOUT_STORAGE_KEY) : null;
+      const saved = raw ? (JSON.parse(raw) as string[]) : null;
+      return reorderBySavedIds(defaultTiles, saved);
+    } catch {
+      return defaultTiles;
+    }
+  });
+
+  // Keep in sync when defaultTiles changes (unlikely), preserving user order.
+  useEffect(() => {
+    setTiles((prev) => {
+      const savedIds = prev.map((t) => t.id);
+      return reorderBySavedIds(defaultTiles, savedIds);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultTiles.length]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(HUB_LAYOUT_STORAGE_KEY, JSON.stringify(tiles.map((t) => t.id)));
+    } catch {
+      // ignore
+    }
+  }, [tiles]);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 120, tolerance: 6 } })
+  );
+
+  const onDragStart = (e: DragStartEvent) => {
+    if (!editing) setEditing(true);
+    setActiveId(e.active.id as HubTileId);
+  };
+
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    setActiveId(null);
+    const overId = (over?.id as HubTileId | undefined) ?? lastOverIdRef.current ?? null;
+    lastOverIdRef.current = null;
+    if (!overId) return;
+    if (active.id === overId) return;
+    setTiles((prev) => {
+      const oldIndex = prev.findIndex((t) => t.id === active.id);
+      const newIndex = prev.findIndex((t) => t.id === overId);
+      if (oldIndex === -1 || newIndex === -1) return prev;
+      return arrayMove(prev, oldIndex, newIndex);
+    });
+  };
+
+  const onDragCancel = () => setActiveId(null);
+
+  const onDragOver = (e: DragOverEvent) => {
+    if (e.over?.id) lastOverIdRef.current = e.over.id as HubTileId;
+  };
+
+  const handleLongPress = (tileId: HubTileId) => {
+    if (!editing) setEditing(true);
+    // If user long-presses a tile and then drags, DnD will take over.
+    setActiveId(tileId);
+  };
+
+  const activeTile = useMemo(() => tiles.find((t) => t.id === activeId) ?? null, [tiles, activeId]);
+
+  const lastGoodPackedRef = useRef<Map<HubTileId, PackedPos> | null>(null);
+  const packedMap = useMemo(() => {
+    const packed = packTilesIntoGrid(tiles, columns, rows);
+    if (packed) {
+      lastGoodPackedRef.current = packed;
+      return packed;
+    }
+    return lastGoodPackedRef.current ?? new Map<HubTileId, PackedPos>();
+  }, [tiles, columns, rows]);
+
+  const gridWidth = useMemo(() => {
+    // Fixed-scale: tile size computed from viewport but uniform inside a screen.
+    // Keep breathing room similar to iOS.
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const topReserved = 64 + 24; // topbar + padding approx
+    const sidePadding = 16; // outer
+    const gap = Math.max(8, Math.min(16, vw * 0.015));
+    const usableW = vw - sidePadding * 2;
+    const usableH = vh - topReserved;
+    const tileByW = (usableW - gap * (columns - 1)) / columns;
+    const tileByH = (usableH - gap * (rows - 1)) / rows;
+    const tile = Math.max(76, Math.min(140, Math.floor(Math.min(tileByW, tileByH))));
+    const width = tile * columns + gap * (columns - 1);
+    return { tile, gap, width };
+  }, [columns, rows]);
+
+  useEffect(() => {
+    const onResize = () => {
+      // trigger recompute
+      setIsPortrait(window.matchMedia('(orientation: portrait)').matches);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white pt-16 pb-6">
@@ -40,126 +558,96 @@ export default function CompassHub({
           </Button>
         }
       />
-      <div className="p-4 sm:p-6 flex justify-center min-h-0">
-      {/* 16 单位网格：4x4，随窗口自适应，一屏内完整显示 */}
       <div
-        className="w-full"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: `repeat(${GRID_COLS}, 1fr)`,
-          gridTemplateRows: `repeat(${GRID_ROWS}, 1fr)`,
-          gap: 'clamp(6px, 1.5vw, 16px)',
-          aspectRatio: '1',
-          width: 'min(clamp(240px, 85vw, 720px), calc(100vh - 8rem))',
+        className="px-2 py-4 sm:p-6 flex justify-center min-h-0"
+        onPointerDownCapture={(e) => {
+          if (!editing) return;
+          const target = e.target as HTMLElement | null;
+          if (!target) return;
+          // Click/tap outside any tile exits edit mode.
+          if (!target.closest('[data-hub-tile]')) {
+            setEditing(false);
+            setActiveId(null);
+          }
         }}
       >
-        {/* SUIS AI - 2x2，左上 */}
-        <button
-          type="button"
-          onClick={() => onNavigate('suis-ai')}
-          className={`${tileBase} p-2 sm:p-4`}
-          style={{
-            fontSize: 'clamp(1rem, 2.5vw, 1.5rem)',
-            background: 'linear-gradient(145deg, #6366f1 0%, #7c3aed 50%, #6d28d9 100%)',
-            boxShadow: '0 8px 24px -4px rgba(99, 102, 241, 0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
-            gridColumn: '1 / span 2',
-            gridRow: '1 / span 2',
-          }}
-        >
-          <span>SUIS AI</span>
-        </button>
+        <div className="w-full flex justify-center">
+          <div className="w-fit max-w-full">
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              modifiers={[restrictToParentElement]}
+              onDragStart={onDragStart}
+              onDragOver={onDragOver}
+              onDragEnd={onDragEnd}
+              onDragCancel={onDragCancel}
+            >
+              <SortableContext items={tiles.map((t) => t.id)} strategy={rectSortingStrategy}>
+                <div
+                  className="grid"
+                  style={{
+                    width: gridWidth.width,
+                    height: gridWidth.tile * rows + gridWidth.gap * (rows - 1),
+                    gridTemplateColumns: `repeat(${columns}, ${gridWidth.tile}px)`,
+                    gridAutoRows: `${gridWidth.tile}px`,
+                    gap: `${gridWidth.gap}px`,
+                  }}
+                >
+                  {tiles.map((tile) => (
+                    <SortableTile
+                      key={tile.id}
+                      tile={tile}
+                      isZh={isZh}
+                      editing={editing}
+                      activeId={activeId}
+                      packed={packedMap.get(tile.id) ?? { col: 1, row: 1, spanX: tile.spanX, spanY: tile.spanY }}
+                      onLongPress={handleLongPress}
+                      onClick={
+                        tile.kind === 'app'
+                          ? () => {
+                              if (editing) return;
+                              if (tile.view) onNavigate(tile.view);
+                            }
+                          : undefined
+                      }
+                    />
+                  ))}
+                </div>
+              </SortableContext>
 
-        {/* 课程河流 - 1x1 */}
-        <button
-          type="button"
-          onClick={() => onNavigate('curriculum-roadmap')}
-          className={`${tileBase} p-1.5 sm:p-2`}
-          style={{
-            fontSize: 'clamp(0.75rem, 1.8vw, 1rem)',
-            background: 'linear-gradient(145deg, #0ea5e9 0%, #0284c7 50%, #0369a1 100%)',
-            boxShadow: '0 6px 16px -2px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
-            gridColumn: '3 / span 1',
-            gridRow: '1 / span 1',
-          }}
-        >
-          <span className="flex flex-col items-center leading-tight">
-            <span>{isZh ? '课程' : 'Curriculum'}</span>
-            <span>{isZh ? '河流' : 'Roadmap'}</span>
-          </span>
-        </button>
+              {/* iOS-like floating tile during drag */}
+              <DragOverlay>
+                {activeTile ? (
+                  <div
+                    className={
+                      activeTile.kind === 'placeholder'
+                        ? 'rounded-xl bg-slate-200/70 border border-slate-200 shadow-2xl'
+                        : `${tileBase} shadow-2xl`
+                    }
+                    style={{
+                      width: gridWidth.tile * activeTile.spanX + gridWidth.gap * (activeTile.spanX - 1),
+                      height: gridWidth.tile * activeTile.spanY + gridWidth.gap * (activeTile.spanY - 1),
+                      fontSize: activeTile.fontSize,
+                      ...activeTile.style,
+                      transform: 'scale(1.05)',
+                      touchAction: 'none',
+                    }}
+                    aria-hidden
+                  >
+                    {activeTile.kind === 'app' && activeTile.renderLabel ? activeTile.renderLabel(isZh) : null}
+                  </div>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
 
-        {/* 占位 1 */}
-        <div className="rounded-xl bg-slate-200/60 border border-slate-200" style={{ gridColumn: '4', gridRow: '1' }} />
-
-        {/* 占位 2 */}
-        <div className="rounded-xl bg-slate-200/60 border border-slate-200" style={{ gridColumn: '3', gridRow: '2' }} />
-
-        {/* 占位 3 */}
-        <div className="rounded-xl bg-slate-200/60 border border-slate-200" style={{ gridColumn: '4', gridRow: '2' }} />
-
-        {/* 学生画像 - 2x2，中下 */}
-        <button
-          type="button"
-          onClick={() => onNavigate('student-portrait')}
-          className={`${tileBase} p-2 sm:p-4`}
-          style={{
-            fontSize: 'clamp(1rem, 2.5vw, 1.5rem)',
-            background: 'linear-gradient(145deg, #10b981 0%, #059669 50%, #047857 100%)',
-            boxShadow: '0 8px 24px -4px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
-            gridColumn: '2 / span 2',
-            gridRow: '3 / span 2',
-          }}
-        >
-          <span className="flex flex-col items-center leading-tight">
-            <span>{isZh ? '学生' : 'Student'}</span>
-            <span>{isZh ? '画像' : 'Portrait'}</span>
-          </span>
-        </button>
-
-        {/* 课堂助手 - 1x1 */}
-        <button
-          type="button"
-          onClick={() => onNavigate('class-assistant')}
-          className={`${tileBase} p-1.5 sm:p-2`}
-          style={{
-            fontSize: 'clamp(0.75rem, 1.8vw, 1rem)',
-            background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
-            boxShadow: '0 6px 16px -2px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
-            gridColumn: '4 / span 1',
-            gridRow: '3 / span 1',
-          }}
-        >
-          <span className="flex flex-col items-center leading-tight">
-            <span>{isZh ? '课堂' : 'Class'}</span>
-            <span>{isZh ? '助手' : 'Assistant'}</span>
-          </span>
-        </button>
-
-        {/* 我的班级 - 1x1，右下 */}
-        <button
-          type="button"
-          onClick={() => onNavigate('class-management')}
-          className={`${tileBase} p-1.5 sm:p-2`}
-          style={{
-            fontSize: 'clamp(0.75rem, 1.8vw, 1rem)',
-            background: 'linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%)',
-            boxShadow: '0 6px 16px -2px rgba(71, 85, 105, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
-            gridColumn: '4',
-            gridRow: '4',
-          }}
-        >
-          <span className="flex flex-col items-center leading-tight">
-            <span>{isZh ? '我的' : 'My'}</span>
-            <span>{isZh ? '班级' : 'Classes'}</span>
-          </span>
-        </button>
-
-        {/* 占位 5 */}
-        <div className="rounded-xl bg-slate-200/60 border border-slate-200" style={{ gridColumn: '1', gridRow: '3' }} />
-
-        {/* 占位 6 */}
-        <div className="rounded-xl bg-slate-200/60 border border-slate-200" style={{ gridColumn: '1', gridRow: '4' }} />
-      </div>
+            {/* Editing hint */}
+            {editing ? (
+              <div className="mt-3 text-center text-xs text-slate-500 select-none">
+                {isZh ? '编辑模式：拖拽调整位置，点击空白退出' : 'Edit mode: drag to rearrange, tap empty area to exit'}
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
     </div>
   );

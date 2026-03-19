@@ -376,6 +376,67 @@ export const api = {
     if (!response.ok) throw new Error('Failed to delete class');
   },
 
+  async getClassTeachers(
+    classId: string
+  ): Promise<{ teacherId: string; role: string; displayName: string }[]> {
+    const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(classId)}/teachers`), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) throw new Error('Failed to fetch class teachers');
+    const data = await response.json();
+    return (data.teachers ?? data) as { teacherId: string; role: string; displayName: string }[];
+  },
+
+  async addClassTeacher(
+    classId: string,
+    input: { teacherId: string; role?: string }
+  ): Promise<{ id: string; classId: string; teacherId: string; role: string }> {
+    let response: Response;
+    try {
+      response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(classId)}/teachers`), {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(input),
+      });
+    } catch (e: unknown) {
+      const msg = (e as Error)?.message || String(e);
+      throw new Error(`Failed to add class teacher (network): ${msg}`);
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      let msg = text || `Failed to add class teacher (${response.status} ${response.statusText})`;
+      try {
+        const data = JSON.parse(text) as { error?: string };
+        if (data?.error) msg = data.error;
+      } catch {
+        // use text
+      }
+      throw new Error(msg);
+    }
+    return response.json();
+  },
+
+  async removeClassTeacher(classId: string, teacherId: string): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/classes/${encodeURIComponent(classId)}/teachers/${encodeURIComponent(teacherId)}`),
+      {
+        method: 'DELETE',
+        headers: getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      let msg = text || 'Failed to remove class teacher';
+      try {
+        const data = JSON.parse(text) as { error?: string };
+        if (data?.error) msg = data.error;
+      } catch {
+        // use text
+      }
+      throw new Error(msg);
+    }
+  },
+
   async getStudents(): Promise<Student[]> {
     const response = await fetch(apiUrl('/api/classes/students'), { headers: getHeaders() });
     if (!response.ok) throw new Error('Failed to fetch students');

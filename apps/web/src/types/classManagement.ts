@@ -14,6 +14,7 @@ export interface ClassItem {
   grade: number;
   name: string;
   teacherId?: string | null;
+  teacherIds?: string[];
 }
 
 /** 学生（独立于学年，跨学年存在） */

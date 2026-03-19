@@ -94,6 +94,18 @@ CREATE TABLE IF NOT EXISTS classes (
 );
 CREATE INDEX IF NOT EXISTS idx_classes_academic_year_id ON classes(academic_year_id);
 
+-- 班级-教师关联（优化）：支持多个教师关联同一班级；取消关联时写 unassigned_at 以保留历史
+CREATE TABLE IF NOT EXISTS class_teacher_assignments (
+  id VARCHAR(80) PRIMARY KEY,
+  class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role VARCHAR(30) NOT NULL DEFAULT 'co-teacher',
+  assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  unassigned_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_class_active ON class_teacher_assignments(class_id) WHERE unassigned_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_teacher_active ON class_teacher_assignments(teacher_id) WHERE unassigned_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS students (
   id VARCHAR(50) PRIMARY KEY,
   name VARCHAR(100) NOT NULL,

@@ -10,7 +10,14 @@ import AdminPanel from './components/AdminPanel'
 import ClassManagement from './components/ClassManagement'
 import ClassAssistant from './components/ClassAssistant'
 
-type HubView = 'suis-ai' | 'curriculum-roadmap' | 'student-portrait' | 'class-assistant' | 'class-management' | 'admin';
+type HubView =
+  | 'suis-ai'
+  | 'curriculum-roadmap'
+  | 'student-portrait'
+  | 'teacher-portrait'
+  | 'class-assistant'
+  | 'class-management'
+  | 'admin';
 
 const MOBILE_BREAKPOINT = 768;
 

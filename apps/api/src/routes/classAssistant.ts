@@ -13,9 +13,18 @@ async function canAccessClass(userId: string | undefined, classId: string): Prom
   if (roleResult.rows.length === 0) return false;
   const role = roleResult.rows[0].role as string;
   if (role === 'system-admin' || role === 'admin') return true;
-  const classResult = await pool.query('SELECT teacher_id FROM classes WHERE id = $1', [classId]);
-  if (classResult.rows.length === 0) return false;
-  return classResult.rows[0].teacher_id === userId;
+  // Teacher: allow if assigned to class (active assignment) or legacy teacher_id match
+  const assignResult = await pool.query(
+    `SELECT 1
+     FROM class_teacher_assignments
+     WHERE class_id = $1 AND teacher_id = $2 AND unassigned_at IS NULL
+     LIMIT 1`,
+    [classId, userId]
+  );
+  if (assignResult.rows.length > 0) return true;
+  const legacyResult = await pool.query('SELECT teacher_id FROM classes WHERE id = $1', [classId]);
+  if (legacyResult.rows.length === 0) return false;
+  return legacyResult.rows[0].teacher_id === userId;
 }
 
 const router = express.Router();

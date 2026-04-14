@@ -1,7 +1,9 @@
 /**
  * 班级管理数据：学年、班级、学生、学籍均为全校共享（本地与云端一致）。
- * 本地：localStorage 用同一套 key，不按用户隔离。
- * 云端：优先 API（接口本身全校共享），本地缓存也用同一套 key。
+ *
+ * - **纯本地（`USE_CLOUD_STORAGE === false`）**：以 localStorage 为权威；创建/更新先写本地，不请求
+ *   `/api/classes/*`（无需启动后端）。课堂助手「云端同步」入口会直接跳过。
+ * - **云端（`true`）**：加载时优先拉 API 并写入同一套 key 作缓存；写入时本地 + 尽力同步 API。
  */
 import type {
   AcademicYear,
@@ -432,7 +434,7 @@ export async function createStudent(student: Student): Promise<Student> {
   return student;
 }
 
-export async function updateStudent(studentId: string, patch: Partial<Pick<Student, 'name' | 'gender' | 'grade' | 'studentNumber' | 'dateOfBirth'>>): Promise<Student> {
+export async function updateStudent(studentId: string, patch: Partial<Student>): Promise<Student> {
   const all = loadStudentsSync();
   const idx = all.findIndex((s) => s.id === studentId);
   if (idx < 0) throw new Error('Student not found');

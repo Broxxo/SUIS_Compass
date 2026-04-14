@@ -9,6 +9,7 @@ import { AIContextProvider, useAIContext } from './contexts/AIContext'
 import AdminPanel from './components/AdminPanel'
 import ClassManagement from './components/ClassManagement'
 import ClassAssistant from './components/ClassAssistant'
+import StudentPortrait from './components/StudentPortrait'
 
 type HubView =
   | 'suis-ai'
@@ -87,6 +88,11 @@ function AppContent() {
     return <LoginDialog />;
   }
 
+  // 学生账号仅使用学生画像（自有数据），不进入主 HUB 与其他应用
+  if (user?.role === 'student') {
+    return <StudentPortrait onBackToHub={() => {}} />;
+  }
+
   // SUIS AI：从主界面进入，全屏
   if (view === 'suis-ai') {
     return (
@@ -141,6 +147,14 @@ function AppContent() {
 
   if (view === 'class-assistant') {
     return <ClassAssistant onBackToHub={() => setView('hub')} />
+  }
+
+  if (view === 'student-portrait') {
+    return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="overview" />;
+  }
+
+  if (view === 'teacher-portrait') {
+    return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="my-students" />;
   }
 
   // 其他入口暂未实现

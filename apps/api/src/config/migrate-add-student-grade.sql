@@ -1,2 +1,2 @@
--- Add grade column to students table
-ALTER TABLE students ADD COLUMN IF NOT EXISTS grade VARCHAR(50);
+-- Legacy VARCHAR grade removed; students use current_grade (integer) only.
+ALTER TABLE students DROP COLUMN IF EXISTS grade;

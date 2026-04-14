@@ -21,8 +21,14 @@ export interface ClassItem {
 export interface Student {
   id: string;
   name: string;
+  nameZh?: string | null;
+  nameEn?: string | null;
   gender: 'male' | 'female' | 'other';
-  grade?: string | null; /** 年级，如 "一年级"、"1"、"G9" */
+  currentGrade?: number | null;
+  currentClassId?: string | null;
+  division?: string | null;
+  entryDate?: string | null;
+  status?: 'active' | 'graduated' | 'leave' | 'withdrawn';
   studentNumber?: string | null;
   dateOfBirth?: string | null;
 }

@@ -1,5 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import pool from '../config/database.js';
 
 const router = express.Router();
@@ -9,6 +10,28 @@ interface AuthedRequest extends Request {
 }
 
 const VALID_ROLES = ['system-admin', 'admin', 'teacher'] as const;
+
+let ensuredUsersStudentIdColumn = false;
+async function ensureUsersStudentIdColumn(): Promise<void> {
+  if (ensuredUsersStudentIdColumn) return;
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50)');
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_student_id_unique ON users(student_id) WHERE student_id IS NOT NULL',
+  );
+  try {
+    await pool.query(`
+      ALTER TABLE users ADD CONSTRAINT users_student_id_fkey
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL
+    `);
+  } catch {
+    /* constraint may already exist */
+  }
+  ensuredUsersStudentIdColumn = true;
+}
+
+function randomSixDigitPassword(): string {
+  return String(crypto.randomInt(100000, 1000000));
+}
 
 // 仅允许 system-admin 或 admin 访问本路由
 async function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
@@ -34,20 +57,45 @@ async function requireAdmin(req: AuthedRequest, res: Response, next: NextFunctio
 
 router.use(requireAdmin);
 
-// 获取用户列表：system-admin 看管理员+教师，admin 仅看教师；system-admin 账号对其他人完全不可见
+// 获取用户列表：scope=staff（默认）| students；学生账号列表供管理员与系统管理员查看
 router.get('/users', async (req: AuthedRequest, res: Response) => {
   try {
+    await ensureUsersStudentIdColumn();
     const callerId = req.userId!;
     const callerResult = await pool.query('SELECT role FROM users WHERE id = $1', [callerId]);
     const callerRole = callerResult.rows[0]?.role as string;
+    const scope = (req.query.scope as string) === 'students' ? 'students' : 'staff';
+
+    if (scope === 'students') {
+      const result = await pool.query(
+        `SELECT u.id, u.username, u.role, u.display_name, u.password, u.department, u.student_id, u.created_at,
+                s.name_zh, s.name_en
+         FROM users u
+         LEFT JOIN students s ON s.id = u.student_id
+         WHERE u.role = 'student'
+         ORDER BY u.created_at DESC NULLS LAST, u.username ASC`,
+      );
+      const users = result.rows.map((row) => ({
+        id: row.id as string,
+        username: row.username as string,
+        role: row.role as string,
+        displayName: (row.display_name as string) ?? '',
+        password: (row.password as string | null) ?? null,
+        department: (row.department as string | null) ?? null,
+        studentId: (row.student_id as string | null) ?? null,
+        studentNameZh: (row.name_zh as string | null) ?? null,
+        studentNameEn: (row.name_en as string | null) ?? null,
+        createdAt: (row.created_at as Date | null)?.toISOString() ?? undefined,
+      }));
+      return res.json({ users });
+    }
+
     let result;
     if (callerRole === 'system-admin') {
-      // 系统管理员：只管理管理员和教师账号
       result = await pool.query(
         "SELECT id, username, role, display_name, password, department, created_at FROM users WHERE role IN ('admin', 'teacher') ORDER BY created_at DESC, username ASC",
       );
     } else {
-      // 管理员：仅能看到教师账号，不暴露系统管理员或管理员
       result = await pool.query(
         "SELECT id, username, role, display_name, password, department, created_at FROM users WHERE role = 'teacher' ORDER BY created_at DESC, username ASC",
       );
@@ -65,6 +113,88 @@ router.get('/users', async (req: AuthedRequest, res: Response) => {
   } catch (error) {
     console.error('Get users error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 批量开通学生登录：学号作 username，随机6 位数字密码（bcrypt 存储）
+router.post('/users/import-student-accounts', async (req: AuthedRequest, res: Response) => {
+  const client = await pool.connect();
+  try {
+    await ensureUsersStudentIdColumn();
+    const body = req.body as {
+      items?: Array<{ studentId: string; password: string }>;
+    };
+    const items = Array.isArray(body.items) ? body.items : [];
+
+    const created: Array<{ studentId: string; username: string; password: string; displayName: string; userId: string }> = [];
+    const skipped: Array<{ studentId: string; reason: string }> = [];
+
+    let rows: Array<{ id: string; student_number: string; name: string; name_zh: string | null; name_en: string | null }>;
+    if (items.length === 0) {
+      const r = await client.query(
+        `SELECT id, student_number, name, name_zh, name_en FROM students
+         WHERE student_number IS NOT NULL AND TRIM(student_number) <> ''`,
+      );
+      rows = r.rows as typeof rows;
+    } else {
+      const idSet = new Set(items.map((i) => i.studentId));
+      const r = await client.query(
+        `SELECT id, student_number, name, name_zh, name_en FROM students
+         WHERE id = ANY($1::varchar[])`,
+        [Array.from(idSet)],
+      );
+      rows = r.rows as typeof rows;
+      for (const it of items) {
+        if (!rows.some((row) => row.id === it.studentId)) {
+          skipped.push({ studentId: it.studentId, reason: 'student_not_found' });
+        }
+      }
+    }
+
+    await client.query('BEGIN');
+    for (const s of rows) {
+      const uname = String(s.student_number).trim();
+      if (!uname) {
+        skipped.push({ studentId: s.id, reason: 'empty_student_number' });
+        continue;
+      }
+      const dup = await client.query(
+        `SELECT id FROM users WHERE student_id = $1 OR LOWER(TRIM(username)) = LOWER(TRIM($2)) LIMIT 1`,
+        [s.id, uname],
+      );
+      if (dup.rows.length > 0) {
+        skipped.push({ studentId: s.id, reason: 'account_or_username_exists' });
+        continue;
+      }
+      let plain: string;
+      if (items.length > 0) {
+        const it = items.find((x) => x.studentId === s.id);
+        if (!it?.password || !/^\d{6}$/.test(it.password)) {
+          skipped.push({ studentId: s.id, reason: 'invalid_password' });
+          continue;
+        }
+        plain = it.password;
+      } else {
+        plain = randomSixDigitPassword();
+      }
+      const hash = await bcrypt.hash(plain, 10);
+      const displayName = String(s.name_zh || s.name_en || s.name || uname).trim() || uname;
+      const newId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      await client.query(
+        `INSERT INTO users (id, username, display_name, role, password_hash, password, student_id, department, created_at, updated_at)
+         VALUES ($1, $2, $3, 'student', $4, $5, $6, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [newId, uname, displayName, hash, plain, s.id],
+      );
+      created.push({ studentId: s.id, username: uname, password: plain, displayName, userId: newId });
+    }
+    await client.query('COMMIT');
+    res.status(201).json({ created, skipped });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Import student accounts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -160,8 +290,8 @@ router.delete('/users/:id', async (req: AuthedRequest, res: Response) => {
     if (row.role === 'system-admin') {
       return res.status(403).json({ error: 'Cannot delete system-admin' });
     }
-    if (callerRole === 'admin' && row.role !== 'teacher') {
-      return res.status(403).json({ error: 'Admin can only delete teacher accounts' });
+    if (callerRole === 'admin' && row.role !== 'teacher' && row.role !== 'student') {
+      return res.status(403).json({ error: 'Admin can only delete teacher or student accounts' });
     }
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
     res.json({ success: true });
@@ -189,6 +319,9 @@ router.patch('/users/:id', async (req: AuthedRequest, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
     const targetRole = targetResult.rows[0].role as string;
+    if (targetRole === 'student') {
+      return res.status(403).json({ error: 'Student accounts have no department; remove the login account to revoke access' });
+    }
     if (callerRole === 'admin' && targetRole !== 'teacher') {
       return res.status(403).json({ error: 'Admin can only update teacher accounts' });
     }
@@ -239,6 +372,9 @@ router.put('/users/:id/role', async (req: AuthedRequest, res: Response) => {
     const targetRole = targetResult.rows[0].role as string;
     if (targetRole === 'system-admin') {
       return res.status(403).json({ error: 'Cannot change system-admin role' });
+    }
+    if (targetRole === 'student') {
+      return res.status(403).json({ error: 'Cannot change student role via this endpoint' });
     }
 
     await pool.query('UPDATE users SET role = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newRole, id]);

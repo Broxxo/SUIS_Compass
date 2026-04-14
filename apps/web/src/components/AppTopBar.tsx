@@ -4,8 +4,9 @@
 import { useState, useRef, useEffect, type ReactNode } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
-import { LogOut, ArrowLeft, User } from 'lucide-react';
+import { LogOut, ArrowLeft, User as UserIcon } from 'lucide-react';
 import { Button } from './ui/button';
+import type { User } from '../types';
 
 interface AppTopBarProps {
   /** 中间显示的功能名称（单语：中文界面用中文，英文界面用英文） */
@@ -18,10 +19,11 @@ interface AppTopBarProps {
   rightChildren?: ReactNode;
 }
 
-const ROLE_LABELS: Record<'system-admin' | 'admin' | 'teacher', { zh: string; en: string }> = {
+const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   'system-admin': { zh: '系统管理员', en: 'System Admin' },
   admin: { zh: '管理员', en: 'Admin' },
   teacher: { zh: '教师', en: 'Teacher' },
+  student: { zh: '学生', en: 'Student' },
 };
 
 export default function AppTopBar({ title, showBack, onBack, rightChildren }: AppTopBarProps) {
@@ -69,7 +71,7 @@ export default function AppTopBar({ title, showBack, onBack, rightChildren }: Ap
               className="h-9 w-9 rounded-full flex-shrink-0 p-0"
               title={user ? user.displayName || user.username : isZh ? '未登录' : 'Not logged in'}
             >
-              <User className="h-4 w-4" />
+              <UserIcon className="h-4 w-4" />
             </Button>
             {user && userMenuOpen && (
               <div className="absolute left-0 top-full mt-1 min-w-[140px] rounded-xl border border-slate-200 bg-white shadow-lg py-1 z-30">

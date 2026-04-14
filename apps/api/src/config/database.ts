@@ -1,7 +1,11 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
 import pg from 'pg';
 import dotenv from 'dotenv';
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+/** 始终从 apps/api/.env 加载（无论从仓库根目录还是 apps/api 启动 workspace 脚本） */
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 if (!process.env.DATABASE_URL) {
   console.error('ERROR: DATABASE_URL environment variable is not set!');

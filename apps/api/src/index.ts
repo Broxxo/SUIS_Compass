@@ -12,10 +12,11 @@ import adminRoutes from './routes/admin.js';
 import classesRoutes from './routes/classes.js';
 import classAssistantRoutes from './routes/classAssistant.js';
 import { requireValidUser } from './middleware/requireUser.js';
-
-dotenv.config();
+import { forbidStudentAccounts } from './middleware/forbidStudent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '../.env') });
+
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
 const app = express();
@@ -25,12 +26,12 @@ app.use(express.json({ limit: '2mb' }));
 
 // API 路由
 app.use('/api/auth', authRoutes);
-app.use('/api/courses', requireValidUser, coursesRoutes);
-app.use('/api/semester', requireValidUser, semesterRoutes);
-app.use('/api/settings', requireValidUser, settingsRoutes);
-app.use('/api/ai', requireValidUser, aiRoutes);
-app.use('/api/admin', requireValidUser, adminRoutes);
-app.use('/api/classes/assistant', requireValidUser, classAssistantRoutes);
+app.use('/api/courses', requireValidUser, forbidStudentAccounts, coursesRoutes);
+app.use('/api/semester', requireValidUser, forbidStudentAccounts, semesterRoutes);
+app.use('/api/settings', requireValidUser, forbidStudentAccounts, settingsRoutes);
+app.use('/api/ai', requireValidUser, forbidStudentAccounts, aiRoutes);
+app.use('/api/admin', requireValidUser, forbidStudentAccounts, adminRoutes);
+app.use('/api/classes/assistant', requireValidUser, forbidStudentAccounts, classAssistantRoutes);
 app.use('/api/classes', requireValidUser, classesRoutes);
 
 app.get('/health', (_, res) => {

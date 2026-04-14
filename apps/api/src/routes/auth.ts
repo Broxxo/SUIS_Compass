@@ -21,12 +21,19 @@ async function resolveUserId(req: Request): Promise<string | null> {
   return legacy ?? null;
 }
 
-function toUserRow(row: { id: string; username: string; role: string; display_name: string }) {
+function toUserRow(row: {
+  id: string;
+  username: string;
+  role: string;
+  display_name: string;
+  student_id?: string | null;
+}) {
   return {
     id: row.id,
     username: row.username,
     role: row.role,
     displayName: row.display_name,
+    studentId: row.student_id ?? null,
   };
 }
 
@@ -40,7 +47,7 @@ router.post('/login', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, username, role, display_name, password, password_hash FROM users WHERE username = $1',
+      'SELECT id, username, role, display_name, student_id, password, password_hash FROM users WHERE username = $1',
       [username]
     );
 
@@ -53,6 +60,7 @@ router.post('/login', async (req, res) => {
       username: string;
       role: string;
       display_name: string;
+      student_id: string | null;
       password: string | null;
       password_hash: string | null;
     };
@@ -100,7 +108,7 @@ router.get('/user', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, username, role, display_name FROM users WHERE id = $1',
+      'SELECT id, username, role, display_name, student_id FROM users WHERE id = $1',
       [userId]
     );
 
@@ -108,7 +116,13 @@ router.get('/user', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const row = result.rows[0] as { id: string; username: string; role: string; display_name: string };
+    const row = result.rows[0] as {
+      id: string;
+      username: string;
+      role: string;
+      display_name: string;
+      student_id: string | null;
+    };
     res.json({ user: toUserRow(row) });
   } catch (error) {
     console.error('Get user error:', error);

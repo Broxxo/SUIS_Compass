@@ -10,7 +10,14 @@ import { api, USE_CLOUD_STORAGE } from './api';
 import { logError } from './errorHandler';
 import { PRESET_USERS } from './users';
 
-export type AdminUser = User & { createdAt?: string; password?: string | null; department?: string | null };
+export type AdminUser = User & {
+  createdAt?: string;
+  password?: string | null;
+  department?: string | null;
+  studentId?: string | null;
+  studentNameZh?: string | null;
+  studentNameEn?: string | null;
+};
 
 const KEY = STORAGE_KEYS.ADMIN_USERS;
 
@@ -55,20 +62,32 @@ export function authenticateLocalAdminUser(username: string, password: string): 
   return u ? { id: u.id, username: u.username, role: u.role, displayName: u.displayName } : null;
 }
 
-/** 加载用户列表：云端时先拉 API 并写入本地；本地模式读本地，并把预设登录账号合并进列表 */
-export async function loadUsers(): Promise<AdminUser[]> {
+/** 加载用户列表：云端时先拉 API；教职工列表写入本地缓存。scope=students 时仅云端可用，本地模式返回空数组。 */
+export async function loadUsers(scope: 'staff' | 'students' = 'staff'): Promise<AdminUser[]> {
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
-      const list = await api.getAllUsers();
-      saveToLocal(list);
+      const list = await api.getAllUsers(scope);
+      if (scope === 'staff') saveToLocal(list);
       return list;
     } catch (e) {
       logError('loadUsers from cloud', e);
     }
   }
+  if (scope === 'students') return [];
   const local = loadFromLocal();
   const presets = getPresetAsAdminUsers();
   return [...presets, ...local.filter((u) => !presets.some((p) => p.id === u.id))];
+}
+
+/** 批量开通学生登录（学号作用户名）。仅云端模式可用。 */
+export async function importStudentAccounts(items: { studentId: string; password: string }[]): Promise<{
+  created: Array<{ studentId: string; username: string; password: string; displayName: string; userId: string }>;
+  skipped: Array<{ studentId: string; reason: string }>;
+}> {
+  if (!USE_CLOUD_STORAGE || !getCurrentUserId()) {
+    throw new Error('Student account import requires cloud mode (VITE_USE_CLOUD_STORAGE=true) and login.');
+  }
+  return api.importStudentAccounts(items);
 }
 
 /** 创建用户：先写本地，云端时再调 API */

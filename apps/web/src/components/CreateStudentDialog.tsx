@@ -1,5 +1,5 @@
 /**
- * 统一的创建学生弹窗：所有入口共用，年级为必填（G1-G9），可选加入班级。
+ * 统一的创建学生弹窗：所有入口共用，当前年级（数值）为必填（G1-G9），可选加入班级。
  */
 import { useState, useEffect } from 'react';
 import { Button } from './ui/button';
@@ -42,9 +42,13 @@ export default function CreateStudentDialog({
   const { language } = useLanguage();
   const isZh = language === 'zh';
 
-  const [name, setName] = useState('');
+  const [nameZh, setNameZh] = useState('');
+  const [nameEn, setNameEn] = useState('');
   const [grade, setGrade] = useState<string>(initialGrade != null ? String(initialGrade) : '1');
   const [gender, setGender] = useState<Student['gender']>('male');
+  const [division, setDivision] = useState('');
+  const [entryDate, setEntryDate] = useState('');
+  const [status, setStatus] = useState<Student['status']>('active');
   const [studentNumber, setStudentNumber] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [enrollClassId, setEnrollClassId] = useState('');
@@ -52,25 +56,36 @@ export default function CreateStudentDialog({
 
   useEffect(() => {
     if (!open) return;
-    setName('');
+    setNameZh('');
+    setNameEn('');
     setGrade(initialGrade != null ? String(initialGrade) : '1');
     setGender('male');
+    setDivision('');
+    setEntryDate('');
+    setStatus('active');
     setStudentNumber('');
     setDateOfBirth('');
     setEnrollClassId('');
   }, [open, initialGrade]);
 
   const handleSubmit = async () => {
-    if (!name.trim() || !grade.trim()) return;
+    const zh = nameZh.trim();
+    const en = nameEn.trim();
+    if ((!zh && !en) || !grade.trim()) return;
     setLoading(true);
     if (onError) onError('');
     try {
       const studentId = `stu-${Date.now()}`;
       const student: Student = {
         id: studentId,
-        name: name.trim(),
+        name: zh || en,
+        nameZh: zh || null,
+        nameEn: en || null,
         gender,
-        grade: grade.trim(),
+        currentGrade: Number(grade),
+        division: division.trim() || null,
+        entryDate: entryDate.trim() || null,
+        status: status || 'active',
         studentNumber: studentNumber.trim() || undefined,
         dateOfBirth: dateOfBirth.trim() || undefined,
       };
@@ -95,21 +110,34 @@ export default function CreateStudentDialog({
           <DialogTitle>{isZh ? '创建学生' : 'Create student'}</DialogTitle>
           <DialogDescription>
             {currentYearId
-              ? (isZh ? '填写学生信息，年级为必填（当前学年）' : 'Fill in student info. Grade is required (current year)')
+              ? (isZh ? '填写学生信息，当前年级（数值）为必填（当前学年）' : 'Fill in student info. Current grade is required (current year)')
               : (isZh ? '请先选择当前学年' : 'Select current year first')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">{isZh ? '姓名' : 'Name'} *</label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">{isZh ? '中文名' : 'Chinese name'}</label>
+              <input
+                value={nameZh}
+                onChange={(e) => setNameZh(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">{isZh ? '英文名' : 'English name'}</label>
+              <input
+                value={nameEn}
+                onChange={(e) => setNameEn(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
           </div>
+          <p className="text-xs text-slate-500 -mt-1">
+            {isZh ? '中文名和英文名至少填写一个。' : 'Please provide at least one of Chinese or English name.'}
+          </p>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">{isZh ? '年级' : 'Grade'} *</label>
+            <label className="block text-xs text-slate-500 mb-1">{isZh ? '当前年级（数值）' : 'Current grade (number)'} *</label>
             <select
               value={grade}
               onChange={(e) => setGrade(e.target.value)}
@@ -131,6 +159,39 @@ export default function CreateStudentDialog({
               <option value="female">{isZh ? '女' : 'Female'}</option>
               <option value="other">{isZh ? '其他' : 'Other'}</option>
             </select>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">{isZh ? '学部（可选）' : 'Division (optional)'}</label>
+              <input
+                value={division}
+                onChange={(e) => setDivision(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                placeholder={isZh ? '如 小学部/初中部' : 'e.g. Primary'}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">{isZh ? '在读状态' : 'Status'}</label>
+              <select
+                value={status || 'active'}
+                onChange={(e) => setStatus(e.target.value as Student['status'])}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+              >
+                <option value="active">{isZh ? '在读' : 'Active'}</option>
+                <option value="leave">{isZh ? '休学' : 'Leave'}</option>
+                <option value="graduated">{isZh ? '毕业' : 'Graduated'}</option>
+                <option value="withdrawn">{isZh ? '离校' : 'Withdrawn'}</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">{isZh ? '入学时间（可选）' : 'Entry date (optional)'}</label>
+            <input
+              type="date"
+              value={entryDate}
+              onChange={(e) => setEntryDate(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+            />
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '学号（可选）' : 'Student number (optional)'}</label>
@@ -167,7 +228,7 @@ export default function CreateStudentDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{isZh ? '取消' : 'Cancel'}</Button>
-          <Button onClick={handleSubmit} disabled={!name.trim() || !grade.trim() || loading}>
+          <Button onClick={handleSubmit} disabled={(!nameZh.trim() && !nameEn.trim()) || !grade.trim() || loading}>
             {loading ? (isZh ? '创建中…' : 'Creating…') : isZh ? '创建' : 'Create'}
           </Button>
         </DialogFooter>

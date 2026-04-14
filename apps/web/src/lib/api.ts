@@ -11,8 +11,12 @@ import type {
 } from '../types/classManagement';
 import { getCurrentUserId, getToken } from './authUtils';
 
-// 同源部署时为空，开发时可设为 VITE_API_URL（如 http://localhost:8080/api）
+// 同源部署时为空，联调后端时设为完整前缀（如 http://127.0.0.1:8080/api）
 const API_BASE_URL = (import.meta.env.VITE_API_URL as string) ?? '';
+/**
+ * `VITE_USE_CLOUD_STORAGE === 'true'` 时：课程/班级/学生等会走 API（见 `storage.ts`、`classStorage.ts`）。
+ * 为 `false` 时：班级与学生以 localStorage 为准，不依赖本机或远程 API（学生画像扩展模块亦离线）。
+ */
 const USE_CLOUD_STORAGE = import.meta.env.VITE_USE_CLOUD_STORAGE === 'true';
 
 function getHeaders(): HeadersInit {
@@ -223,8 +227,20 @@ export const api = {
   /**
    * 管理员 API：仅 admin 账号可用
    */
-  async getAllUsers(): Promise<(User & { createdAt?: string; password?: string | null; department?: string | null })[]> {
-    const response = await fetch(apiUrl('/api/admin/users'), {
+  async getAllUsers(
+    scope: 'staff' | 'students' = 'staff',
+  ): Promise<
+    (User & {
+      createdAt?: string;
+      password?: string | null;
+      department?: string | null;
+      studentId?: string | null;
+      studentNameZh?: string | null;
+      studentNameEn?: string | null;
+    })[]
+  > {
+    const q = scope === 'students' ? '?scope=students' : '';
+    const response = await fetch(apiUrl(`/api/admin/users${q}`), {
       headers: getHeaders(),
     });
     if (!response.ok) {
@@ -232,7 +248,30 @@ export const api = {
       throw new Error(text || 'Failed to fetch users');
     }
     const data = await response.json();
-    return (data.users ?? []) as (User & { createdAt?: string; password?: string | null; department?: string | null })[];
+    return (data.users ?? []) as (User & {
+      createdAt?: string;
+      password?: string | null;
+      department?: string | null;
+      studentId?: string | null;
+      studentNameZh?: string | null;
+      studentNameEn?: string | null;
+    })[];
+  },
+
+  async importStudentAccounts(items?: { studentId: string; password: string }[]): Promise<{
+    created: Array<{ studentId: string; username: string; password: string; displayName: string; userId: string }>;
+    skipped: Array<{ studentId: string; reason: string }>;
+  }> {
+    const response = await fetch(apiUrl('/api/admin/users/import-student-accounts'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(items && items.length > 0 ? { items } : {}),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to import student accounts');
+    }
+    return response.json();
   },
 
   async createUser(input: { username: string; displayName?: string; role: User['role']; password: string; department?: string | null }): Promise<User & { createdAt?: string; password?: string | null; department?: string | null }> {
@@ -454,7 +493,7 @@ export const api = {
     return response.json();
   },
 
-  async updateStudent(studentId: string, patch: Partial<Pick<Student, 'name' | 'gender' | 'grade' | 'studentNumber' | 'dateOfBirth'>>): Promise<Student> {
+  async updateStudent(studentId: string, patch: Partial<Student>): Promise<Student> {
     const response = await fetch(apiUrl(`/api/classes/students/${encodeURIComponent(studentId)}`), {
       method: 'PATCH',
       headers: { ...getHeaders(), 'Content-Type': 'application/json' },
@@ -495,6 +534,81 @@ export const api = {
       headers: getHeaders(),
     });
     if (!response.ok) throw new Error('Failed to remove enrollment');
+  },
+
+  /**
+   * 学生画像 API（可扩展模块）
+   */
+  async getStudentProfileModules(): Promise<Array<{
+    id: string;
+    key: string;
+    name: string;
+    description?: string | null;
+    isSystem: boolean;
+    isEnabled: boolean;
+    fields: Array<{
+      id: string;
+      fieldKey: string;
+      label: string;
+      fieldType: 'text' | 'number' | 'single-select' | 'multi-select' | 'score';
+      scoreMin?: number | null;
+      scoreMax?: number | null;
+      options?: unknown;
+      sortOrder: number;
+      required: boolean;
+    }>;
+  }>> {
+    const response = await fetch(apiUrl('/api/classes/profile/modules'), { headers: getHeaders() });
+    if (!response.ok) throw new Error('Failed to fetch profile modules');
+    const data = await response.json();
+    return (data.modules ?? []) as Array<{
+      id: string;
+      key: string;
+      name: string;
+      description?: string | null;
+      isSystem: boolean;
+      isEnabled: boolean;
+      fields: Array<{
+        id: string;
+        fieldKey: string;
+        label: string;
+        fieldType: 'text' | 'number' | 'single-select' | 'multi-select' | 'score';
+        scoreMin?: number | null;
+        scoreMax?: number | null;
+        options?: unknown;
+        sortOrder: number;
+        required: boolean;
+      }>;
+    }>;
+  },
+
+  async getStudentProfileValues(studentId: string): Promise<Record<string, Record<string, unknown>>> {
+    const response = await fetch(
+      apiUrl(`/api/classes/profile/students/${encodeURIComponent(studentId)}/values`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch student profile values');
+    const data = await response.json();
+    return (data.values ?? {}) as Record<string, Record<string, unknown>>;
+  },
+
+  async putStudentProfileModuleValues(
+    studentId: string,
+    moduleId: string,
+    values: Record<string, unknown>
+  ): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/classes/profile/students/${encodeURIComponent(studentId)}/modules/${encodeURIComponent(moduleId)}/values`),
+      {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({ values }),
+      }
+    );
+    if (!response.ok) {
+      const text = await response.text().catch(() => 'Failed to save student profile values');
+      throw new Error(text || 'Failed to save student profile values');
+    }
   },
 
   /**
@@ -596,7 +710,4 @@ export const api = {
   },
 };
 
-/**
- * 导出是否使用云端存储的标志
- */
 export { USE_CLOUD_STORAGE };

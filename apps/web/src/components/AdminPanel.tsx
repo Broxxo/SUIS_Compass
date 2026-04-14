@@ -13,7 +13,9 @@ import {
   updateUserRole,
   batchUpdateDepartment,
   deleteUser,
+  importStudentAccounts,
 } from '../lib/adminStorage';
+import { USE_CLOUD_STORAGE } from '../lib/api';
 import {
   loadAcademicYears,
   loadCurrentAcademicYearId,
@@ -33,12 +35,17 @@ import {
 import type { AcademicYear, Student, Enrollment, ClassItem } from '../types/classManagement';
 import ClassManagement from './ClassManagement';
 import CreateStudentDialog from './CreateStudentDialog';
-import { ArrowDown, ArrowUp, Eye, EyeOff, Pencil, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Eye, EyeOff, LogIn, Pencil, Plus, Trash2 } from 'lucide-react';
+
+function randomSixDigitPassword(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
 
 const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   'system-admin': { zh: '系统管理员', en: 'System Admin' },
   admin: { zh: '管理员', en: 'Admin' },
   teacher: { zh: '教师', en: 'Teacher' },
+  student: { zh: '学生', en: 'Student' },
 };
 
 interface AdminPanelProps {
@@ -92,17 +99,31 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [studentFilterName, setStudentFilterName] = useState('');
   const [studentFilterGrade, setStudentFilterGrade] = useState('');
   const [studentFilterClass, setStudentFilterClass] = useState('');
-  const [studentSortField, setStudentSortField] = useState<'name' | 'grade' | 'gender' | 'studentNumber' | 'dateOfBirth'>('name');
+  const [studentSortField, setStudentSortField] = useState<'nameZh' | 'nameEn' | 'currentGrade' | 'gender' | 'studentNumber' | 'dateOfBirth'>('nameZh');
   const [studentSortDir, setStudentSortDir] = useState<'asc' | 'desc'>('asc');
   const [editStudent, setEditStudent] = useState<Student | null>(null);
-  const [editName, setEditName] = useState('');
-  const [editGrade, setEditGrade] = useState('');
+  const [editNameZh, setEditNameZh] = useState('');
+  const [editNameEn, setEditNameEn] = useState('');
+  const [editCurrentGrade, setEditCurrentGrade] = useState('');
   const [editGender, setEditGender] = useState<Student['gender']>('male');
+  const [editDivision, setEditDivision] = useState('');
+  const [editEntryDate, setEditEntryDate] = useState('');
+  const [editStatus, setEditStatus] = useState<Student['status']>('active');
   const [editStudentNumber, setEditStudentNumber] = useState('');
   const [editDateOfBirth, setEditDateOfBirth] = useState('');
   const [editSubmitLoading, setEditSubmitLoading] = useState(false);
   const [studentCurrentYearId, setStudentCurrentYearId] = useState<string | null>(null);
   const [dialogCreateStudent, setDialogCreateStudent] = useState(false);
+
+  /** 用户管理：教职工列表 | 学生账号列表 */
+  const [userListScope, setUserListScope] = useState<'staff' | 'students'>('staff');
+  const [studentLoginOpen, setStudentLoginOpen] = useState(false);
+  const [studentLoginPreview, setStudentLoginPreview] = useState<
+    Array<{ studentId: string; nameZh: string; nameEn: string; studentNumber: string; password: string }>
+  >([]);
+  const [studentLoginPhase, setStudentLoginPhase] = useState<'preview' | 'done'>('preview');
+  const [studentLoginResult, setStudentLoginResult] = useState<{ created: number; skipped: number } | null>(null);
+  const [studentLoginBusy, setStudentLoginBusy] = useState(false);
 
   /** 仅系统管理员可创建/修改学年 */
   const canEditYears = currentUser?.role === 'system-admin';
@@ -114,24 +135,29 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     return [];
   }, [currentUser?.role]);
 
-  /** 列表展示：系统管理员看管理员+教师，管理员仅看教师 */
+  /** 列表展示：学生账号为独立 scope；教职工仍按权限过滤 */
   const displayedUsers = useMemo(() => {
+    if (userListScope === 'students') return users;
     if (currentUser?.role === 'system-admin') return users.filter((u) => u.role === 'admin' || u.role === 'teacher');
     if (currentUser?.role === 'admin') return users.filter((u) => u.role === 'teacher');
     return users;
-  }, [users, currentUser?.role]);
+  }, [users, currentUser?.role, userListScope]);
 
-  /** 当前用户可否编辑该行（角色、部门等）：系统管理员可编管理员/教师，管理员只可编教师 */
+  /** 当前用户可否编辑该行（角色、部门等）：学生账号不可在此编辑 */
   const canEditUser = (u: AdminUser) => {
+    if (u.role === 'student') return false;
     if (u.role === 'system-admin') return false;
     if (currentUser?.role === 'system-admin') return true;
     if (currentUser?.role === 'admin' && u.role === 'teacher') return true;
     return false;
   };
 
-  /** 当前用户可否删除该行：系统管理员可删管理员/教师，管理员只可删教师；预设系统管理员不可删（由 adminStorage 拦截） */
+  /** 当前用户可否删除该行：系统管理员可删管理员/教师/学生，管理员可删教师与学生 */
   const canDeleteUser = (u: AdminUser) => {
     if (u.role === 'system-admin') return false;
+    if (u.role === 'student') {
+      return currentUser?.role === 'system-admin' || currentUser?.role === 'admin';
+    }
     if (currentUser?.role === 'system-admin') return true;
     if (currentUser?.role === 'admin' && u.role === 'teacher') return true;
     return false;
@@ -147,13 +173,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [displayedUsers]);
 
   useEffect(() => {
+    if (adminTab !== 'users') return;
     setLoading(true);
     setError(null);
-    loadUsers()
+    loadUsers(userListScope)
       .then((data) => setUsers(data))
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load users'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [adminTab, userListScope]);
 
   useEffect(() => {
     if (assignableRoles.length > 0 && !assignableRoles.includes(role)) {
@@ -267,13 +294,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     if (studentFilterName.trim()) {
       const q = studentFilterName.trim().toLowerCase();
       list = list.filter((s) =>
+        (s.nameZh ?? '').toLowerCase().includes(q) ||
+        (s.nameEn ?? '').toLowerCase().includes(q) ||
         s.name.toLowerCase().includes(q) ||
         (s.studentNumber?.toLowerCase().includes(q))
       );
     }
     if (studentFilterGrade.trim()) {
       const q = studentFilterGrade.trim().toLowerCase();
-      list = list.filter((s) => (s.grade ?? '').toLowerCase().includes(q));
+      list = list.filter((s) => String(s.currentGrade ?? '').toLowerCase().includes(q));
     }
     if (studentFilterClass.trim()) {
       const classId = studentFilterClass;
@@ -283,11 +312,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     list.sort((a, b) => {
       let cmp = 0;
       switch (studentSortField) {
-        case 'name':
-          cmp = (a.name || '').localeCompare(b.name || '');
+        case 'nameZh':
+          cmp = (a.nameZh || '').localeCompare(b.nameZh || '');
           break;
-        case 'grade':
-          cmp = (a.grade ?? '').localeCompare(b.grade ?? '');
+        case 'nameEn':
+          cmp = (a.nameEn || '').localeCompare(b.nameEn || '');
+          break;
+        case 'currentGrade':
+          cmp = (a.currentGrade ?? 0) - (b.currentGrade ?? 0);
           break;
         case 'gender':
           cmp = (a.gender || '').localeCompare(b.gender || '');
@@ -308,26 +340,54 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const openEditStudent = (s: Student) => {
     setEditStudent(s);
-    setEditName(s.name);
-    setEditGrade(s.grade ?? '');
+    setEditNameZh(s.nameZh ?? '');
+    setEditNameEn(s.nameEn ?? '');
+    setEditCurrentGrade(s.currentGrade == null ? '' : String(s.currentGrade));
     setEditGender(s.gender);
+    setEditDivision(s.division ?? '');
+    setEditEntryDate(s.entryDate ?? '');
+    setEditStatus(s.status ?? 'active');
     setEditStudentNumber(s.studentNumber ?? '');
     setEditDateOfBirth(s.dateOfBirth ?? '');
   };
 
   const handleSaveStudent = async () => {
-    if (!editStudent || !editName.trim()) return;
+    if (!editStudent) return;
+    const zh = editNameZh.trim();
+    const en = editNameEn.trim();
+    if (!zh && !en) return;
     setEditSubmitLoading(true);
     setError(null);
     try {
       await updateStudent(editStudent.id, {
-        name: editName.trim(),
-        grade: editGrade.trim() || null,
+        name: zh || en,
+        nameZh: zh || null,
+        nameEn: en || null,
+        currentGrade: editCurrentGrade.trim() ? Number(editCurrentGrade) : null,
         gender: editGender,
+        division: editDivision.trim() || null,
+        entryDate: editEntryDate.trim() || null,
+        status: editStatus || 'active',
         studentNumber: editStudentNumber.trim() || null,
         dateOfBirth: editDateOfBirth.trim() || null,
       });
-      setStudents((prev) => prev.map((s) => (s.id === editStudent.id ? { ...s, name: editName.trim(), grade: editGrade.trim() || null, gender: editGender, studentNumber: editStudentNumber.trim() || null, dateOfBirth: editDateOfBirth.trim() || null } : s)));
+      setStudents((prev) => prev.map((s) => (
+        s.id === editStudent.id
+          ? {
+              ...s,
+              name: zh || en,
+              nameZh: zh || null,
+              nameEn: en || null,
+              currentGrade: editCurrentGrade.trim() ? Number(editCurrentGrade) : null,
+              gender: editGender,
+              division: editDivision.trim() || null,
+              entryDate: editEntryDate.trim() || null,
+              status: editStatus || 'active',
+              studentNumber: editStudentNumber.trim() || null,
+              dateOfBirth: editDateOfBirth.trim() || null,
+            }
+          : s
+      )));
       setEditStudent(null);
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Failed to update student');
@@ -472,6 +532,60 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
   };
 
+  const openStudentLoginDialog = async () => {
+    if (!USE_CLOUD_STORAGE) return;
+    setStudentLoginBusy(true);
+    setStudentLoginPhase('preview');
+    setStudentLoginResult(null);
+    setError(null);
+    try {
+      const list = await loadStudents();
+      const withNumber = list.filter((s) => s.studentNumber != null && String(s.studentNumber).trim() !== '');
+      setStudentLoginPreview(
+        withNumber.map((s) => ({
+          studentId: s.id,
+          nameZh: s.nameZh ?? '',
+          nameEn: s.nameEn ?? '',
+          studentNumber: String(s.studentNumber).trim(),
+          password: randomSixDigitPassword(),
+        })),
+      );
+      setStudentLoginOpen(true);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to load students');
+    } finally {
+      setStudentLoginBusy(false);
+    }
+  };
+
+  const confirmStudentLoginImport = async () => {
+    if (studentLoginPreview.length === 0) return;
+    setStudentLoginBusy(true);
+    setError(null);
+    try {
+      const { created, skipped } = await importStudentAccounts(
+        studentLoginPreview.map((r) => ({ studentId: r.studentId, password: r.password })),
+      );
+      setStudentLoginResult({ created: created.length, skipped: skipped.length });
+      setStudentLoginPhase('done');
+      if (adminTab === 'users' && userListScope === 'students') {
+        const next = await loadUsers('students');
+        setUsers(next);
+      }
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Import failed');
+    } finally {
+      setStudentLoginBusy(false);
+    }
+  };
+
+  const closeStudentLoginDialog = () => {
+    setStudentLoginOpen(false);
+    setStudentLoginPreview([]);
+    setStudentLoginPhase('preview');
+    setStudentLoginResult(null);
+  };
+
   const permissionRows: { role: User['role']; panel: boolean; seeUsers: string; canCreate: string; canDelete: string; yearMgmt: string; classMgmt: string }[] = [
     {
       role: 'system-admin',
@@ -554,6 +668,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
         {adminTab === 'users' && (
         <>
+        {userListScope === 'staff' && (
         <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6">
           <h2 className="text-base sm:text-lg font-semibold text-slate-800 mb-3">
             {isZh ? '权限说明' : 'Permission reference'}
@@ -587,10 +702,12 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             </table>
           </div>
           <p className="text-xs text-slate-500 mt-2">
-            {isZh ? '系统管理员可在下方用户列表中直接修改「管理员」「教师」的角色（升级或降级）。' : 'System admin can change admin/teacher role in the user list below.'}
+            {isZh ? '系统管理员可在下方用户列表中直接修改「管理员」「教师」的角色（升级或降级）。学生账号由「学生管理 → 学生登录」开通，可在「所有用户 → 学生账号」中查看。' : 'System admin can change admin/teacher roles below. Student logins are created under Students → Student login; view them under All users → Student accounts.'}
           </p>
         </section>
+        )}
 
+        {userListScope === 'staff' && (
         <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
           <h2 className="text-base sm:text-lg font-semibold text-slate-800">
             {isZh ? '创建新用户' : 'Create New User'}
@@ -656,44 +773,73 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           </div>
           {error && <p className="text-xs text-red-500">{error}</p>}
         </section>
+        )}
 
         <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6">
-          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <h2 className="text-base sm:text-lg font-semibold text-slate-800">
-              {isZh ? '所有用户' : 'All Users'}
-            </h2>
-            {loading && (
-              <span className="text-xs text-slate-500">
-                {isZh ? '加载中…' : 'Loading…'}
+          <div className="flex flex-col gap-3 mb-3">
+            <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 pb-3">
+              <span className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                {isZh ? '列表' : 'List'}
               </span>
-            )}
-            {!loading && displayedUsers.length > 0 && selectedIds.size > 0 && (
-              <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => { setUserListScope('staff'); setSelectedIds(new Set()); }}
+                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${userListScope === 'staff' ? 'border-slate-800 bg-slate-50 text-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+              >
+                {isZh ? '教职工' : 'Staff'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setUserListScope('students'); setSelectedIds(new Set()); }}
+                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${userListScope === 'students' ? 'border-slate-800 bg-slate-50 text-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+              >
+                {isZh ? '学生账号' : 'Student accounts'}
+              </button>
+            </div>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <h2 className="text-base sm:text-lg font-semibold text-slate-800">
+                {userListScope === 'staff' ? (isZh ? '所有用户（教职工）' : 'All users (staff)') : (isZh ? '所有用户（学生账号）' : 'All users (students)')}
+              </h2>
+              {loading && (
                 <span className="text-xs text-slate-500">
-                  {isZh ? `已选 ${selectedIds.size} 人` : `Selected ${selectedIds.size}`}
+                  {isZh ? '加载中…' : 'Loading…'}
                 </span>
-                <input
-                  value={batchDepartment}
-                  onChange={(e) => setBatchDepartment(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm w-32"
-                  placeholder={isZh ? '部门名称' : 'Department'}
-                />
-                <Button
-                  size="sm"
-                  onClick={handleBatchDepartment}
-                  disabled={batchDeptLoading}
-                >
-                  {batchDeptLoading ? (isZh ? '处理中…' : 'Updating…') : isZh ? '设为分组' : 'Set group'}
-                </Button>
-              </div>
-            )}
+              )}
+              {!loading && userListScope === 'staff' && displayedUsers.length > 0 && selectedIds.size > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs text-slate-500">
+                    {isZh ? `已选 ${selectedIds.size} 人` : `Selected ${selectedIds.size}`}
+                  </span>
+                  <input
+                    value={batchDepartment}
+                    onChange={(e) => setBatchDepartment(e.target.value)}
+                    className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm w-32"
+                    placeholder={isZh ? '部门名称' : 'Department'}
+                  />
+                  <Button
+                    size="sm"
+                    onClick={handleBatchDepartment}
+                    disabled={batchDeptLoading}
+                  >
+                    {batchDeptLoading ? (isZh ? '处理中…' : 'Updating…') : isZh ? '设为分组' : 'Set group'}
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
-          {!loading && displayedUsers.length === 0 && (
-            <p className="text-sm text-slate-500">
-              {isZh ? '暂时没有用户数据。' : 'No users yet.'}
+          {!loading && userListScope === 'students' && !USE_CLOUD_STORAGE && (
+            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
+              {isZh ? '当前为本地模式，学生账号列表与导入仅在使用云端存储时可用。请在 .env 中启用 VITE_USE_CLOUD_STORAGE=true 并登录。' : 'Local mode: student account list and import require cloud mode. Set VITE_USE_CLOUD_STORAGE=true and sign in.'}
             </p>
           )}
-          {displayedUsers.length > 0 && (
+          {!loading && displayedUsers.length === 0 && (
+            <p className="text-sm text-slate-500">
+              {userListScope === 'students'
+                ? (isZh ? '暂无学生登录账号。可在「学生管理」中使用「学生登录」批量开通。' : 'No student accounts yet. Use Student login under Students.')
+                : (isZh ? '暂时没有用户数据。' : 'No users yet.')}
+            </p>
+          )}
+          {displayedUsers.length > 0 && userListScope === 'staff' && (
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
@@ -735,7 +881,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                         <td className="py-2 pr-4">{u.username}</td>
                         <td className="py-2 pr-4">{u.displayName}</td>
                         <td className="py-2 pr-4">
-                          {currentUser?.role === 'system-admin' && u.role !== 'system-admin' ? (
+                          {currentUser?.role === 'system-admin' && u.role !== 'system-admin' && u.role !== 'student' ? (
                             <select
                               value={u.role}
                               onChange={(e) => handleRoleChange(u, e.target.value as 'admin' | 'teacher')}
@@ -796,6 +942,77 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                               onClick={() => openDeleteConfirm(u)}
                               className="p-1.5 rounded hover:bg-red-50 text-slate-500 hover:text-red-600"
                               title={isZh ? '删除' : 'Delete'}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {displayedUsers.length > 0 && userListScope === 'students' && USE_CLOUD_STORAGE && (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                    <th className="py-2 pr-4">ID</th>
+                    <th className="py-2 pr-4">{isZh ? '学号（登录名）' : 'Student no. (login)'}</th>
+                    <th className="py-2 pr-4">{isZh ? '显示名称' : 'Display name'}</th>
+                    <th className="py-2 pr-4">{isZh ? '中文名' : 'Name (ZH)'}</th>
+                    <th className="py-2 pr-4">{isZh ? '英文名' : 'Name (EN)'}</th>
+                    <th className="py-2 pr-4">{isZh ? '学籍 ID' : 'Student record'}</th>
+                    <th className="py-2 pr-4">{isZh ? '密码' : 'Password'}</th>
+                    <th className="py-2 pr-4">{isZh ? '创建时间' : 'Created at'}</th>
+                    <th className="py-2 pr-2 w-10" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayedUsers.map((u) => {
+                    const hasPassword = u.password != null && u.password !== '';
+                    const revealed = passwordRevealed[u.id];
+                    return (
+                      <tr key={u.id} className="border-b border-slate-100 last:border-b-0">
+                        <td className="py-2 pr-4 font-mono text-xs text-slate-500 truncate max-w-[100px]">{u.id}</td>
+                        <td className="py-2 pr-4 font-mono">{u.username}</td>
+                        <td className="py-2 pr-4">{u.displayName}</td>
+                        <td className="py-2 pr-4">{u.studentNameZh ?? '—'}</td>
+                        <td className="py-2 pr-4">{u.studentNameEn ?? '—'}</td>
+                        <td className="py-2 pr-4 font-mono text-xs text-slate-600">{u.studentId ?? '—'}</td>
+                        <td className="py-2 pr-4">
+                          {hasPassword ? (
+                            <span className="inline-flex items-center gap-1">
+                              <span className="font-mono text-xs">
+                                {revealed ? u.password : '••••••'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setPasswordRevealed((prev) => ({ ...prev, [u.id]: !prev[u.id] }))}
+                                className="p-1 rounded hover:bg-slate-100 text-slate-500 hover:text-slate-700"
+                                title={revealed ? (isZh ? '隐藏密码' : 'Hide password') : (isZh ? '显示密码' : 'Show password')}
+                              >
+                                {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                              </button>
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 text-xs">{isZh ? '不可查看' : 'N/A'}</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 text-xs text-slate-500">
+                          {u.createdAt ? new Date(u.createdAt).toLocaleString() : '-'}
+                        </td>
+                        <td className="py-2 pr-2">
+                          {canDeleteUser(u) ? (
+                            <button
+                              type="button"
+                              onClick={() => openDeleteConfirm(u)}
+                              className="p-1.5 rounded hover:bg-red-50 text-slate-500 hover:text-red-600"
+                              title={isZh ? '删除登录账号' : 'Remove login'}
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
@@ -926,21 +1143,37 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
             {/* 第二块：标题 + 创建按钮 + 筛选 + 表格（与「班级列表」卡片结构一致） */}
             <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                 <h2 className="text-base font-semibold text-slate-800">
                   {studentCurrentYearId
                     ? `${allYears.find((y) => y.id === studentCurrentYearId)?.name ?? ''} — ${isZh ? '学生列表' : 'Students'}`
                     : (isZh ? '学生列表' : 'Student list')}
                 </h2>
-                <Button
-                  size="sm"
-                  onClick={() => setDialogCreateStudent(true)}
-                  disabled={!studentCurrentYearId}
-                  title={!studentCurrentYearId ? (isZh ? '请先选择当前学年' : 'Select current year first') : undefined}
-                >
-                  <Plus className="h-4 w-4 mr-1" />
-                  {isZh ? '创建学生' : 'Create student'}
-                </Button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void openStudentLoginDialog()}
+                    disabled={!USE_CLOUD_STORAGE || studentLoginBusy}
+                    title={
+                      !USE_CLOUD_STORAGE
+                        ? (isZh ? '需开启云端存储后从服务器导入登录账号' : 'Requires cloud mode')
+                        : (isZh ? '为有学号的学生生成密码并导入服务器' : 'Import login accounts for students with student number')
+                    }
+                  >
+                    <LogIn className="h-4 w-4 mr-1" />
+                    {studentLoginBusy ? (isZh ? '准备中…' : 'Loading…') : isZh ? '学生登录' : 'Student login'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => setDialogCreateStudent(true)}
+                    disabled={!studentCurrentYearId}
+                    title={!studentCurrentYearId ? (isZh ? '请先选择当前学年' : 'Select current year first') : undefined}
+                  >
+                    <Plus className="h-4 w-4 mr-1" />
+                    {isZh ? '创建学生' : 'Create student'}
+                  </Button>
+                </div>
               </div>
 
               <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
@@ -948,13 +1181,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 <input
                   value={studentFilterName}
                   onChange={(e) => setStudentFilterName(e.target.value)}
-                  placeholder={isZh ? '姓名/学号' : 'Name/ID'}
+                  placeholder={isZh ? '中文名/英文名/学号' : 'Chinese/English name or ID'}
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm w-36 placeholder:text-slate-400"
                 />
                 <input
                   value={studentFilterGrade}
                   onChange={(e) => setStudentFilterGrade(e.target.value)}
-                  placeholder={isZh ? '年级' : 'Grade'}
+                  placeholder={isZh ? '当前年级' : 'Current grade'}
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm w-24 placeholder:text-slate-400"
                 />
                 <select
@@ -981,32 +1214,93 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   <table className="min-w-full text-sm">
                     <thead>
                       <tr className="bg-slate-100 text-left text-xs text-slate-600">
-                        {(['name', 'grade', 'gender', 'studentNumber', 'dateOfBirth'] as const).map((field) => (
-                          <th key={field} className="py-2.5 px-3 font-medium">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setStudentSortField(field);
-                                setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-                              }}
-                              className="flex items-center gap-1 hover:text-slate-800"
-                            >
-                              {field === 'name' && (isZh ? '姓名' : 'Name')}
-                              {field === 'grade' && (isZh ? '年级' : 'Grade')}
-                              {field === 'gender' && (isZh ? '性别' : 'Gender')}
-                              {field === 'studentNumber' && (isZh ? '学号' : 'Number')}
-                              {field === 'dateOfBirth' && (isZh ? '出生日期' : 'DOB')}
-                              {studentSortField === field && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
-                            </button>
-                          </th>
-                        ))}
+                        <th className="py-2.5 px-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setStudentSortField('nameZh');
+                              setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                            }}
+                            className="flex items-center gap-1 hover:text-slate-800"
+                          >
+                            {isZh ? '中文名' : 'Chinese name'}
+                            {studentSortField === 'nameZh' && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                          </button>
+                        </th>
+                        <th className="py-2.5 px-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setStudentSortField('nameEn');
+                              setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                            }}
+                            className="flex items-center gap-1 hover:text-slate-800"
+                          >
+                            {isZh ? '英文名' : 'English name'}
+                            {studentSortField === 'nameEn' && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                          </button>
+                        </th>
+                        <th className="py-2.5 px-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setStudentSortField('currentGrade');
+                              setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                            }}
+                            className="flex items-center gap-1 hover:text-slate-800"
+                          >
+                            {isZh ? '当前年级' : 'Current grade'}
+                            {studentSortField === 'currentGrade' && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                          </button>
+                        </th>
+                        <th className="py-2.5 px-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setStudentSortField('gender');
+                              setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                            }}
+                            className="flex items-center gap-1 hover:text-slate-800"
+                          >
+                            {isZh ? '性别' : 'Gender'}
+                            {studentSortField === 'gender' && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                          </button>
+                        </th>
+                        <th className="py-2.5 px-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setStudentSortField('studentNumber');
+                              setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                            }}
+                            className="flex items-center gap-1 hover:text-slate-800"
+                          >
+                            {isZh ? '学号' : 'Number'}
+                            {studentSortField === 'studentNumber' && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                          </button>
+                        </th>
+                        <th className="py-2.5 px-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setStudentSortField('dateOfBirth');
+                              setStudentSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                            }}
+                            className="flex items-center gap-1 hover:text-slate-800"
+                          >
+                            {isZh ? '出生日期' : 'DOB'}
+                            {studentSortField === 'dateOfBirth' && (studentSortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                          </button>
+                        </th>
+                        <th className="py-2.5 px-3 font-medium">{isZh ? '学部' : 'Division'}</th>
+                        <th className="py-2.5 px-3 font-medium">{isZh ? '状态' : 'Status'}</th>
                         <th className="py-2.5 px-3 font-medium">{isZh ? '所在班级' : 'Classes'}</th>
                         <th className="py-2.5 px-3 font-medium w-14">{isZh ? '操作' : ''}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {filteredAndSortedStudents.length === 0 ? (
-                        <tr><td colSpan={7} className="py-8 text-center text-slate-500 text-sm">{isZh ? '暂无学生' : 'No students'}</td></tr>
+                        <tr><td colSpan={11} className="py-8 text-center text-slate-500 text-sm">{isZh ? '暂无学生' : 'No students'}</td></tr>
                       ) : (
                         filteredAndSortedStudents.map((s) => {
                           const myEnrollments = enrollments.filter((e) => e.studentId === s.id);
@@ -1017,13 +1311,24 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                           });
                           return (
                             <tr key={s.id} className="border-t border-slate-100 hover:bg-slate-50">
-                              <td className="py-2.5 px-3 font-medium text-slate-800">{s.name}</td>
-                              <td className="py-2.5 px-3 text-slate-600">{s.grade ?? '—'}</td>
+                              <td className="py-2.5 px-3 font-medium text-slate-800">{s.nameZh ?? '—'}</td>
+                              <td className="py-2.5 px-3 text-slate-600">{s.nameEn ?? '—'}</td>
+                              <td className="py-2.5 px-3 text-slate-600">{s.currentGrade != null ? `G${s.currentGrade}` : '—'}</td>
                               <td className="py-2.5 px-3 text-slate-600">
                                 {s.gender === 'male' ? (isZh ? '男' : 'M') : s.gender === 'female' ? (isZh ? '女' : 'F') : (isZh ? '其他' : 'Other')}
                               </td>
                               <td className="py-2.5 px-3 text-slate-600">{s.studentNumber ?? '—'}</td>
                               <td className="py-2.5 px-3 text-slate-600">{s.dateOfBirth ?? '—'}</td>
+                              <td className="py-2.5 px-3 text-slate-600">{s.division ?? '—'}</td>
+                              <td className="py-2.5 px-3 text-slate-600">
+                                {s.status === 'graduated'
+                                  ? (isZh ? '毕业' : 'Graduated')
+                                  : s.status === 'leave'
+                                    ? (isZh ? '休学' : 'Leave')
+                                    : s.status === 'withdrawn'
+                                      ? (isZh ? '离校' : 'Withdrawn')
+                                      : (isZh ? '在读' : 'Active')}
+                              </td>
                               <td className="py-2.5 px-3 text-slate-600 text-xs">{classLabels.join('; ') || '—'}</td>
                               <td className="py-2.5 px-3">
                                 <button
@@ -1103,6 +1408,79 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={studentLoginOpen}
+        onOpenChange={(open) => {
+          if (!open) closeStudentLoginDialog();
+        }}
+      >
+        <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>{isZh ? '学生登录账号导入' : 'Import student logins'}</DialogTitle>
+            <DialogDescription>
+              {studentLoginPhase === 'preview'
+                ? (isZh
+                  ? '以下为当前档案中有学号的学生；确认后将把学号作为用户名、并写入随机 6 位数字密码到服务器。已开通或学号冲突的条目将被跳过。'
+                  : 'Students with a student number below. Confirm to create accounts (username = number, random 6-digit password). Existing or conflicting rows are skipped.')
+                : (isZh ? '导入已完成。' : 'Import finished.')}
+            </DialogDescription>
+          </DialogHeader>
+          {studentLoginPhase === 'preview' && studentLoginPreview.length === 0 && (
+            <p className="text-sm text-slate-500 py-4">
+              {isZh ? '没有可导入的学生（需填写学号）。' : 'No students with a student number to import.'}
+            </p>
+          )}
+          {studentLoginPhase === 'preview' && studentLoginPreview.length > 0 && (
+            <div className="overflow-auto flex-1 min-h-0 border border-slate-200 rounded-lg">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 sticky top-0 text-left text-xs text-slate-600">
+                  <tr>
+                    <th className="py-2 px-3 font-medium">{isZh ? '学号' : 'No.'}</th>
+                    <th className="py-2 px-3 font-medium">{isZh ? '中文名' : 'ZH'}</th>
+                    <th className="py-2 px-3 font-medium">{isZh ? '英文名' : 'EN'}</th>
+                    <th className="py-2 px-3 font-medium">{isZh ? '随机密码' : 'Password'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studentLoginPreview.map((r) => (
+                    <tr key={r.studentId} className="border-t border-slate-100">
+                      <td className="py-2 px-3 font-mono">{r.studentNumber}</td>
+                      <td className="py-2 px-3">{r.nameZh || '—'}</td>
+                      <td className="py-2 px-3">{r.nameEn || '—'}</td>
+                      <td className="py-2 px-3 font-mono">{r.password}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {studentLoginPhase === 'done' && studentLoginResult && (
+            <p className="text-sm text-slate-700 py-2">
+              {isZh
+                ? `成功开通 ${studentLoginResult.created} 个账号；跳过 ${studentLoginResult.skipped} 条。可在「用户管理 → 学生账号」中查看。`
+                : `Created ${studentLoginResult.created} account(s); skipped ${studentLoginResult.skipped}. See Users → Student accounts.`}
+            </p>
+          )}
+          <DialogFooter className="gap-2 sm:gap-0">
+            {studentLoginPhase === 'preview' ? (
+              <>
+                <Button variant="outline" onClick={closeStudentLoginDialog} disabled={studentLoginBusy}>
+                  {isZh ? '取消' : 'Cancel'}
+                </Button>
+                <Button
+                  onClick={() => void confirmStudentLoginImport()}
+                  disabled={studentLoginBusy || studentLoginPreview.length === 0}
+                >
+                  {studentLoginBusy ? (isZh ? '导入中…' : 'Importing…') : isZh ? '确认导入' : 'Confirm import'}
+                </Button>
+              </>
+            ) : (
+              <Button onClick={closeStudentLoginDialog}>{isZh ? '关闭' : 'Close'}</Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <CreateStudentDialog
         open={dialogCreateStudent}
         onClose={() => setDialogCreateStudent(false)}
@@ -1124,25 +1502,52 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         <DialogContent className="sm:max-w-[400px]">
           <DialogHeader>
             <DialogTitle>{isZh ? '编辑学生' : 'Edit student'}</DialogTitle>
-            <DialogDescription>{editStudent && (isZh ? `修改「${editStudent.name}」的信息` : `Edit "${editStudent.name}"`)}</DialogDescription>
+            <DialogDescription>
+              {editStudent && (isZh ? `修改「${editStudent.nameZh || editStudent.nameEn || editStudent.name}」的信息` : `Edit "${editStudent.nameZh || editStudent.nameEn || editStudent.name}"`)}
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
-            <div>
-              <label className="block text-xs text-slate-500 mb-1">{isZh ? '姓名' : 'Name'}</label>
-              <input
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '中文名' : 'Chinese name'}</label>
+                <input
+                  value={editNameZh}
+                  onChange={(e) => setEditNameZh(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '英文名' : 'English name'}</label>
+                <input
+                  value={editNameEn}
+                  onChange={(e) => setEditNameEn(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
             </div>
-            <div>
-              <label className="block text-xs text-slate-500 mb-1">{isZh ? '年级' : 'Grade'}</label>
-              <input
-                value={editGrade}
-                onChange={(e) => setEditGrade(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                placeholder={isZh ? '如 一年级、1、G9' : 'e.g. G1, 1'}
-              />
+            <p className="text-xs text-slate-500 -mt-1">
+              {isZh ? '中文名和英文名至少填写一个。' : 'Please provide at least one of Chinese or English name.'}
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '当前年级（数值）' : 'Current grade (number)'}</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={editCurrentGrade}
+                  onChange={(e) => setEditCurrentGrade(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '学部' : 'Division'}</label>
+                <input
+                  value={editDivision}
+                  onChange={(e) => setEditDivision(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '性别' : 'Gender'}</label>
@@ -1155,6 +1560,30 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 <option value="female">{isZh ? '女' : 'Female'}</option>
                 <option value="other">{isZh ? '其他' : 'Other'}</option>
               </select>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '入学时间' : 'Entry date'}</label>
+                <input
+                  type="date"
+                  value={editEntryDate}
+                  onChange={(e) => setEditEntryDate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '在读状态' : 'Status'}</label>
+                <select
+                  value={editStatus || 'active'}
+                  onChange={(e) => setEditStatus(e.target.value as Student['status'])}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+                >
+                  <option value="active">{isZh ? '在读' : 'Active'}</option>
+                  <option value="leave">{isZh ? '休学' : 'Leave'}</option>
+                  <option value="graduated">{isZh ? '毕业' : 'Graduated'}</option>
+                  <option value="withdrawn">{isZh ? '离校' : 'Withdrawn'}</option>
+                </select>
+              </div>
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '学号' : 'Student number'}</label>
@@ -1187,7 +1616,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             </Button>
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setEditStudent(null)}>{isZh ? '取消' : 'Cancel'}</Button>
-              <Button onClick={handleSaveStudent} disabled={!editName.trim() || editSubmitLoading}>
+              <Button onClick={handleSaveStudent} disabled={(!editNameZh.trim() && !editNameEn.trim()) || editSubmitLoading}>
                 {editSubmitLoading ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存' : 'Save'}
               </Button>
             </div>

@@ -54,11 +54,26 @@ AI 驱动的课程规划与管理系统，帮助教育工作者自动化课程�
 
 ## 本地开发与构建
 
+### 环境变量
+
+- **仅前端 + localStorage（默认轻便开发）**：`apps/web/.env` 中 `VITE_USE_CLOUD_STORAGE=false`。无需启动 API/数据库；登录可用预设账号（见登录页提示）。班级与学生数据在本浏览器 `localStorage`，**不自动迁移**到服务器。
+- **联调真实后端**：`VITE_USE_CLOUD_STORAGE=true`，并设置 `VITE_API_URL`（例如 `http://127.0.0.1:8080/api`），同时启动 `npm run dev` 中的 API 或使用 `npm run dev:api`。
+- **后端**：复制 `apps/api/.env.example` 为 `apps/api/.env`，配置 `DATABASE_URL` 与 `JWT_SECRET`（云端登录依赖 JWT）。
+
+### 本地 PostgreSQL（Docker）
+
+```bash
+npm run db:up   # docker compose up -d
+npm run db:init # 执行 apps/api/src/config/init.sql（无需本机 psql）
+```
+
+### 常用命令
+
 ```bash
 # 安装依赖
 npm install
 
-# 开发（同时起前端 + 后端）
+# 开发（先构建 shared，再同时起 API:8080 + Vite 前端）
 npm run dev
 
 # 仅前端
@@ -76,7 +91,7 @@ npm start
 
 ## 版本与状态
 
-- **当前版本**：1.0.5  
+- **当前版本**：1.0.6  
 - **状态**：已部署 Zeabur，稳定运行。  
 - **历史**：
   - **v1.0.0** 初始发布（课程河流基础能力）。
@@ -85,6 +100,7 @@ npm start
   - **v1.0.3** 后台管理。
   - **v1.0.4** 课堂助手。
   - **v1.0.5** 主界面 HUB UI 优化（固定网格、拖拽编辑、响应式与交互优化）。
+  - **v1.0.6** 学生登录账号（学号开通）、学生画像与学生端只读权限边界；班级/后台等相关 API 与 Docker 本地库等配套调整。
 
 ---
 

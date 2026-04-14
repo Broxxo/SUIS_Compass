@@ -49,10 +49,12 @@ export type SemesterData = {
   weeklyPeriods?: number;
 };
 
-/** 用户信息（API 返回不含 password）. 角色：系统管理员 > 管理员 > 教师 */
+/** 用户信息（API 返回不含 password）. 角色：系统管理员 > 管理员 > 教师；学生账号仅用于学生本人登录 */
 export type User = {
   id: string;
   username: string;
-  role: 'system-admin' | 'admin' | 'teacher';
+  role: 'system-admin' | 'admin' | 'teacher' | 'student';
   displayName: string;
+  /** 学籍 students.id，仅学生登录账号有值，用于画像等自有数据接口 */
+  studentId?: string | null;
 };

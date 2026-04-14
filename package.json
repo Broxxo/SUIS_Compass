@@ -1,7 +1,7 @@
 {
   "name": "curriculum-roadmap",
   "private": true,
-  "version": "1.0.5",
+  "version": "1.0.6",
   "type": "module",
   "scripts": {
     "build": "npm run build:shared && npm run build:web && npm run copy:web && npm run build -w @repo/api",
@@ -12,7 +12,11 @@
     "start": "node apps/api/dist/index.js",
     "dev:api": "npm run dev -w @repo/api",
     "dev:web": "npm run dev -w @repo/web",
-    "dev": "npm run build:shared && concurrently \"npm run dev:api\" \"npm run dev:web\""
+    "dev": "npm run build:shared && concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:init": "npm run db:init -w @repo/api",
+    "prepare:local": "npm run db:up && npm run db:init"
   },
   "workspaces": [
     "libs/*",

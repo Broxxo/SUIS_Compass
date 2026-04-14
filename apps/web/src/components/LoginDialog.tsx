@@ -4,6 +4,8 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
+import { USE_CLOUD_STORAGE } from '../lib/api';
+import { PRESET_USERS } from '../lib/users';
 import { Lock, User } from 'lucide-react';
 
 export default function LoginDialog() {
@@ -54,6 +56,18 @@ export default function LoginDialog() {
               : 'Please enter your username and password'}
           </DialogDescription>
         </DialogHeader>
+        {!USE_CLOUD_STORAGE && PRESET_USERS[0] && (
+          <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900 text-left space-y-1">
+            <p className="font-medium">
+              {language === 'zh' ? '当前：本地开发模式（无后端）' : 'Local dev mode (no API)'}
+            </p>
+            <p>
+              {language === 'zh'
+                ? `数据仅存本机浏览器。测试账号：${PRESET_USERS[0].username} / ${PRESET_USERS[0].password}。联调服务器时将 VITE_USE_CLOUD_STORAGE=true 并配置 VITE_API_URL。`
+                : `Data stays in this browser. Try ${PRESET_USERS[0].username} / ${PRESET_USERS[0].password}. For API: set VITE_USE_CLOUD_STORAGE=true and VITE_API_URL.`}
+            </p>
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium">

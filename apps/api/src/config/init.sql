@@ -109,13 +109,62 @@ CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_teacher_active ON class
 CREATE TABLE IF NOT EXISTS students (
   id VARCHAR(50) PRIMARY KEY,
   name VARCHAR(100) NOT NULL,
+  name_zh VARCHAR(100),
+  name_en VARCHAR(100),
   gender VARCHAR(20) NOT NULL CHECK (gender IN ('male', 'female', 'other')),
-  grade VARCHAR(50),
+  current_grade INTEGER CHECK (current_grade >= 1 AND current_grade <= 12),
+  current_class_id VARCHAR(50),
+  division VARCHAR(50),
+  entry_date DATE,
+  status VARCHAR(30) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'graduated', 'leave', 'withdrawn')),
   student_number VARCHAR(50),
   date_of_birth DATE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_students_student_number_unique ON students(student_number) WHERE student_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_students_current_class_id ON students(current_class_id);
+CREATE INDEX IF NOT EXISTS idx_students_status ON students(status);
+
+-- 学生登录：users.student_id 关联 students（须在 students 表创建之后执行）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_student_id_unique ON users(student_id) WHERE student_id IS NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_schema = 'public' AND table_name = 'users' AND constraint_name = 'users_student_id_fkey'
+  ) THEN
+    ALTER TABLE users ADD CONSTRAINT users_student_id_fkey
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+-- 兼容旧库：增量补列
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'name_zh') THEN
+    ALTER TABLE students ADD COLUMN name_zh VARCHAR(100);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'name_en') THEN
+    ALTER TABLE students ADD COLUMN name_en VARCHAR(100);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'current_grade') THEN
+    ALTER TABLE students ADD COLUMN current_grade INTEGER CHECK (current_grade >= 1 AND current_grade <= 12);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'current_class_id') THEN
+    ALTER TABLE students ADD COLUMN current_class_id VARCHAR(50);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'division') THEN
+    ALTER TABLE students ADD COLUMN division VARCHAR(50);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'entry_date') THEN
+    ALTER TABLE students ADD COLUMN entry_date DATE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'status') THEN
+    ALTER TABLE students ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'active';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS student_enrollments (
   id VARCHAR(50) PRIMARY KEY,
@@ -126,6 +175,71 @@ CREATE TABLE IF NOT EXISTS student_enrollments (
 );
 CREATE INDEX IF NOT EXISTS idx_enrollments_class_id ON student_enrollments(class_id);
 CREATE INDEX IF NOT EXISTS idx_enrollments_student_id ON student_enrollments(student_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_unique_per_year ON student_enrollments(student_id, academic_year_id);
+
+-- 学籍历史轨迹（权威）
+CREATE TABLE IF NOT EXISTS student_assignment_history (
+  id VARCHAR(80) PRIMARY KEY,
+  student_id VARCHAR(50) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  class_id VARCHAR(50) REFERENCES classes(id) ON DELETE SET NULL,
+  grade INTEGER CHECK (grade >= 1 AND grade <= 12),
+  division VARCHAR(50),
+  effective_from DATE NOT NULL DEFAULT CURRENT_DATE,
+  effective_to DATE,
+  source VARCHAR(30) NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'promotion', 'import', 'sync')),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_student_assignment_history_student ON student_assignment_history(student_id, effective_from DESC);
+CREATE INDEX IF NOT EXISTS idx_student_assignment_history_year ON student_assignment_history(academic_year_id);
+
+-- 学生画像可扩展模块定义
+CREATE TABLE IF NOT EXISTS student_profile_modules (
+  id VARCHAR(80) PRIMARY KEY,
+  key VARCHAR(80) NOT NULL UNIQUE,
+  name VARCHAR(120) NOT NULL,
+  description TEXT,
+  is_system BOOLEAN NOT NULL DEFAULT FALSE,
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS student_profile_module_fields (
+  id VARCHAR(80) PRIMARY KEY,
+  module_id VARCHAR(80) NOT NULL REFERENCES student_profile_modules(id) ON DELETE CASCADE,
+  field_key VARCHAR(80) NOT NULL,
+  label VARCHAR(120) NOT NULL,
+  field_type VARCHAR(30) NOT NULL CHECK (field_type IN ('text', 'number', 'single-select', 'multi-select', 'score')),
+  score_min NUMERIC,
+  score_max NUMERIC,
+  options JSONB,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_required BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(module_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_student_profile_module_fields_module ON student_profile_module_fields(module_id, sort_order ASC, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS student_profile_values (
+  id VARCHAR(100) PRIMARY KEY,
+  student_id VARCHAR(50) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  module_id VARCHAR(80) NOT NULL REFERENCES student_profile_modules(id) ON DELETE CASCADE,
+  field_key VARCHAR(80) NOT NULL,
+  value_json JSONB NOT NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(student_id, module_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_student_profile_values_student ON student_profile_values(student_id, module_id);
+
+-- 默认系统模块：能力雷达（分值 0-10，维度可扩展）
+INSERT INTO student_profile_modules (id, key, name, description, is_system, is_enabled)
+VALUES ('spm-ability', 'ability', '能力画像', '能力雷达图模块，默认分值范围 0-10', TRUE, TRUE)
+ON CONFLICT (key) DO NOTHING;
 
 -- 课堂助手（1.4）：分组方案、小组、成员、积分事件
 CREATE TABLE IF NOT EXISTS class_group_schemes (

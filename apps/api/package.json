@@ -1,6 +1,6 @@
 {
   "name": "@repo/api",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -8,7 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "db:init": "node -e \"require('dotenv').config(); const {execSync}=require('child_process'); execSync('psql $DATABASE_URL -f src/config/init.sql', {stdio:'inherit', env:process.env})\""
+    "db:init": "node scripts/init-db.mjs",
+    "db:init:psql": "node -e \"require('dotenv').config(); const {execSync}=require('child_process'); execSync('psql $DATABASE_URL -f src/config/init.sql', {stdio:'inherit', env:process.env})\""
   },
   "dependencies": {
     "@repo/shared": "*",

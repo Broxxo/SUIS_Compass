@@ -14,12 +14,19 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const AUTH_STORAGE_KEY = 'curriculum-roadmap-auth';
 
-function toUser(r: { id: string; username: string; role: string; displayName: string }): User {
+function toUser(r: {
+  id: string;
+  username: string;
+  role: string;
+  displayName: string;
+  studentId?: string | null;
+}): User {
   return {
     id: r.id,
     username: r.username,
     role: r.role as User['role'],
     displayName: r.displayName,
+    studentId: r.studentId ?? null,
   };
 }
 
@@ -69,7 +76,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string): Promise<boolean> => {
     if (USE_CLOUD_STORAGE) {
       try {
-        const data = await api.login(username, password) as { success?: boolean; token?: string; user?: { id: string; username: string; role: string; displayName: string } };
+        const data = await api.login(username, password) as {
+          success?: boolean;
+          token?: string;
+          user?: { id: string; username: string; role: string; displayName: string; studentId?: string | null };
+        };
         if (data.success && data.token && data.user) {
           const u = toUser(data.user);
           setUser(u);

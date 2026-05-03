@@ -70,6 +70,9 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const [dialogAddStudent, setDialogAddStudent] = useState<ClassItem | null>(null);
   const [dialogAddToClass, setDialogAddToClass] = useState<Student | null>(null);
   const [addToClassSelectedId, setAddToClassSelectedId] = useState('');
+  const [dialogLinkStudentsClass, setDialogLinkStudentsClass] = useState<ClassItem | null>(null);
+  const [linkStudentIds, setLinkStudentIds] = useState<Set<string>>(new Set());
+  const [linkLoading, setLinkLoading] = useState(false);
 
   const [newYearName, setNewYearName] = useState('');
   const [newClassName, setNewClassName] = useState('');
@@ -215,7 +218,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   };
 
   const handleCreateClass = async () => {
-    if (!currentYearId || !newClassName.trim()) return;
+    if (!currentYearId || !newClassName.trim() || !newClassTeacherId) return;
     setSubmitLoading(true);
     setError(null);
     try {
@@ -322,6 +325,41 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
       setError((e as Error)?.message || 'Failed to add to class');
     } finally {
       setSubmitLoading(false);
+    }
+  };
+
+  const linkCandidates = useMemo(() => {
+    if (!dialogLinkStudentsClass || !currentYearId) return [] as Student[];
+    const occupied = new Set(
+      enrollments
+        .filter((e) => e.academicYearId === currentYearId)
+        .map((e) => e.studentId)
+    );
+    return students.filter((s) => !occupied.has(s.id));
+  }, [dialogLinkStudentsClass, currentYearId, enrollments, students]);
+
+  const handleBatchLinkStudents = async () => {
+    const cls = dialogLinkStudentsClass;
+    if (!cls || !currentYearId || linkStudentIds.size === 0) return;
+    setLinkLoading(true);
+    setError(null);
+    try {
+      const ids = Array.from(linkStudentIds);
+      for (let i = 0; i < ids.length; i += 1) {
+        await addEnrollment({
+          id: `enr-${Date.now()}-${i}`,
+          studentId: ids[i],
+          classId: cls.id,
+          academicYearId: currentYearId,
+        });
+      }
+      setDialogLinkStudentsClass(null);
+      setLinkStudentIds(new Set());
+      setEnrollments(loadEnrollmentsSync(currentYearId));
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to link students');
+    } finally {
+      setLinkLoading(false);
     }
   };
 
@@ -504,15 +542,28 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                                 {isZh ? '学生' : 'Students'} <span className="text-slate-500 font-medium">({enrolls.length})</span>
                               </div>
                               {canEdit && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-8 text-xs"
-                                  onClick={() => setDialogAddStudent(c)}
-                                >
-                                  <Plus className="h-3.5 w-3.5 mr-1" />
-                                  {isZh ? '添加' : 'Add'}
-                                </Button>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 text-xs"
+                                    onClick={() => {
+                                      setDialogLinkStudentsClass(c);
+                                      setLinkStudentIds(new Set());
+                                    }}
+                                  >
+                                    {isZh ? '关联' : 'Link'}
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 text-xs"
+                                    onClick={() => setDialogAddStudent(c)}
+                                  >
+                                    <Plus className="h-3.5 w-3.5 mr-1" />
+                                    {isZh ? '新建' : 'New'}
+                                  </Button>
+                                </div>
                               )}
                             </div>
                             {enrolls.length === 0 ? (
@@ -657,7 +708,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogCreateClass(false)}>{isZh ? '取消' : 'Cancel'}</Button>
-            <Button onClick={handleCreateClass} disabled={!newClassName.trim() || submitLoading}>
+            <Button onClick={handleCreateClass} disabled={!newClassName.trim() || !newClassTeacherId || submitLoading}>
               {submitLoading ? (isZh ? '创建中…' : 'Creating…') : isZh ? '创建' : 'Create'}
             </Button>
           </DialogFooter>
@@ -673,6 +724,83 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
         onSuccess={handleCreateStudentSuccess}
         onError={(msg) => setError(msg)}
       />
+
+      <Dialog
+        open={!!dialogLinkStudentsClass}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDialogLinkStudentsClass(null);
+            setLinkStudentIds(new Set());
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{isZh ? '关联学生到班级' : 'Link students to class'}</DialogTitle>
+            <DialogDescription>
+              {dialogLinkStudentsClass
+                ? (isZh
+                  ? `选择已有学生，批量关联到「G${dialogLinkStudentsClass.grade} ${dialogLinkStudentsClass.name}」。`
+                  : `Select existing students and link them to "G${dialogLinkStudentsClass.grade} ${dialogLinkStudentsClass.name}".`)
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {linkCandidates.length === 0 ? (
+            <p className="text-sm text-slate-500">{isZh ? '当前学年暂无可关联学生。' : 'No available students for this year.'}</p>
+          ) : (
+            <div className="space-y-2 max-h-80 overflow-auto border border-slate-200 rounded-lg p-2">
+              <label className="flex items-center gap-2 px-2 py-1 text-sm text-slate-700 border-b border-slate-100">
+                <input
+                  type="checkbox"
+                  checked={linkStudentIds.size === linkCandidates.length}
+                  onChange={(e) => {
+                    if (e.target.checked) setLinkStudentIds(new Set(linkCandidates.map((s) => s.id)));
+                    else setLinkStudentIds(new Set());
+                  }}
+                />
+                {isZh ? '全选' : 'Select all'}
+              </label>
+              {linkCandidates.map((stu) => (
+                <label key={stu.id} className="flex items-center gap-2 px-2 py-1 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={linkStudentIds.has(stu.id)}
+                    onChange={(e) => {
+                      setLinkStudentIds((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(stu.id);
+                        else next.delete(stu.id);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span>
+                    {stu.name}
+                    {stu.studentNumber ? ` (${stu.studentNumber})` : ''}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDialogLinkStudentsClass(null);
+                setLinkStudentIds(new Set());
+              }}
+            >
+              {isZh ? '取消' : 'Cancel'}
+            </Button>
+            <Button
+              onClick={handleBatchLinkStudents}
+              disabled={linkLoading || linkStudentIds.size === 0}
+            >
+              {linkLoading ? (isZh ? '关联中…' : 'Linking…') : isZh ? '批量关联' : 'Link selected'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!dialogAddToClass} onOpenChange={(open) => !open && setDialogAddToClass(null)}>
         <DialogContent>

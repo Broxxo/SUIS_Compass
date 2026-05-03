@@ -87,3 +87,144 @@ export interface ClassPointEvent {
   reason?: string | null;
   createdAt: string;
 }
+
+export type Term = 'Semester 1' | 'Semester 2';
+export type ReportGrade = 'A+' | 'A' | 'A-' | 'B+' | 'B' | 'B-' | 'C+' | 'C' | 'C-' | 'D';
+export type TargetLevel = 'A' | 'B' | 'C' | 'D';
+
+export interface StudentTermTargetDimension {
+  id: string;
+  dimensionKey: string;
+  dimensionLabel: string;
+  sortOrder: number;
+  rating: TargetLevel | null;
+  levelDescriptions: Partial<Record<TargetLevel, string>>;
+}
+
+export interface StudentTermSubjectReport {
+  id: string;
+  subjectKey: string;
+  subjectName: string;
+  midtermScore: number | null;
+  midtermGrade: ReportGrade | null;
+  finalScore: number | null;
+  finalGrade: ReportGrade | null;
+  teacherComment: string | null;
+  teacherId: string | null;
+  dimensions: StudentTermTargetDimension[];
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface StudentTermReport {
+  id: string | null;
+  studentId: string;
+  academicYearId: string;
+  term: Term;
+  templateId?: string | null;
+  homeroomComment: string | null;
+  subjectReports: StudentTermSubjectReport[];
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export type ReportTemplateStatus = 'draft' | 'published' | 'closed';
+export type HomeroomCommentMode = 'disabled' | 'optional' | 'required';
+export type EvaluationModuleType = 'subject_score' | 'subject_comment' | 'non_score_comment';
+export type ScoreVisibility = 'teacher_homeroom_admin';
+
+export interface ReportTemplateDimension {
+  id: string;
+  dimensionKey: string;
+  dimensionLabel: string;
+  dimensionLabelZh: string;
+  dimensionLabelEn: string;
+  sortOrder: number;
+  levelDescriptions: Partial<Record<TargetLevel, string>>;
+}
+
+export interface ReportTemplateSubject {
+  id: string;
+  subjectKey: string;
+  subjectName: string;
+  subjectNameZh: string;
+  subjectNameEn: string;
+  moduleType: EvaluationModuleType;
+  enableScore: boolean;
+  enableTeacherComment: boolean;
+  scoreVisibility: ScoreVisibility;
+  sortOrder: number;
+  dimensions: ReportTemplateDimension[];
+}
+
+export interface ReportTemplate {
+  id: string | null;
+  academicYearId: string;
+  term: Term;
+  title: string | null;
+  templateType?: 'portrait-evaluation';
+  isActive?: boolean;
+  publishedAt?: string | null;
+  releasedAt?: string | null;
+  status: ReportTemplateStatus;
+  homeroomCommentMode: HomeroomCommentMode;
+  subjects: ReportTemplateSubject[];
+}
+
+export interface EvaluationTemplateSummary {
+  id: string;
+  academicYearId: string;
+  academicYearName: string;
+  term: Term;
+  title: string | null;
+  status: ReportTemplateStatus;
+  templateType: 'portrait-evaluation';
+  isActive: boolean;
+  publishedAt: string | null;
+  releasedAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ReportTemplateProgressTeacher {
+  teacherId: string;
+  teacherName: string;
+}
+
+export interface ReportTemplateProgressClassItem {
+  classId: string;
+  className: string;
+  grade: number;
+  totalStudents: number;
+  completedStudents: number;
+  pendingStudents: number;
+  completionRate: number;
+  pendingStudentNames: string[];
+  teachers: ReportTemplateProgressTeacher[];
+  reminderMessage: string;
+}
+
+export interface ReportTemplateProgress {
+  templateId: string;
+  title: string | null;
+  status: ReportTemplateStatus;
+  academicYearId: string;
+  term: Term;
+  totalStudents: number;
+  completedStudents: number;
+  pendingStudents: number;
+  completionRate: number;
+  classes: ReportTemplateProgressClassItem[];
+}
+
+export interface StaffingAssignment {
+  id: string;
+  academicYearId: string;
+  classId: string;
+  className: string;
+  classGrade: number;
+  subjectKey: string;
+  subjectName: string;
+  teacherId: string;
+  teacherName: string;
+  updatedAt: string | null;
+}

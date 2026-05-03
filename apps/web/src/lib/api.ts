@@ -8,6 +8,17 @@ import type {
   ClassGroup,
   ClassGroupMembership,
   ClassPointEvent,
+  StudentTermReport,
+  ReportTemplate,
+  EvaluationTemplateSummary,
+  ReportTemplateProgress,
+  StaffingAssignment,
+  ReportTemplateStatus,
+  HomeroomCommentMode,
+  EvaluationModuleType,
+  ScoreVisibility,
+  TargetLevel,
+  Term,
 } from '../types/classManagement';
 import { getCurrentUserId, getToken } from './authUtils';
 
@@ -29,8 +40,43 @@ function getHeaders(): HeadersInit {
 }
 
 function apiUrl(path: string): string {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  if (!API_BASE_URL) return normalizedPath;
+
+  // Support both forms in VITE_API_URL:
+  // - http://127.0.0.1:8080
+  // - http://127.0.0.1:8080/api
+  // while callers may already pass "/api/..." paths.
   const base = API_BASE_URL.replace(/\/$/, '');
-  return base ? `${base}${path.startsWith('/') ? path : `/${path}`}` : path.startsWith('/') ? path : `/${path}`;
+  if (base.endsWith('/api') && normalizedPath.startsWith('/api/')) {
+    return `${base.slice(0, -4)}${normalizedPath}`;
+  }
+  return `${base}${normalizedPath}`;
+}
+
+async function readJsonOrThrow(response: Response, fallbackError: string) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.toLowerCase().includes('application/json')) {
+    const text = await response.text().catch(() => '');
+    const preview = text.slice(0, 80).trim();
+    throw new Error(`${fallbackError}: expected JSON but got non-JSON response${preview ? ` (${preview})` : ''}`);
+  }
+  return response.json();
+}
+
+async function readErrorMessage(response: Response, fallbackError: string): Promise<string> {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.toLowerCase().includes('application/json')) {
+    const data = await response.json().catch(() => ({} as { error?: string; message?: string }));
+    return (data as { error?: string; message?: string }).error
+      || (data as { error?: string; message?: string }).message
+      || `${fallbackError} (${response.status})`;
+  }
+  const text = await response.text().catch(() => '');
+  const preview = text.slice(0, 120).trim();
+  return preview
+    ? `${fallbackError} (${response.status}): ${preview}`
+    : `${fallbackError} (${response.status})`;
 }
 
 /** 供 AI 等需要自行 fetch 的模块使用 */
@@ -343,6 +389,46 @@ export const api = {
     }
   },
 
+  async getDatabaseTables(): Promise<Array<{ tableName: string; rowCount: number }>> {
+    const response = await fetch(apiUrl('/api/admin/database/tables'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to fetch database tables'));
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch database tables');
+    return (data.tables ?? []) as Array<{ tableName: string; rowCount: number }>;
+  },
+
+  async getDatabaseTableRows(
+    tableName: string,
+    input?: { limit?: number; offset?: number }
+  ): Promise<{
+    tableName: string;
+    columns: string[];
+    primaryKey: string | null;
+    page: { limit: number; offset: number; total: number };
+    rows: Array<Record<string, unknown>>;
+  }> {
+    const limit = input?.limit ?? 20;
+    const offset = input?.offset ?? 0;
+    const response = await fetch(
+      apiUrl(`/api/admin/database/tables/${encodeURIComponent(tableName)}/rows?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to fetch table rows'));
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch table rows');
+    return {
+      tableName: data.tableName as string,
+      columns: (data.columns ?? []) as string[],
+      primaryKey: (data.primaryKey as string | null | undefined) ?? null,
+      page: (data.page ?? { limit, offset, total: 0 }) as { limit: number; offset: number; total: number },
+      rows: (data.rows ?? []) as Array<Record<string, unknown>>,
+    };
+  },
+
   /**
    * 班级管理 API（1.3）
    */
@@ -608,6 +694,304 @@ export const api = {
     if (!response.ok) {
       const text = await response.text().catch(() => 'Failed to save student profile values');
       throw new Error(text || 'Failed to save student profile values');
+    }
+  },
+
+  async getStudentTermReports(
+    studentId: string,
+    academicYearId?: string
+  ): Promise<Array<{
+    id: string;
+    studentId: string;
+    academicYearId: string;
+    academicYearName: string;
+    term: Term;
+    templateId: string | null;
+    templateTitle: string | null;
+    homeroomComment: string | null;
+    updatedAt: string | null;
+  }>> {
+    const q = academicYearId ? `?academicYearId=${encodeURIComponent(academicYearId)}` : '';
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/students/${encodeURIComponent(studentId)}${q}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch term reports');
+    const data = await readJsonOrThrow(response, 'Failed to fetch term reports');
+    return (data.reports ?? []) as Array<{
+      id: string;
+      studentId: string;
+      academicYearId: string;
+      academicYearName: string;
+      term: Term;
+      templateId: string | null;
+      templateTitle: string | null;
+      homeroomComment: string | null;
+      updatedAt: string | null;
+    }>;
+  },
+
+  async getStudentTermReportDetail(studentId: string, academicYearId: string, term: Term, templateId: string): Promise<StudentTermReport> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/students/${encodeURIComponent(studentId)}/terms/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}/templates/${encodeURIComponent(templateId)}`
+      ),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch report detail');
+    const data = await readJsonOrThrow(response, 'Failed to fetch report detail');
+    return data.report as StudentTermReport;
+  },
+
+  async getReportTemplatesForTerm(academicYearId: string, term: Term): Promise<ReportTemplate[]> {
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch report template');
+    const data = await readJsonOrThrow(response, 'Failed to fetch report template');
+    return (data.templates ?? []) as ReportTemplate[];
+  },
+
+  async getReportTemplateById(templateId: string): Promise<ReportTemplate> {
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch report template detail');
+    const data = await readJsonOrThrow(response, 'Failed to fetch report template detail');
+    return data.template as ReportTemplate;
+  },
+
+  async upsertStudentTermSubjectReport(
+    studentId: string,
+    academicYearId: string,
+    term: Term,
+    templateId: string,
+    subjectKey: string,
+    payload: {
+      subjectName: string;
+      midtermScore: number | null;
+      finalScore: number | null;
+      teacherComment?: string | null;
+      dimensions: Array<{
+        dimensionKey: string;
+        dimensionLabel: string;
+        rating: TargetLevel;
+        levelDescriptions: Partial<Record<TargetLevel, string>>;
+      }>;
+    }
+  ): Promise<void> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/students/${encodeURIComponent(studentId)}/terms/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}/templates/${encodeURIComponent(templateId)}/subjects/${encodeURIComponent(subjectKey)}`
+      ),
+      {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save subject report');
+    }
+  },
+
+  async updateStudentTermHomeroomComment(
+    studentId: string,
+    academicYearId: string,
+    term: Term,
+    templateId: string,
+    comment: string | null
+  ): Promise<void> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/students/${encodeURIComponent(studentId)}/terms/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}/templates/${encodeURIComponent(templateId)}/homeroom-comment`
+      ),
+      {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({ comment }),
+      }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save homeroom comment');
+    }
+  },
+
+  async getAdminReportTemplates(input?: { academicYearId?: string; term?: Term }): Promise<EvaluationTemplateSummary[]> {
+    const q = new URLSearchParams();
+    if (input?.academicYearId) q.set('academicYearId', input.academicYearId);
+    if (input?.term) q.set('term', input.term);
+    const response = await fetch(apiUrl(`/api/admin/report-templates${q.toString() ? `?${q.toString()}` : ''}`), { headers: getHeaders() });
+    if (!response.ok) throw new Error('Failed to fetch report templates');
+    const data = await readJsonOrThrow(response, 'Failed to fetch report templates');
+    return (data.templates ?? []) as EvaluationTemplateSummary[];
+  },
+
+  async createAdminReportTemplate(input: { academicYearId: string; term: Term; title?: string | null; sourceTemplateId?: string | null }): Promise<ReportTemplate> {
+    const response = await fetch(apiUrl('/api/admin/report-templates'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new Error('Failed to create report template');
+    const data = await readJsonOrThrow(response, 'Failed to create report template');
+    return data.template as ReportTemplate;
+  },
+
+  async getAdminReportTemplate(templateId: string): Promise<ReportTemplate> {
+    const response = await fetch(
+      apiUrl(`/api/admin/report-templates/${encodeURIComponent(templateId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch report template detail');
+    const data = await readJsonOrThrow(response, 'Failed to fetch report template detail');
+    return data.template as ReportTemplate;
+  },
+
+  async upsertAdminReportTemplate(input: {
+    templateId: string;
+    title?: string | null;
+    status: ReportTemplateStatus;
+    homeroomCommentMode: HomeroomCommentMode;
+    subjects: Array<{
+      subjectNameZh: string;
+      subjectNameEn: string;
+      moduleType?: EvaluationModuleType;
+      enableScore?: boolean;
+      enableTeacherComment?: boolean;
+      scoreVisibility?: ScoreVisibility;
+      dimensions: Array<{
+        dimensionLabelZh: string;
+        dimensionLabelEn: string;
+        levelDescriptions: Partial<Record<TargetLevel, string>>;
+      }>;
+    }>;
+  }): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/admin/report-templates/${encodeURIComponent(input.templateId)}`),
+      {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          title: input.title ?? null,
+          status: input.status,
+          homeroomCommentMode: input.homeroomCommentMode,
+          subjects: input.subjects,
+        }),
+      }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save report template');
+    }
+  },
+
+  async publishAdminReportTemplate(templateId: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/report-templates/${encodeURIComponent(templateId)}/publish`), {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to publish report template');
+    }
+  },
+
+  async closeAdminReportTemplate(templateId: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/report-templates/${encodeURIComponent(templateId)}/close`), {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to close report template');
+    }
+  },
+
+  async releaseAdminReportTemplate(templateId: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/report-templates/${encodeURIComponent(templateId)}/release`), {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to release report template');
+    }
+  },
+
+  async deleteAdminReportTemplate(templateId: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/report-templates/${encodeURIComponent(templateId)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete report template');
+    }
+  },
+
+  async getAdminReportTemplateProgress(templateId: string): Promise<ReportTemplateProgress> {
+    const response = await fetch(apiUrl(`/api/admin/report-templates/${encodeURIComponent(templateId)}/progress`), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch report progress');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch report progress');
+    return data.progress as ReportTemplateProgress;
+  },
+
+  async getAdminStaffingAssignments(academicYearId: string): Promise<StaffingAssignment[]> {
+    const response = await fetch(
+      apiUrl(`/api/admin/staffing/assignments?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch staffing assignments');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch staffing assignments');
+    return (data.assignments ?? []) as StaffingAssignment[];
+  },
+
+  async upsertAdminStaffingAssignment(input: {
+    academicYearId: string;
+    classId: string;
+    subjectKey: string;
+    subjectName: string;
+    teacherId: string;
+  }): Promise<void> {
+    const response = await fetch(apiUrl('/api/admin/staffing/assignments'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save staffing assignment');
+    }
+  },
+
+  async deleteAdminStaffingAssignment(input: {
+    academicYearId: string;
+    classId: string;
+    subjectKey: string;
+  }): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/admin/staffing/assignments/${encodeURIComponent(input.academicYearId)}/${encodeURIComponent(input.classId)}/${encodeURIComponent(input.subjectKey)}`),
+      {
+        method: 'DELETE',
+        headers: getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to remove staffing assignment');
     }
   },
 

@@ -24,10 +24,10 @@ END $$;
 -- 预设用户：密码将在首次部署时由 seed 写入哈希（见 scripts/seed-users.ts 或 init 说明）
 -- 角色：system-admin 系统管理员 | admin 管理员 | teacher 教师
 INSERT INTO users (id, username, password, role, display_name) VALUES
-  ('admin-1', 'Admin', '4321', 'system-admin', '总管理员')
+  ('admin-1', 'Admin', '4321', 'system-admin', '系统管理员')
 ON CONFLICT (username) DO NOTHING;
 
--- 课程表
+-- 课程表（全校共享；通过权限控制写入）
 CREATE TABLE IF NOT EXISTS courses (
   id VARCHAR(50) PRIMARY KEY,
   user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS courses (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 学期数据表
+-- 学期数据表（全校共享；每课程-年级-学期唯一）
 CREATE TABLE IF NOT EXISTS semester_data (
   id SERIAL PRIMARY KEY,
   user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS semester_data (
   units JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, course_id, grade, semester)
+  UNIQUE(course_id, grade, semester)
 );
 
 -- 用户设置表
@@ -67,9 +67,29 @@ CREATE TABLE IF NOT EXISTS user_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_courses_user_id ON courses(user_id);
-CREATE INDEX IF NOT EXISTS idx_semester_data_user_id ON semester_data(user_id);
 CREATE INDEX IF NOT EXISTS idx_semester_data_course_id ON semester_data(course_id);
-CREATE INDEX IF NOT EXISTS idx_semester_data_lookup ON semester_data(user_id, course_id, grade, semester);
+CREATE INDEX IF NOT EXISTS idx_semester_data_lookup ON semester_data(course_id, grade, semester);
+
+-- 兼容旧库：semester_data 去除 user_id 隔离唯一约束，改为全校共享唯一键
+DO $$
+DECLARE
+  old_constraint_name text;
+BEGIN
+  SELECT conname INTO old_constraint_name
+  FROM pg_constraint
+  WHERE conrelid = 'semester_data'::regclass
+    AND contype = 'u'
+    AND conname <> 'semester_data_course_id_grade_semester_key'
+    AND pg_get_constraintdef(oid) LIKE '%user_id, course_id, grade, semester%';
+
+  IF old_constraint_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE semester_data DROP CONSTRAINT %I', old_constraint_name);
+  END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_semester_data_course_grade_term_unique
+  ON semester_data(course_id, grade, semester);
+DROP INDEX IF EXISTS idx_semester_data_user_id;
 
 -- 班级管理（1.3）：学年、班级、学生、学籍（全校共享，不按 user_id 隔离；仅 admin 可写）
 CREATE TABLE IF NOT EXISTS academic_years (
@@ -105,6 +125,23 @@ CREATE TABLE IF NOT EXISTS class_teacher_assignments (
 );
 CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_class_active ON class_teacher_assignments(class_id) WHERE unassigned_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_teacher_active ON class_teacher_assignments(teacher_id) WHERE unassigned_at IS NULL;
+
+-- 班级-学科教师岗位安排（按学年版本化）
+CREATE TABLE IF NOT EXISTS class_subject_teacher_assignments (
+  id VARCHAR(100) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  subject_key VARCHAR(120) NOT NULL,
+  subject_name VARCHAR(160) NOT NULL,
+  teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(academic_year_id, class_id, subject_key)
+);
+CREATE INDEX IF NOT EXISTS idx_csta_year_class ON class_subject_teacher_assignments(academic_year_id, class_id);
+CREATE INDEX IF NOT EXISTS idx_csta_teacher ON class_subject_teacher_assignments(teacher_id);
 
 CREATE TABLE IF NOT EXISTS students (
   id VARCHAR(50) PRIMARY KEY,
@@ -240,6 +277,202 @@ CREATE INDEX IF NOT EXISTS idx_student_profile_values_student ON student_profile
 INSERT INTO student_profile_modules (id, key, name, description, is_system, is_enabled)
 VALUES ('spm-ability', 'ability', '能力画像', '能力雷达图模块，默认分值范围 0-10', TRUE, TRUE)
 ON CONFLICT (key) DO NOTHING;
+
+-- 学业报告（v1）：每学生每学期一份报告，含学科表现与班主任评语
+CREATE TABLE IF NOT EXISTS student_term_reports (
+  id VARCHAR(100) PRIMARY KEY,
+  student_id VARCHAR(50) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+  template_id VARCHAR(100),
+  homeroom_comment TEXT,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(student_id, academic_year_id, term, template_id)
+);
+ALTER TABLE student_term_reports
+  ADD COLUMN IF NOT EXISTS template_id VARCHAR(100);
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'student_term_reports_student_id_academic_year_id_term_key'
+  ) THEN
+    ALTER TABLE student_term_reports DROP CONSTRAINT student_term_reports_student_id_academic_year_id_term_key;
+  END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_student_term_reports_student_term_template_unique
+  ON student_term_reports(student_id, academic_year_id, term, COALESCE(template_id, ''));
+CREATE INDEX IF NOT EXISTS idx_student_term_reports_student ON student_term_reports(student_id, academic_year_id, term, template_id);
+
+CREATE TABLE IF NOT EXISTS student_term_subject_reports (
+  id VARCHAR(100) PRIMARY KEY,
+  report_id VARCHAR(100) NOT NULL REFERENCES student_term_reports(id) ON DELETE CASCADE,
+  subject_key VARCHAR(80) NOT NULL,
+  subject_name VARCHAR(120) NOT NULL,
+  midterm_score NUMERIC(5,2),
+  midterm_grade VARCHAR(10),
+  final_score NUMERIC(5,2),
+  final_grade VARCHAR(10),
+  teacher_comment TEXT,
+  teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(report_id, subject_key)
+);
+CREATE INDEX IF NOT EXISTS idx_student_term_subject_reports_report ON student_term_subject_reports(report_id);
+
+CREATE TABLE IF NOT EXISTS student_term_target_dimensions (
+  id VARCHAR(100) PRIMARY KEY,
+  subject_report_id VARCHAR(100) NOT NULL REFERENCES student_term_subject_reports(id) ON DELETE CASCADE,
+  dimension_key VARCHAR(80) NOT NULL,
+  dimension_label VARCHAR(120) NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(subject_report_id, dimension_key)
+);
+CREATE INDEX IF NOT EXISTS idx_student_term_target_dimensions_subject ON student_term_target_dimensions(subject_report_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS student_term_target_level_descriptions (
+  id VARCHAR(100) PRIMARY KEY,
+  dimension_id VARCHAR(100) NOT NULL REFERENCES student_term_target_dimensions(id) ON DELETE CASCADE,
+  level VARCHAR(1) NOT NULL CHECK (level IN ('A', 'B', 'C', 'D')),
+  description TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(dimension_id, level)
+);
+
+CREATE TABLE IF NOT EXISTS student_term_target_ratings (
+  id VARCHAR(100) PRIMARY KEY,
+  subject_report_id VARCHAR(100) NOT NULL REFERENCES student_term_subject_reports(id) ON DELETE CASCADE,
+  dimension_id VARCHAR(100) NOT NULL REFERENCES student_term_target_dimensions(id) ON DELETE CASCADE,
+  rating VARCHAR(1) NOT NULL CHECK (rating IN ('A', 'B', 'C', 'D')),
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(subject_report_id, dimension_id)
+);
+CREATE INDEX IF NOT EXISTS idx_student_term_target_ratings_subject ON student_term_target_ratings(subject_report_id);
+
+-- 学业报告模板（管理员配置；教师按模板填写）
+CREATE TABLE IF NOT EXISTS student_report_templates (
+  id VARCHAR(100) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+  title VARCHAR(160),
+  template_type VARCHAR(40) NOT NULL DEFAULT 'portrait-evaluation',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  published_at TIMESTAMP,
+  released_at TIMESTAMP,
+  status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'closed')),
+  homeroom_comment_mode VARCHAR(20) NOT NULL DEFAULT 'optional' CHECK (homeroom_comment_mode IN ('disabled', 'optional', 'required')),
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'student_report_templates_academic_year_id_term_key'
+  ) THEN
+    ALTER TABLE student_report_templates DROP CONSTRAINT student_report_templates_academic_year_id_term_key;
+  END IF;
+END $$;
+ALTER TABLE student_report_templates
+  ADD COLUMN IF NOT EXISTS homeroom_comment_mode VARCHAR(20) NOT NULL DEFAULT 'optional';
+ALTER TABLE student_report_templates
+  ADD COLUMN IF NOT EXISTS template_type VARCHAR(40) NOT NULL DEFAULT 'portrait-evaluation';
+ALTER TABLE student_report_templates
+  ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE student_report_templates
+  ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;
+ALTER TABLE student_report_templates
+  ADD COLUMN IF NOT EXISTS released_at TIMESTAMP;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'student_term_reports_template_id_fkey'
+  ) THEN
+    ALTER TABLE student_term_reports
+      ADD CONSTRAINT student_term_reports_template_id_fkey
+      FOREIGN KEY (template_id) REFERENCES student_report_templates(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_student_report_templates_year_term
+  ON student_report_templates(academic_year_id, term);
+CREATE INDEX IF NOT EXISTS idx_student_report_templates_year_term_title
+  ON student_report_templates(academic_year_id, term, title);
+
+CREATE TABLE IF NOT EXISTS student_report_template_subjects (
+  id VARCHAR(100) PRIMARY KEY,
+  template_id VARCHAR(100) NOT NULL REFERENCES student_report_templates(id) ON DELETE CASCADE,
+  subject_key VARCHAR(80) NOT NULL,
+  subject_name VARCHAR(120) NOT NULL,
+  subject_name_zh VARCHAR(120) NOT NULL DEFAULT '',
+  subject_name_en VARCHAR(120) NOT NULL DEFAULT '',
+  module_type VARCHAR(30) NOT NULL DEFAULT 'subject_score',
+  enable_score BOOLEAN NOT NULL DEFAULT TRUE,
+  enable_teacher_comment BOOLEAN NOT NULL DEFAULT TRUE,
+  score_visibility VARCHAR(40) NOT NULL DEFAULT 'teacher_homeroom_admin',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(template_id, subject_key)
+);
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS subject_name_zh VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS subject_name_en VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS module_type VARCHAR(30) NOT NULL DEFAULT 'subject_score';
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS enable_score BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS enable_teacher_comment BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS score_visibility VARCHAR(40) NOT NULL DEFAULT 'teacher_homeroom_admin';
+CREATE INDEX IF NOT EXISTS idx_student_report_template_subjects_template
+  ON student_report_template_subjects(template_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS student_report_template_dimensions (
+  id VARCHAR(100) PRIMARY KEY,
+  template_subject_id VARCHAR(100) NOT NULL REFERENCES student_report_template_subjects(id) ON DELETE CASCADE,
+  dimension_key VARCHAR(80) NOT NULL,
+  dimension_label VARCHAR(120) NOT NULL,
+  dimension_label_zh VARCHAR(120) NOT NULL DEFAULT '',
+  dimension_label_en VARCHAR(120) NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(template_subject_id, dimension_key)
+);
+ALTER TABLE student_report_template_dimensions
+  ADD COLUMN IF NOT EXISTS dimension_label_zh VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE student_report_template_dimensions
+  ADD COLUMN IF NOT EXISTS dimension_label_en VARCHAR(120) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_student_report_template_dimensions_subject
+  ON student_report_template_dimensions(template_subject_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS student_report_template_level_descriptions (
+  id VARCHAR(100) PRIMARY KEY,
+  template_dimension_id VARCHAR(100) NOT NULL REFERENCES student_report_template_dimensions(id) ON DELETE CASCADE,
+  level VARCHAR(1) NOT NULL CHECK (level IN ('A', 'B', 'C', 'D')),
+  description TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(template_dimension_id, level)
+);
 
 -- 课堂助手（1.4）：分组方案、小组、成员、积分事件
 CREATE TABLE IF NOT EXISTS class_group_schemes (

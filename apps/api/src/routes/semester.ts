@@ -58,8 +58,8 @@ router.post('/', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO semester_data (user_id, course_id, grade, semester, units, weekly_periods)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (user_id, course_id, grade, semester)
-       DO UPDATE SET units = $5, weekly_periods = $6, updated_at = CURRENT_TIMESTAMP
+       ON CONFLICT (course_id, grade, semester)
+       DO UPDATE SET units = EXCLUDED.units, weekly_periods = EXCLUDED.weekly_periods, user_id = EXCLUDED.user_id, updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [uid, courseId, grade, semester, JSON.stringify(units || []), weeklyPeriods],
     );

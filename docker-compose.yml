@@ -1,7 +1,7 @@
 # 本地开发用 PostgreSQL（与 apps/api/.env 中 DATABASE_URL 一致）
 services:
   postgres:
-    image: postgres:16-alpine
+    image: docker.m.daocloud.io/library/postgres:16
     environment:
       POSTGRES_USER: suis
       POSTGRES_PASSWORD: suis

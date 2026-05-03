@@ -3,11 +3,22 @@ import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
-import type { AcademicYear, ClassItem, Enrollment, Student } from '../types/classManagement';
+import type {
+  AcademicYear,
+  ClassItem,
+  Enrollment,
+  ReportTemplate,
+  Student,
+  StudentTermReport,
+  StudentTermSubjectReport,
+  TargetLevel,
+  Term,
+} from '../types/classManagement';
 import { loadAcademicYears, loadCurrentAcademicYearId, loadAllClasses, loadStudents, loadEnrollments } from '../lib/classStorage';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 
 type PortraitTab = 'overview' | 'my-students';
+type DetailTab = 'radar' | 'report';
 
 type ModuleField = {
   id: string;
@@ -27,6 +38,40 @@ type ProfileModule = {
   /** 来自 API；全本地模式下无此项 */
   isEnabled?: boolean;
 };
+
+type SubjectDraft = {
+  id: string;
+  subjectKey: string;
+  subjectName: string;
+  midtermScore: number | null;
+  midtermGrade: string | null;
+  finalScore: number | null;
+  finalGrade: string | null;
+  teacherComment: string | null;
+  teacherId: string | null;
+  dimensions: Array<{
+    id: string;
+    dimensionKey: string;
+    dimensionLabel: string;
+    rating: TargetLevel;
+    levelDescriptions: Partial<Record<TargetLevel, string>>;
+  }>;
+};
+
+function toReportGrade(score: number | null | undefined): string | null {
+  if (score == null || Number.isNaN(score)) return null;
+  if (score === 100) return 'A+';
+  if (score >= 95 && score < 100) return 'A';
+  if (score >= 90 && score < 95) return 'A-';
+  if (score >= 85 && score < 90) return 'B+';
+  if (score >= 80 && score < 85) return 'B';
+  if (score >= 75 && score < 80) return 'B-';
+  if (score >= 70 && score < 75) return 'C+';
+  if (score >= 65 && score < 70) return 'C';
+  if (score >= 60 && score < 65) return 'C-';
+  if (score >= 0 && score < 60) return 'D';
+  return null;
+}
 
 function RadarChart({
   dimensions,
@@ -104,6 +149,7 @@ export default function StudentPortrait({
   const isZh = language === 'zh';
   const isStudentSelf = user?.role === 'student';
   const [tab, setTab] = useState<PortraitTab>(initialTab);
+  const [detailTab, setDetailTab] = useState<DetailTab>('report');
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [currentYearId, setCurrentYearId] = useState<string | null>(null);
   const [classes, setClasses] = useState<ClassItem[]>([]);
@@ -116,7 +162,26 @@ export default function StudentPortrait({
   const [homeroomEditable, setHomeroomEditable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportSaving, setReportSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reportTerm, setReportTerm] = useState<Term>('Semester 1');
+  const [reportTemplates, setReportTemplates] = useState<ReportTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const [reportList, setReportList] = useState<Array<{
+    id: string;
+    studentId: string;
+    academicYearId: string;
+    academicYearName: string;
+    term: Term;
+    templateId: string | null;
+    templateTitle: string | null;
+    homeroomComment: string | null;
+    updatedAt: string | null;
+  }>>([]);
+  const [reportDetail, setReportDetail] = useState<StudentTermReport | null>(null);
+  const [reportTemplate, setReportTemplate] = useState<ReportTemplate | null>(null);
+  const [homeroomCommentDraft, setHomeroomCommentDraft] = useState('');
 
   useEffect(() => {
     if (isStudentSelf) return;
@@ -232,6 +297,15 @@ export default function StudentPortrait({
       !isStudentSelf && (user?.role === 'admin' || user?.role === 'system-admin' || homeroomEditable),
     [user?.role, homeroomEditable, isStudentSelf]
   );
+  const isAdminRole = user?.role === 'admin' || user?.role === 'system-admin';
+  const canEditHomeroomComment = !isStudentSelf && (isAdminRole || homeroomEditable) && reportTemplate?.homeroomCommentMode !== 'disabled';
+  const homeroomCommentRequired = reportTemplate?.homeroomCommentMode === 'required';
+  const showHomeroomComment = reportTemplate?.homeroomCommentMode !== 'disabled';
+  const canTeacherEditReport = !isStudentSelf && (isAdminRole || reportTemplate?.status === 'published');
+  const templateSubjectMap = useMemo(
+    () => new Map((reportTemplate?.subjects ?? []).map((s) => [s.subjectKey, s] as const)),
+    [reportTemplate],
+  );
 
   useEffect(() => {
     if (isStudentSelf) {
@@ -267,6 +341,133 @@ export default function StudentPortrait({
       .then((values) => setStudentValues(values))
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load profile values'));
   }, [selectedStudentId, isStudentSelf]);
+
+  useEffect(() => {
+    if (!USE_CLOUD_STORAGE) return;
+    if (!selectedStudentId) {
+      setReportList([]);
+      setReportDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setReportLoading(true);
+    api
+      .getStudentTermReports(selectedStudentId)
+      .then((list) => {
+        if (cancelled) return;
+        setReportList(list);
+        if (!currentYearId && list.length > 0) {
+          setCurrentYearId(list[0].academicYearId);
+        }
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setError((e as Error)?.message || 'Failed to load term reports');
+      })
+      .finally(() => {
+        if (!cancelled) setReportLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStudentId, currentYearId]);
+
+  useEffect(() => {
+    if (!USE_CLOUD_STORAGE) return;
+    if (!selectedStudentId || !currentYearId) {
+      setReportTemplates([]);
+      setSelectedTemplateId('');
+      setReportTemplate(null);
+      setReportDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setReportLoading(true);
+    api.getReportTemplatesForTerm(currentYearId, reportTerm)
+      .then(async (templates) => {
+        if (cancelled) return;
+        setReportTemplates(templates);
+        const effectiveTemplateId = selectedTemplateId && templates.some((t) => t.id === selectedTemplateId)
+          ? selectedTemplateId
+          : (templates[0]?.id ?? '');
+        setSelectedTemplateId(effectiveTemplateId);
+        if (!effectiveTemplateId) {
+          setReportTemplate(null);
+          setReportDetail(null);
+          setHomeroomCommentDraft('');
+          return;
+        }
+        const [template, detail] = await Promise.all([
+          api.getReportTemplateById(effectiveTemplateId),
+          api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, effectiveTemplateId),
+        ]);
+        if (cancelled) return;
+        const normalized: StudentTermReport = {
+          ...detail,
+          subjectReports: (detail.subjectReports ?? []).map((s) => ({
+            ...s,
+            dimensions: (s.dimensions ?? []).map((d) => ({
+              ...d,
+              rating: (d.rating ?? 'A') as TargetLevel,
+            })),
+          })),
+        };
+        const mergedSubjects: StudentTermSubjectReport[] = (template.subjects ?? []).map((tplSubject) => {
+          const existing = normalized.subjectReports.find((s) => s.subjectKey === tplSubject.subjectKey);
+          if (existing) {
+            return {
+              ...existing,
+              subjectName: tplSubject.subjectName,
+              dimensions: tplSubject.dimensions.map((tplDim) => {
+                const oldDim = existing.dimensions.find((d) => d.dimensionKey === tplDim.dimensionKey);
+                return {
+                  id: oldDim?.id ?? tplDim.id,
+                  dimensionKey: tplDim.dimensionKey,
+                  dimensionLabel: tplDim.dimensionLabel,
+                  sortOrder: tplDim.sortOrder,
+                  rating: (oldDim?.rating ?? 'A') as TargetLevel,
+                  levelDescriptions: tplDim.levelDescriptions,
+                };
+              }),
+            };
+          }
+          return {
+            id: `tpl-${tplSubject.id}`,
+            subjectKey: tplSubject.subjectKey,
+            subjectName: tplSubject.subjectName,
+            midtermScore: null,
+            midtermGrade: null,
+            finalScore: null,
+            finalGrade: null,
+            teacherComment: null,
+            teacherId: null,
+            dimensions: tplSubject.dimensions.map((d) => ({
+              id: d.id,
+              dimensionKey: d.dimensionKey,
+              dimensionLabel: d.dimensionLabel,
+              sortOrder: d.sortOrder,
+              rating: 'A' as TargetLevel,
+              levelDescriptions: d.levelDescriptions,
+            })),
+            createdAt: null,
+            updatedAt: null,
+          };
+        });
+        setReportTemplate(template);
+        setReportDetail({ ...normalized, subjectReports: mergedSubjects });
+        setHomeroomCommentDraft(normalized.homeroomComment ?? '');
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setError((e as Error)?.message || 'Failed to load report detail');
+      })
+      .finally(() => {
+        if (!cancelled) setReportLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStudentId, currentYearId, reportTerm, selectedTemplateId]);
 
   const learningStats = useMemo(() => {
     const inYearStudentIds = new Set(activeEnrollments.map((e) => e.studentId));
@@ -323,6 +524,100 @@ export default function StudentPortrait({
     }
   };
 
+  const upsertSubjectDraft = (subjectKey: string, updater: (draft: SubjectDraft) => SubjectDraft) => {
+    setReportDetail((prev) => {
+      if (!prev) return prev;
+      const nextSubjects = [...prev.subjectReports];
+      const idx = nextSubjects.findIndex((s) => s.subjectKey === subjectKey);
+      if (idx === -1) return prev;
+      const base = nextSubjects[idx];
+      const draft: SubjectDraft = {
+        id: base.id,
+        subjectKey: base.subjectKey,
+        subjectName: base.subjectName,
+        midtermScore: base.midtermScore,
+        midtermGrade: base.midtermGrade,
+        finalScore: base.finalScore,
+        finalGrade: base.finalGrade,
+        teacherComment: base.teacherComment,
+        teacherId: base.teacherId,
+        dimensions: base.dimensions.map((d) => ({
+          id: d.id,
+          dimensionKey: d.dimensionKey,
+          dimensionLabel: d.dimensionLabel,
+          rating: (d.rating ?? 'A') as TargetLevel,
+          levelDescriptions: { ...d.levelDescriptions },
+        })),
+      };
+      const updated = updater(draft);
+      nextSubjects[idx] = {
+        ...base,
+        ...updated,
+      } as StudentTermSubjectReport;
+      return { ...prev, subjectReports: nextSubjects };
+    });
+  };
+
+  const saveSubjectReport = async (subject: StudentTermSubjectReport) => {
+    if (!selectedStudentId || !currentYearId || !selectedTemplateId) return;
+    setReportSaving(true);
+    setError(null);
+    try {
+      await api.upsertStudentTermSubjectReport(selectedStudentId, currentYearId, reportTerm, selectedTemplateId, subject.subjectKey, {
+        subjectName: subject.subjectName,
+        midtermScore: subject.midtermScore,
+        finalScore: subject.finalScore,
+        teacherComment: subject.teacherComment,
+        dimensions: subject.dimensions.map((d) => ({
+          dimensionKey: d.dimensionKey,
+          dimensionLabel: d.dimensionLabel,
+          rating: (d.rating ?? 'A') as TargetLevel,
+          levelDescriptions: d.levelDescriptions,
+        })),
+      });
+      const next = await api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId);
+      setReportDetail(next);
+      setHomeroomCommentDraft(next.homeroomComment ?? '');
+      const list = await api.getStudentTermReports(selectedStudentId);
+      setReportList(list);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save subject report');
+    } finally {
+      setReportSaving(false);
+    }
+  };
+
+  const saveHomeroomComment = async () => {
+    if (!selectedStudentId || !currentYearId || !selectedTemplateId) return;
+    if (homeroomCommentRequired && !homeroomCommentDraft.trim()) {
+      setError(isZh ? '该模板要求填写班主任评语。' : 'Homeroom comment is required by template.');
+      return;
+    }
+    setReportSaving(true);
+    setError(null);
+    try {
+      await api.updateStudentTermHomeroomComment(selectedStudentId, currentYearId, reportTerm, selectedTemplateId, homeroomCommentDraft || null);
+      const next = await api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId);
+      setReportDetail(next);
+      setHomeroomCommentDraft(next.homeroomComment ?? '');
+      const list = await api.getStudentTermReports(selectedStudentId);
+      setReportList(list);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save homeroom comment');
+    } finally {
+      setReportSaving(false);
+    }
+  };
+
+  const reportYearOptions = useMemo(() => {
+    if (!isStudentSelf) return years.map((y) => ({ id: y.id, name: y.name }));
+    const map = new Map<string, string>();
+    for (const r of reportList) {
+      if (!map.has(r.academicYearId)) map.set(r.academicYearId, r.academicYearName);
+    }
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [isStudentSelf, years, reportList]);
+
   return (
     <div className="min-h-screen bg-slate-50 pt-14">
       <AppTopBar
@@ -334,10 +629,10 @@ export default function StudentPortrait({
         {!isStudentSelf && (
           <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
             <Button variant={tab === 'overview' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('overview')}>
-              {isZh ? '全校学习看板' : 'School Learning Dashboard'}
+              {isZh ? '学校看板' : 'School dashboard'}
             </Button>
             <Button variant={tab === 'my-students' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('my-students')}>
-              {isZh ? '我的学生档案' : 'My Students'}
+              {isZh ? '我的学生' : 'My Students'}
             </Button>
           </div>
         )}
@@ -391,6 +686,86 @@ export default function StudentPortrait({
                   </div>
                 </div>
               </div>
+            </div>
+            <div id="term-report-panel" className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h3 className="text-base font-semibold text-slate-800">{isZh ? '学业报告（按学期）' : 'Academic report (by term)'}</h3>
+                {reportLoading && <span className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</span>}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <select
+                  value={currentYearId || ''}
+                  onChange={(e) => setCurrentYearId(e.target.value || null)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[160px]"
+                >
+                  <option value="">{isZh ? '选择学年' : 'Select year'}</option>
+                  {reportYearOptions.map((y) => (
+                    <option key={y.id} value={y.id}>{y.name}</option>
+                  ))}
+                </select>
+                <select
+                  value={reportTerm}
+                  onChange={(e) => setReportTerm(e.target.value as Term)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[140px]"
+                >
+                  <option value="Semester 1">{isZh ? '上学期' : 'Semester 1'}</option>
+                  <option value="Semester 2">{isZh ? '下学期' : 'Semester 2'}</option>
+                </select>
+                <select
+                  value={selectedTemplateId}
+                  onChange={(e) => setSelectedTemplateId(e.target.value)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[180px]"
+                >
+                  <option value="">{isZh ? '选择评价报告' : 'Select report'}</option>
+                  {reportTemplates.map((tpl) => (
+                    <option key={tpl.id ?? 'null'} value={tpl.id ?? ''}>
+                      {tpl.title || (isZh ? '未命名评价' : 'Untitled evaluation')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {!reportDetail || reportDetail.subjectReports.length === 0 ? (
+                <p className="text-sm text-slate-500">{isZh ? '该学期暂无学业报告。' : 'No report for this term yet.'}</p>
+              ) : (
+                <div className="space-y-3">
+                  {reportDetail.subjectReports.map((s) => (
+                    <div key={s.subjectKey} className="rounded-lg border border-slate-200 p-3">
+                      {(() => {
+                        const subjectConfig = templateSubjectMap.get(s.subjectKey);
+                        return (
+                          <>
+                      <div className="text-sm font-semibold text-slate-800">{s.subjectName}</div>
+                      {subjectConfig?.enableScore !== false && (
+                        <div className="text-xs text-slate-500 mt-1">
+                          {isZh ? '期中等第' : 'Midterm grade'}: {s.midtermGrade ?? toReportGrade(s.midtermScore) ?? '—'} · {isZh ? '期末等第' : 'Final grade'}: {s.finalGrade ?? toReportGrade(s.finalScore) ?? '—'}
+                        </div>
+                      )}
+                      {subjectConfig?.enableTeacherComment !== false && s.teacherComment && (
+                        <p className="text-sm text-slate-700 mt-2">{s.teacherComment}</p>
+                      )}
+                      {s.dimensions.length > 0 && (
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {s.dimensions.map((d) => (
+                            <div key={d.id} className="text-xs rounded border border-slate-100 px-2 py-1.5">
+                              <span className="text-slate-700">{d.dimensionLabel}</span>
+                              <span className="ml-2 font-medium text-slate-900">{d.rating ?? '—'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  ))}
+                  {showHomeroomComment && (
+                    <div className="rounded-lg border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500 mb-1">{isZh ? '班主任评语' : 'Homeroom comment'}</div>
+                      <p className="text-sm text-slate-700 whitespace-pre-wrap">{reportDetail.homeroomComment || (isZh ? '暂无' : 'N/A')}</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -477,15 +852,17 @@ export default function StudentPortrait({
                   ))}
                 </select>
               </div>
-              <div className="text-xs text-slate-500">
-                {canEditProfile
-                  ? (isZh ? '当前角色可编辑画像（基础档案仍由管理员维护）' : 'You can edit profile only (core record remains admin-managed).')
-                  : (isZh ? '当前角色只读查看画像' : 'Read-only profile view for current role.')}
-              </div>
+              {tab === 'my-students' && (
+                <div className="text-xs text-slate-500">
+                  {canEditProfile
+                    ? (isZh ? '当前角色可编辑画像（基础档案仍由管理员维护）' : 'You can edit profile only (core record remains admin-managed).')
+                    : (isZh ? '当前角色只读查看画像' : 'Read-only profile view for current role.')}
+                </div>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <div className="bg-white border border-slate-200 rounded-xl p-3 lg:col-span-1">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="bg-white border border-slate-200 rounded-xl p-3 lg:col-span-3">
                 <h3 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '学生列表' : 'Students'}</h3>
                 <div className="space-y-2 max-h-[520px] overflow-y-auto">
                   {myStudents.map((s) => (
@@ -509,11 +886,29 @@ export default function StudentPortrait({
                 </div>
               </div>
 
-              <div className="bg-white border border-slate-200 rounded-xl p-4 lg:col-span-2">
+              <div className="bg-white border border-slate-200 rounded-xl p-4 lg:col-span-9">
                 {!selectedStudent ? (
                   <div className="text-sm text-slate-500">{isZh ? '请选择左侧学生查看电子档案' : 'Select a student to open the profile card.'}</div>
                 ) : (
                   <div className="space-y-4">
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 inline-flex gap-1">
+                      <Button
+                        variant={detailTab === 'radar' ? 'default' : 'ghost'}
+                        size="sm"
+                        onClick={() => setDetailTab('radar')}
+                      >
+                        {isZh ? '能力雷达图' : 'Ability radar'}
+                      </Button>
+                      <Button
+                        variant={detailTab === 'report' ? 'default' : 'ghost'}
+                        size="sm"
+                        onClick={() => setDetailTab('report')}
+                      >
+                        {isZh ? '学业报告' : 'Academic report'}
+                      </Button>
+                    </div>
+                    {detailTab === 'radar' && (
+                      <>
                     <div className="rounded-xl border border-slate-200 p-4 bg-gradient-to-r from-slate-50 to-white">
                       <div className="flex items-center gap-3">
                         <div className="h-14 w-14 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 font-semibold">
@@ -585,6 +980,182 @@ export default function StudentPortrait({
                         </ul>
                       </div>
                     </div>
+                      </>
+                    )}
+                    {detailTab === 'report' && (
+                    <div id="term-report-panel" className="border border-slate-200 rounded-xl p-3 space-y-3">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h4 className="text-sm font-semibold text-slate-800">{isZh ? '学业报告（本学期快照）' : 'Academic report snapshot'}</h4>
+                        {reportLoading && <span className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</span>}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <select
+                          value={currentYearId || ''}
+                          onChange={(e) => setCurrentYearId(e.target.value || null)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[170px]"
+                        >
+                          <option value="">{isZh ? '选择学年' : 'Select year'}</option>
+                          {reportYearOptions.map((y) => (
+                            <option key={y.id} value={y.id}>{y.name}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={reportTerm}
+                          onChange={(e) => setReportTerm(e.target.value as Term)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[140px]"
+                        >
+                          <option value="Semester 1">{isZh ? '上学期' : 'Semester 1'}</option>
+                          <option value="Semester 2">{isZh ? '下学期' : 'Semester 2'}</option>
+                        </select>
+                        <select
+                          value={selectedTemplateId}
+                          onChange={(e) => setSelectedTemplateId(e.target.value)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[180px]"
+                        >
+                          <option value="">{isZh ? '选择评价报告' : 'Select report'}</option>
+                          {reportTemplates.map((tpl) => (
+                            <option key={tpl.id ?? 'null'} value={tpl.id ?? ''}>
+                              {tpl.title || (isZh ? '未命名评价' : 'Untitled evaluation')}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {reportDetail && showHomeroomComment && (
+                        <div className="rounded-lg border border-slate-200 p-3">
+                          <div className="text-xs text-slate-500 mb-1">
+                            {isZh ? '班主任评语' : 'Homeroom comment'}
+                            {homeroomCommentRequired ? <span className="text-red-500 ml-1">*</span> : null}
+                          </div>
+                          <textarea
+                            value={homeroomCommentDraft}
+                            onChange={(e) => setHomeroomCommentDraft(e.target.value)}
+                            className="w-full min-h-[86px] rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                            disabled={!canEditHomeroomComment || !canTeacherEditReport || reportSaving}
+                            placeholder={isZh ? '输入本学期班主任评语' : 'Type homeroom comment'}
+                          />
+                          {canEditHomeroomComment && (
+                            <div className="mt-2 flex justify-end">
+                              <Button
+                                size="sm"
+                                onClick={saveHomeroomComment}
+                                disabled={reportSaving || !selectedStudentId || !currentYearId || !canTeacherEditReport || (homeroomCommentRequired && !homeroomCommentDraft.trim())}
+                              >
+                                {reportSaving ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存班主任评语' : 'Save homeroom comment'}
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {!reportDetail || reportDetail.subjectReports.length === 0 ? (
+                        <p className="text-sm text-slate-500">{isZh ? '该学期暂无学科报告，可先新增学科并保存。' : 'No subject report yet for this term.'}</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {reportDetail.subjectReports.map((s) => (
+                            <div key={s.subjectKey} className="rounded-lg border border-slate-200 p-3 space-y-2">
+                              {(() => {
+                                const subjectConfig = templateSubjectMap.get(s.subjectKey);
+                                return (
+                                  <>
+                              <div className="text-sm font-medium text-slate-800">{s.subjectName || (isZh ? '未命名学科' : 'Untitled subject')}</div>
+                              {subjectConfig?.enableScore !== false && (
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block text-xs text-slate-500 mb-1">{isZh ? '学科成绩' : 'Score'}</label>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={100}
+                                    step={0.5}
+                                    value={s.finalScore ?? ''}
+                                    onChange={(e) => {
+                                      const v = e.target.value.trim();
+                                      upsertSubjectDraft(s.subjectKey, (d) => ({ ...d, finalScore: v ? Number(v) : null, midtermScore: null }));
+                                    }}
+                                    className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs text-slate-500 mb-1">{isZh ? '自动等第' : 'Auto grade'}</label>
+                                  <input
+                                    value={s.finalGrade ?? toReportGrade(s.finalScore) ?? ''}
+                                    readOnly
+                                    className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-600"
+                                  />
+                                </div>
+                              </div>
+                              )}
+                              {subjectConfig?.enableTeacherComment !== false && (
+                              <div>
+                                <label className="block text-xs text-slate-500 mb-1">{isZh ? '学科教师评语（可选）' : 'Teacher comment (optional)'}</label>
+                                <textarea
+                                  value={s.teacherComment ?? ''}
+                                  onChange={(e) => upsertSubjectDraft(s.subjectKey, (d) => ({ ...d, teacherComment: e.target.value }))}
+                                  className="w-full min-h-[72px] rounded border border-slate-300 px-2 py-1.5 text-sm"
+                                />
+                              </div>
+                              )}
+
+                              <div className="rounded border border-slate-100 p-2 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <div className="text-xs font-medium text-slate-600">{isZh ? '课程目标达成' : 'Target attainment'}</div>
+                                </div>
+                                {s.dimensions.map((dim, idx) => (
+                                  <div key={dim.id} className="rounded border border-slate-200 p-2 space-y-2">
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      <input
+                                        value={dim.dimensionLabel}
+                                        readOnly
+                                        className="rounded border border-slate-200 px-2 py-1 text-sm bg-slate-50 text-slate-700"
+                                      />
+                                      <select
+                                        value={dim.rating ?? 'A'}
+                                        onChange={(e) =>
+                                          upsertSubjectDraft(s.subjectKey, (d) => {
+                                            const next = [...d.dimensions];
+                                            next[idx] = { ...next[idx], rating: e.target.value as TargetLevel };
+                                            return { ...d, dimensions: next };
+                                          })
+                                        }
+                                        className="rounded border border-slate-300 px-2 py-1 text-sm bg-white"
+                                        disabled={!canTeacherEditReport || reportSaving}
+                                      >
+                                        <option value="A">A</option>
+                                        <option value="B">B</option>
+                                        <option value="C">C</option>
+                                        <option value="D">D</option>
+                                      </select>
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      {(['A', 'B', 'C', 'D'] as TargetLevel[]).map((lv) => (
+                                        <div key={lv} className="rounded border border-slate-100 bg-slate-50 px-2 py-1 text-xs text-slate-700 whitespace-pre-wrap">
+                                          <span className="font-semibold text-slate-600 mr-1">{lv}</span>
+                                          <span>{dim.levelDescriptions[lv] || (isZh ? '未设置说明' : 'No description')}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="flex justify-end">
+                                <Button
+                                  size="sm"
+                                  onClick={() => void saveSubjectReport(s)}
+                                  disabled={reportSaving || !s.subjectName.trim() || !canTeacherEditReport}
+                                >
+                                  {reportSaving ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存学科报告' : 'Save subject report'}
+                                </Button>
+                              </div>
+                                  </>
+                                );
+                              })()}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    )}
                   </div>
                 )}
               </div>

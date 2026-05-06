@@ -1,4 +1,4 @@
-import type { Course, SemesterData, User } from '../types';
+import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
   AcademicYear,
   ClassItem,
@@ -268,6 +268,59 @@ export const api = {
       const error = await response.json().catch(() => ({ error: 'Failed to save key concepts' }));
       throw new Error(error.error || 'Failed to save key concepts');
     }
+  },
+
+  /** 全校共享的学科列顺序（与课程管理/课程河流一致） */
+  async getCategoryOrder(): Promise<string[]> {
+    const response = await fetch(apiUrl('/api/settings/category-order'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      if (response.status === 401) return [];
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Failed to fetch category order: ${response.status} - ${errorText}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  },
+
+  async putCategoryOrder(categoryOrder: string[]): Promise<void> {
+    const response = await fetch(apiUrl('/api/settings/category-order'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ categoryOrder }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to save category order' }));
+      throw new Error(error.error || 'Failed to save category order');
+    }
+  },
+
+  async getGradeConfig(): Promise<GradeConfig> {
+    const response = await fetch(apiUrl('/api/settings/grade-config'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      if (response.status === 401) throw new Error('Unauthorized');
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Failed to fetch grade config: ${response.status} - ${errorText}`);
+    }
+    const data = await response.json();
+    return data as GradeConfig;
+  },
+
+  async putGradeConfig(gradeConfig: GradeConfig): Promise<GradeConfig> {
+    const response = await fetch(apiUrl('/api/settings/grade-config'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ gradeConfig }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to save grade config' }));
+      throw new Error(error.error || 'Failed to save grade config');
+    }
+    const data = await response.json();
+    return (data?.gradeConfig ?? gradeConfig) as GradeConfig;
   },
 
   /**

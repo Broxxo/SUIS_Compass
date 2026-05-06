@@ -34,20 +34,31 @@ CREATE TABLE IF NOT EXISTS courses (
   name VARCHAR(200) NOT NULL,
   subject_category_zh VARCHAR(100),
   subject_category_en VARCHAR(100),
-  grade_range VARCHAR(20),
+  applicable_grades JSONB NOT NULL DEFAULT '[]'::jsonb,
+  weekly_periods_by_grade JSONB NOT NULL DEFAULT '{}'::jsonb,
   textbook_version VARCHAR(100),
   color VARCHAR(20) NOT NULL,
-  weekly_periods INTEGER DEFAULT 2,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 测试版迁移：由旧 grade_range / weekly_periods 切到按年级 JSON（不保留旧数据语义）
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'courses' AND column_name = 'grade_range') THEN
+    ALTER TABLE courses ADD COLUMN IF NOT EXISTS applicable_grades JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE courses ADD COLUMN IF NOT EXISTS weekly_periods_by_grade JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE courses DROP COLUMN IF EXISTS grade_range;
+    ALTER TABLE courses DROP COLUMN IF EXISTS weekly_periods;
+  END IF;
+END $$;
 
 -- 学期数据表（全校共享；每课程-年级-学期唯一）
 CREATE TABLE IF NOT EXISTS semester_data (
   id SERIAL PRIMARY KEY,
   user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   course_id VARCHAR(50) NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-  grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 9),
+  grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 20),
   semester VARCHAR(20) NOT NULL CHECK (semester IN ('Semester 1', 'Semester 2')),
   weekly_periods INTEGER,
   units JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -62,9 +73,30 @@ CREATE TABLE IF NOT EXISTS user_settings (
   user_id VARCHAR(50) NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
   key_concepts JSONB DEFAULT '[]'::jsonb,
   category_order JSONB DEFAULT '[]'::jsonb,
+  grade_config JSONB DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS grade_config JSONB DEFAULT NULL;
+DO $$
+DECLARE
+  holder_id VARCHAR(50);
+BEGIN
+  SELECT id INTO holder_id FROM users WHERE role = 'system-admin' ORDER BY created_at ASC NULLS LAST LIMIT 1;
+  IF holder_id IS NULL THEN
+    SELECT id INTO holder_id FROM users WHERE role = 'admin' ORDER BY created_at ASC NULLS LAST LIMIT 1;
+  END IF;
+  IF holder_id IS NOT NULL THEN
+    INSERT INTO user_settings (user_id, grade_config, updated_at)
+    VALUES (
+      holder_id,
+      '{"items":[{"id":"g1","label":"G1","level":1},{"id":"g2","label":"G2","level":2},{"id":"g3","label":"G3","level":3},{"id":"g4","label":"G4","level":4},{"id":"g5","label":"G5","level":5},{"id":"g6","label":"G6","level":6},{"id":"g7","label":"G7","level":7},{"id":"g8","label":"G8","level":8},{"id":"g9","label":"G9","level":9}]}'::jsonb,
+      CURRENT_TIMESTAMP
+    )
+    ON CONFLICT (user_id)
+    DO UPDATE SET grade_config = COALESCE(user_settings.grade_config, EXCLUDED.grade_config), updated_at = CURRENT_TIMESTAMP;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_courses_user_id ON courses(user_id);
 CREATE INDEX IF NOT EXISTS idx_semester_data_course_id ON semester_data(course_id);
@@ -106,7 +138,7 @@ CREATE INDEX IF NOT EXISTS idx_academic_years_current ON academic_years(is_curre
 CREATE TABLE IF NOT EXISTS classes (
   id VARCHAR(50) PRIMARY KEY,
   academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
-  grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 9),
+  grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 20),
   name VARCHAR(100) NOT NULL,
   teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

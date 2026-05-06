@@ -1,15 +1,18 @@
 import { useState, useEffect, useRef } from 'react';
-import { Course, Unit } from '../types';
+import { Course, GradeConfig, Unit } from '../types';
 import { Sparkles, X, Info } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { GRADES, SEMESTERS, GRADE_LABELS, SEMESTER_LABELS } from '../lib/constants';
+import { SEMESTERS, SEMESTER_LABELS } from '../lib/constants';
 import { getKeyConcepts } from '../lib/utils';
 import { loadSemesterDataSync } from '../lib/storage';
+import { getGradeLabelByLevel } from '../lib/gradeConfig';
+import { getColorGradient } from '../lib/courseUtils';
 
 interface ConceptViewProps {
   courses: Course[];
   selectedSemester: { grade: number; semester: 'Semester 1' | 'Semester 2' } | null;
   onSemesterChange: (semester: { grade: number; semester: 'Semester 1' | 'Semester 2' }) => void;
+  gradeConfig: GradeConfig;
 }
 
 interface ConceptNode {
@@ -52,7 +55,7 @@ function normalizeConcept(concept: string): string {
   return englishPart.trim();
 }
 
-export default function ConceptView({ courses, selectedSemester, onSemesterChange }: ConceptViewProps) {
+export default function ConceptView({ courses, selectedSemester, onSemesterChange, gradeConfig }: ConceptViewProps) {
   const { t, language } = useLanguage();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -444,20 +447,6 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
         ctx.beginPath();
         ctx.arc(unit.x, unit.y, unit.radius, 0, Math.PI * 2);
         
-        const getColorGradient = (color: Course['color']) => {
-          const gradients: Record<Course['color'], { medium: string; dark: string }> = {
-            'light-blue': { medium: '#93c5fd', dark: '#60a5fa' },
-            'light-green': { medium: '#86efac', dark: '#4ade80' },
-            'light-yellow': { medium: '#fde047', dark: '#facc15' },
-            'light-red': { medium: '#fca5a5', dark: '#f87171' },
-            'light-purple': { medium: '#c4b5fd', dark: '#a78bfa' },
-            'light-orange': { medium: '#fdba74', dark: '#fb923c' },
-            'light-cyan': { medium: '#67e8f9', dark: '#22d3ee' },
-            'light-pink': { medium: '#f9a8d4', dark: '#f472b6' },
-            'light-indigo': { medium: '#a5b4fc', dark: '#818cf8' },
-          };
-          return gradients[color];
-        };
         const gradient = getColorGradient(unit.course.color);
         ctx.fillStyle = isHovered || isConceptSelected ? gradient.dark : gradient.medium;
         ctx.fill();
@@ -918,9 +907,9 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
 
 
   return (
-    <div className="h-full w-full flex flex-col bg-white">
-      {/* Semester Selector */}
-      <div className="px-6 py-2 flex-shrink-0">
+    <div className="flex h-full min-h-0 w-full flex-col bg-white">
+      {/* Semester Selector（与单元视图同一套上下边距） */}
+      <div className="flex-shrink-0 px-6 py-1.5">
         <div className="flex items-center gap-3">
           <label className="text-sm font-semibold text-gray-700">{t('semester.select')}:</label>
           <select
@@ -934,10 +923,10 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
             className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
           >
             <option value="">{t('semester.selectPlaceholder')}</option>
-            {GRADES.map((grade) =>
+            {gradeConfig.items.map((item) =>
               SEMESTERS.map((semester) => (
-                <option key={`${grade}-${semester}`} value={`${grade}-${semester}`}>
-                  {GRADE_LABELS[grade]} {SEMESTER_LABELS[semester]} (G{grade} {semester})
+                <option key={`${item.level}-${semester}`} value={`${item.level}-${semester}`}>
+                  {getGradeLabelByLevel(gradeConfig, item.level)} {SEMESTER_LABELS[semester]} ({item.level} {semester})
                 </option>
               ))
             )}
@@ -945,13 +934,14 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-hidden flex flex-col pt-3 px-4 pb-4">
-        <div className="h-full w-full border border-gray-200 rounded-xl shadow-sm bg-white flex flex-col overflow-hidden">
-          <div className="flex-1 flex justify-center overflow-hidden relative">
-            <div className="relative h-full w-full max-w-[95%]">
-              {/* Concept Container */}
-              <div ref={containerRef} className="relative h-full w-full border-2 border-gray-300 rounded-lg bg-gradient-to-b from-gray-50 to-gray-100 overflow-hidden">
+      {/* Main Content Area：与单元视图同一套外边距；单层圆角边框画布 */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-3 pt-2">
+        <div className="relative flex min-h-0 flex-1 justify-center overflow-hidden">
+          <div className="relative h-full w-full max-w-[95%] min-h-0">
+            <div
+              ref={containerRef}
+              className="relative h-full w-full overflow-hidden rounded-xl border border-gray-200 bg-gradient-to-b from-gray-50 to-gray-100 shadow-sm"
+            >
             <canvas
           ref={canvasRef}
           className="w-full h-full cursor-grab active:cursor-grabbing"
@@ -1015,7 +1005,9 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
             </div>
 
             <div className="space-y-2">
-              {selectedConcept.units.map((unitData, index) => (
+              {selectedConcept.units.map((unitData, index) => {
+                const unitGradient = getColorGradient(unitData.course.color);
+                return (
                 <div
                   key={`${unitData.unit.id}-${index}`}
                   className="p-2 bg-gray-50 rounded-lg border border-gray-200 hover:bg-gray-100 transition-colors"
@@ -1024,13 +1016,7 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
                     <div
                       className="w-3 h-3 rounded-full"
                       style={{
-                        background: `linear-gradient(135deg, ${
-                          unitData.course.color === 'light-blue' ? '#93c5fd, #60a5fa' :
-                          unitData.course.color === 'light-green' ? '#86efac, #4ade80' :
-                          unitData.course.color === 'light-yellow' ? '#fde047, #facc15' :
-                          unitData.course.color === 'light-red' ? '#fca5a5, #f87171' :
-                          '#c4b5fd, #a78bfa'
-                        })`,
+                        background: `linear-gradient(135deg, ${unitGradient.medium}, ${unitGradient.dark})`,
                       }}
                     />
                     <span className="text-xs font-semibold text-gray-700">
@@ -1044,7 +1030,8 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
                     {unitData.unit.week}{t('concept.weeks')} · {unitData.unit.periods}{t('concept.periods')}
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
         )}
@@ -1061,7 +1048,6 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
             </div>
           </div>
         )}
-              </div>
             </div>
           </div>
         </div>

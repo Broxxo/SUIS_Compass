@@ -25,7 +25,6 @@ router.get('/:courseId/:grade/:semester', async (req, res) => {
         grade: parseInt(grade),
         semester,
         units: [],
-        weeklyPeriods: 2,
       });
     }
 
@@ -35,7 +34,6 @@ router.get('/:courseId/:grade/:semester', async (req, res) => {
       grade: row.grade,
       semester: row.semester,
       units: row.units,
-      weeklyPeriods: row.weekly_periods,
     });
   } catch (error) {
     console.error('Get semester data error:', error);
@@ -54,14 +52,14 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden: admin only' });
     }
 
-    const { courseId, grade, semester, units, weeklyPeriods } = req.body;
+    const { courseId, grade, semester, units } = req.body;
     const result = await pool.query(
       `INSERT INTO semester_data (user_id, course_id, grade, semester, units, weekly_periods)
-       VALUES ($1, $2, $3, $4, $5, $6)
+       VALUES ($1, $2, $3, $4, $5, NULL)
        ON CONFLICT (course_id, grade, semester)
-       DO UPDATE SET units = EXCLUDED.units, weekly_periods = EXCLUDED.weekly_periods, user_id = EXCLUDED.user_id, updated_at = CURRENT_TIMESTAMP
+       DO UPDATE SET units = EXCLUDED.units, user_id = EXCLUDED.user_id, updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
-      [uid, courseId, grade, semester, JSON.stringify(units || []), weeklyPeriods],
+      [uid, courseId, grade, semester, JSON.stringify(units || [])],
     );
 
     const row = result.rows[0] as Record<string, unknown>;
@@ -70,7 +68,6 @@ router.post('/', async (req, res) => {
       grade: row.grade,
       semester: row.semester,
       units: row.units,
-      weeklyPeriods: row.weekly_periods,
     });
   } catch (error) {
     console.error('Save semester data error:', error);

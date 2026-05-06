@@ -34,9 +34,11 @@ import {
 import { loadUsers } from '../lib/adminStorage';
 import type { AdminUser } from '../lib/adminStorage';
 import { ChevronDown, ChevronRight, Plus, Settings, Trash2, UserMinus } from 'lucide-react';
-import { GRADES } from '../lib/constants';
+import { DEFAULT_GRADE_CONFIG } from '../lib/constants';
 import CreateStudentDialog from './CreateStudentDialog';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
+import { loadGradeConfig } from '../lib/storage';
+import { getGradeLabelByLevel, normalizeGradeConfig } from '../lib/gradeConfig';
 
 interface ClassManagementProps {
   onBackToHub: () => void;
@@ -63,7 +65,8 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [expandedClassId, setExpandedClassId] = useState<string | null>(null);
+  /** 可同时展开多个班级（跨年级、同年级多班） */
+  const [expandedClassIds, setExpandedClassIds] = useState<Set<string>>(() => new Set());
 
   const [dialogCreateYear, setDialogCreateYear] = useState(false);
   const [dialogCreateClass, setDialogCreateClass] = useState(false);
@@ -76,6 +79,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
 
   const [newYearName, setNewYearName] = useState('');
   const [newClassName, setNewClassName] = useState('');
+  const [gradeConfig, setGradeConfig] = useState(DEFAULT_GRADE_CONFIG);
   const [newClassGrade, setNewClassGrade] = useState(1);
   const [submitLoading, setSubmitLoading] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
@@ -105,8 +109,13 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const canEdit = isAdmin && !isTeacherOnly;
 
   const refresh = async () => {
-    const list = await loadAcademicYears();
+    const [list, gc] = await Promise.all([loadAcademicYears(), loadGradeConfig()]);
     setYears(list);
+    const normalizedGc = normalizeGradeConfig(gc);
+    setGradeConfig(normalizedGc);
+    setNewClassGrade((prev) =>
+      normalizedGc.items.some((item) => item.level === prev) ? prev : (normalizedGc.items[0]?.level ?? 1),
+    );
     const cur = await loadCurrentAcademicYearId();
     if (cur) setCurrentYearId(cur);
     else if (list.length > 0) {
@@ -140,24 +149,33 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   }, [currentYearId]);
 
   useEffect(() => {
+    setExpandedClassIds(new Set());
+  }, [currentYearId]);
+
+  useEffect(() => {
     if (!canEdit) return;
-    const classId = expandedClassId;
-    if (!classId) return;
+    const ids = [...expandedClassIds];
+    if (ids.length === 0) return;
     if (USE_CLOUD_STORAGE) {
-      api.getClassTeachers(classId)
-        .then((list) => setClassTeachers((prev) => ({ ...prev, [classId]: list })))
-        .catch(() => {});
+      ids.forEach((classId) => {
+        api.getClassTeachers(classId)
+          .then((list) => setClassTeachers((prev) => ({ ...prev, [classId]: list })))
+          .catch(() => {});
+      });
       return;
     }
-    setClassTeachers((prev) => ({
-      ...prev,
-      [classId]: loadClassTeachersLocalSync(classId).map((t) => ({
-        teacherId: t.teacherId,
-        role: t.role,
-        displayName: t.displayName || teachers.find((u) => u.id === t.teacherId)?.displayName || '',
-      })),
-    }));
-  }, [canEdit, expandedClassId]);
+    setClassTeachers((prev) => {
+      const next = { ...prev };
+      ids.forEach((classId) => {
+        next[classId] = loadClassTeachersLocalSync(classId).map((t) => ({
+          teacherId: t.teacherId,
+          role: t.role,
+          displayName: t.displayName || teachers.find((u) => u.id === t.teacherId)?.displayName || '',
+        }));
+      });
+      return next;
+    });
+  }, [canEdit, expandedClassIds, teachers]);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -251,7 +269,12 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
       await deleteClass(c.id);
       setClasses((prev) => prev.filter((x) => x.id !== c.id));
       setEnrollments((prev) => prev.filter((e) => e.classId !== c.id));
-      if (expandedClassId === c.id) setExpandedClassId(null);
+      setExpandedClassIds((prev) => {
+        if (!prev.has(c.id)) return prev;
+        const next = new Set(prev);
+        next.delete(c.id);
+        return next;
+      });
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Failed to delete class');
     }
@@ -364,9 +387,23 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   };
 
   const currentYear = years.find((y) => y.id === currentYearId);
+  const gradeSections = useMemo(() => {
+    const grouped = new Map<number, ClassItem[]>();
+    displayedClasses.forEach((c) => {
+      const list = grouped.get(c.grade) ?? [];
+      list.push(c);
+      grouped.set(c.grade, list);
+    });
+    return Array.from(grouped.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([grade, classList]) => ({
+        grade,
+        classList: classList.slice().sort((a, b) => a.name.localeCompare(b.name)),
+      }));
+  }, [displayedClasses]);
 
   return (
-    <div className={`min-h-screen bg-slate-50 ${embedded ? '' : 'pt-14'}`}>
+    <div className={`min-h-screen w-full min-w-0 bg-slate-50 ${embedded ? '' : 'pt-14'}`}>
       {!embedded && (
         <AppTopBar
           title={pageTitle}
@@ -414,7 +451,13 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
           }
         />
       )}
-      <main className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+      <main
+        className={
+          embedded
+            ? 'w-full max-w-none mx-0 px-0 py-4 space-y-4'
+            : 'max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-4'
+        }
+      >
         {error && <p className="text-sm text-red-500">{error}</p>}
 
         <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
@@ -453,162 +496,228 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                 {isTeacherOnly ? (isZh ? '您暂无关联的班级。' : 'You have no classes assigned.') : (isZh ? '暂无班级。' : 'No classes yet.')}
               </p>
             ) : (
-              <ul className="space-y-2">
-                {displayedClasses.map((c) => {
-                  const enrolls = enrollmentsInClass(c.id);
-                  const expanded = expandedClassId === c.id;
+              <div className="space-y-3">
+                {gradeSections.map(({ grade, classList }) => {
+                  const gradeExpanded = classList.some((c) => expandedClassIds.has(c.id));
+                  const expandedClassesInGrade = classList.filter((c) => expandedClassIds.has(c.id));
                   return (
-                    <li key={c.id} className="border border-slate-200 rounded-lg overflow-hidden">
-                      <div
-                        className="flex items-center justify-between px-3 py-2 bg-slate-50 cursor-pointer"
-                        onClick={() => setExpandedClassId(expanded ? null : c.id)}
-                      >
-                        <span className="flex items-center gap-1">
-                          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                          <span className="font-medium">G{c.grade} {c.name}</span>
-                          <span className="text-slate-500 text-sm">({enrolls.length})</span>
-                        </span>
-                        {canEdit && (
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); handleDeleteClass(c); }}
-                            className="p-1.5 rounded hover:bg-red-50 text-slate-500 hover:text-red-600"
-                            title={isZh ? '删除班级' : 'Delete class'}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        )}
-                      </div>
-                      {expanded && (
-                        <div className="px-3 py-2 border-t border-slate-100 space-y-3">
-                          {/* 教师：更醒目，突出班主任 */}
-                          <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-xs font-semibold text-amber-900">
-                                  {isZh ? '班级教师' : 'Teachers'}
-                                </div>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {(classTeachers[c.id] ?? []).length === 0 ? (
-                                    <span className="text-xs text-amber-900/70">{isZh ? '暂无关联教师' : 'No teachers assigned'}</span>
-                                  ) : (
-                                    [...(classTeachers[c.id] ?? [])]
-                                      .sort((a, b) => (a.role === 'homeroom' ? -1 : 1) - (b.role === 'homeroom' ? -1 : 1))
-                                      .map((t) => {
-                                        const isHomeroom = t.role === 'homeroom';
-                                        return (
-                                          <span
-                                            key={t.teacherId}
-                                            className={
-                                              isHomeroom
-                                                ? 'inline-flex items-center gap-1 rounded-full bg-amber-600 text-white px-2.5 py-1 text-xs font-semibold shadow-sm'
-                                                : 'inline-flex items-center gap-1 rounded-full bg-white text-amber-900 px-2.5 py-1 text-xs font-medium border border-amber-200'
-                                            }
-                                            title={isHomeroom ? (isZh ? '班主任/负责人' : 'Homeroom') : (isZh ? '任课教师' : 'Co-teacher')}
-                                          >
-                                            {isHomeroom && (
-                                              <span className="rounded-full bg-white/20 px-1 py-0.5 text-[10px]">
-                                                {isZh ? '班主任' : 'HR'}
+                    <section
+                      key={`grade-${grade}`}
+                      className={`rounded-xl border border-slate-200 transition-all duration-200 ${
+                        gradeExpanded
+                          ? 'bg-white shadow-md ring-2 ring-slate-300/80 scale-[1.01]'
+                          : 'bg-slate-50/70'
+                      }`}
+                    >
+                      <div className="px-3 py-3 space-y-3">
+                        {/* 年级标签与班级按钮同一行：左侧为年级「头部」，右侧横向滚动 */}
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="flex items-center gap-2 shrink-0 border-r border-slate-200/90 pr-2.5 mr-0.5">
+                            <span
+                              className={`inline-flex items-center justify-center rounded-lg px-2.5 py-1 text-sm font-semibold transition-all ${
+                                gradeExpanded ? 'bg-primary text-primary-foreground scale-105' : 'bg-slate-200 text-slate-700'
+                              }`}
+                            >
+                              {getGradeLabelByLevel(gradeConfig, grade)}
+                            </span>
+                            <span className="text-xs text-slate-500 whitespace-nowrap hidden sm:inline">
+                              {isZh ? `${classList.length} 个班级` : `${classList.length} classes`}
+                            </span>
+                          </div>
+                          {/* 勿对选中项 scale：会在 overflow-x-auto 内被裁切，首项左侧圆角变直角 */}
+                          <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto pb-0.5 ps-1 pe-1">
+                            {classList.map((c) => {
+                              const cEnrolls = enrollmentsInClass(c.id);
+                              const expanded = expandedClassIds.has(c.id);
+                              return (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setExpandedClassIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(c.id)) next.delete(c.id);
+                                      else next.add(c.id);
+                                      return next;
+                                    });
+                                  }}
+                                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm whitespace-nowrap transition-colors shrink-0 ${
+                                    expanded
+                                      ? 'bg-primary text-primary-foreground border-primary shadow-sm ring-2 ring-primary/25'
+                                      : 'bg-white text-slate-700 border-slate-300 hover:border-slate-500'
+                                  }`}
+                                >
+                                  {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                  <span className="font-medium">{c.name}</span>
+                                  <span className={expanded ? 'text-primary-foreground/85' : 'text-slate-500'}>({cEnrolls.length})</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {gradeExpanded && (
+                            <span className="text-xs text-slate-500 shrink-0 hidden sm:inline">{isZh ? '已展开' : 'Expanded'}</span>
+                          )}
+                        </div>
+
+                        <div
+                          className={`grid gap-3 items-start ${
+                            expandedClassesInGrade.length <= 1
+                              ? 'grid-cols-1'
+                              : 'grid-cols-1 md:grid-cols-2'
+                          }`}
+                        >
+                          {expandedClassesInGrade.map((expandedInGrade) => {
+                          const enrolls = enrollmentsInClass(expandedInGrade.id);
+                          return (
+                            <div
+                              key={expandedInGrade.id}
+                              className="min-w-0 rounded-xl border border-slate-200 bg-white p-3 space-y-3"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <h3 className="text-sm font-semibold text-slate-900">
+                                  {getGradeLabelByLevel(gradeConfig, expandedInGrade.grade)} {expandedInGrade.name}
+                                </h3>
+                                {canEdit && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteClass(expandedInGrade); }}
+                                    className="p-1.5 rounded hover:bg-red-50 text-slate-500 hover:text-red-600"
+                                    title={isZh ? '删除班级' : 'Delete class'}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                )}
+                              </div>
+
+                              <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-semibold text-amber-900">
+                                      {isZh ? '班级教师' : 'Teachers'}
+                                    </div>
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      {(classTeachers[expandedInGrade.id] ?? []).length === 0 ? (
+                                        <span className="text-xs text-amber-900/70">{isZh ? '暂无关联教师' : 'No teachers assigned'}</span>
+                                      ) : (
+                                        [...(classTeachers[expandedInGrade.id] ?? [])]
+                                          .sort((a, b) => (a.role === 'homeroom' ? -1 : 1) - (b.role === 'homeroom' ? -1 : 1))
+                                          .map((t) => {
+                                            const isHomeroom = t.role === 'homeroom';
+                                            return (
+                                              <span
+                                                key={t.teacherId}
+                                                className={
+                                                  isHomeroom
+                                                    ? 'inline-flex items-center gap-1 rounded-full bg-amber-600 text-white px-2.5 py-1 text-xs font-semibold shadow-sm'
+                                                    : 'inline-flex items-center gap-1 rounded-full bg-white text-amber-900 px-2.5 py-1 text-xs font-medium border border-amber-200'
+                                                }
+                                                title={isHomeroom ? (isZh ? '班主任/负责人' : 'Homeroom') : (isZh ? '任课教师' : 'Co-teacher')}
+                                              >
+                                                {isHomeroom && (
+                                                  <span className="rounded-full bg-white/20 px-1 py-0.5 text-[10px]">
+                                                    {isZh ? '班主任' : 'HR'}
+                                                  </span>
+                                                )}
+                                                <span className="truncate max-w-[220px]">{t.displayName}</span>
                                               </span>
-                                            )}
-                                            <span className="truncate max-w-[220px]">{t.displayName}</span>
-                                          </span>
-                                        );
-                                      })
+                                            );
+                                          })
+                                      )}
+                                    </div>
+                                  </div>
+                                  {canEdit && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-8 text-xs border-amber-300 text-amber-900 hover:bg-amber-100"
+                                      onClick={() => {
+                                        setAssignTeacherClass(expandedInGrade);
+                                        setAssignTeacherTeacherId('');
+                                        setAssignTeacherRole('co-teacher');
+                                      }}
+                                    >
+                                      {isZh ? '关联教师' : 'Assign'}
+                                    </Button>
                                   )}
                                 </div>
                               </div>
-                              {canEdit && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-8 text-xs border-amber-300 text-amber-900 hover:bg-amber-100"
-                                  onClick={() => {
-                                    setAssignTeacherClass(c);
-                                    setAssignTeacherTeacherId('');
-                                    setAssignTeacherRole('co-teacher');
-                                  }}
-                                >
-                                  {isZh ? '关联教师' : 'Assign'}
-                                </Button>
-                              )}
-                            </div>
-                          </div>
 
-                          {/* 学生：更紧凑，网格排布 */}
-                          <div className="rounded-xl border border-slate-200 bg-white p-3">
-                            <div className="flex items-center justify-between gap-2 mb-2">
-                              <div className="text-xs font-semibold text-slate-800">
-                                {isZh ? '学生' : 'Students'} <span className="text-slate-500 font-medium">({enrolls.length})</span>
-                              </div>
-                              {canEdit && (
-                                <div className="flex items-center gap-2">
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-8 text-xs"
-                                    onClick={() => {
-                                      setDialogLinkStudentsClass(c);
-                                      setLinkStudentIds(new Set());
-                                    }}
-                                  >
-                                    {isZh ? '关联' : 'Link'}
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-8 text-xs"
-                                    onClick={() => setDialogAddStudent(c)}
-                                  >
-                                    <Plus className="h-3.5 w-3.5 mr-1" />
-                                    {isZh ? '新建' : 'New'}
-                                  </Button>
+                              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                  <div className="text-xs font-semibold text-slate-800">
+                                    {isZh ? '学生' : 'Students'} <span className="text-slate-500 font-medium">({enrolls.length})</span>
+                                  </div>
+                                  {canEdit && (
+                                    <div className="flex items-center gap-2">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-8 text-xs"
+                                        onClick={() => {
+                                          setDialogLinkStudentsClass(expandedInGrade);
+                                          setLinkStudentIds(new Set());
+                                        }}
+                                      >
+                                        {isZh ? '关联' : 'Link'}
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-8 text-xs"
+                                        onClick={() => setDialogAddStudent(expandedInGrade)}
+                                      >
+                                        <Plus className="h-3.5 w-3.5 mr-1" />
+                                        {isZh ? '新建' : 'New'}
+                                      </Button>
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
-                            {enrolls.length === 0 ? (
-                              <p className="text-sm text-slate-500">{isZh ? '暂无学生。' : 'No students.'}</p>
-                            ) : (
-                              <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
-                                {enrolls.map((e) => {
-                                  const stu = getStudent(e.studentId);
-                                  if (!stu) return null;
-                                  const genderLabel = stu.gender === 'male' ? (isZh ? '男' : 'M') : stu.gender === 'female' ? (isZh ? '女' : 'F') : (isZh ? '其他' : 'Other');
-                                  return (
-                                    <li
-                                      key={e.id}
-                                      className="group flex items-center justify-between gap-2 py-1 text-sm"
-                                    >
-                                      <span className="min-w-0 truncate text-slate-800">
-                                        {stu.name}
-                                        <span className="text-slate-400"> · </span>
-                                        <span className="text-slate-600">{genderLabel}</span>
-                                        {stu.studentNumber ? (
-                                          <span className="text-slate-400"> ({stu.studentNumber})</span>
-                                        ) : null}
-                                      </span>
-                                      {canEdit && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleRemoveFromClass(e)}
-                                          className="opacity-70 group-hover:opacity-100 text-slate-400 hover:text-amber-700"
-                                          title={isZh ? '从本班移除' : 'Remove from class'}
+                                {enrolls.length === 0 ? (
+                                  <p className="text-sm text-slate-500">{isZh ? '暂无学生。' : 'No students.'}</p>
+                                ) : (
+                                  <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
+                                    {enrolls.map((e) => {
+                                      const stu = getStudent(e.studentId);
+                                      if (!stu) return null;
+                                      const genderLabel = stu.gender === 'male' ? (isZh ? '男' : 'M') : stu.gender === 'female' ? (isZh ? '女' : 'F') : (isZh ? '其他' : 'Other');
+                                      return (
+                                        <li
+                                          key={e.id}
+                                          className="group flex items-center justify-between gap-2 py-1 text-sm"
                                         >
-                                          <UserMinus className="h-4 w-4" />
-                                        </button>
-                                      )}
-                                    </li>
-                                  );
-                                })}
-                              </ul>
-                            )}
-                          </div>
+                                          <span className="min-w-0 truncate text-slate-800">
+                                            {stu.name}
+                                            <span className="text-slate-400"> · </span>
+                                            <span className="text-slate-600">{genderLabel}</span>
+                                            {stu.studentNumber ? (
+                                              <span className="text-slate-400"> ({stu.studentNumber})</span>
+                                            ) : null}
+                                          </span>
+                                          {canEdit && (
+                                            <button
+                                              type="button"
+                                              onClick={() => handleRemoveFromClass(e)}
+                                              className="opacity-70 group-hover:opacity-100 text-slate-400 hover:text-amber-700"
+                                              title={isZh ? '从本班移除' : 'Remove from class'}
+                                            >
+                                              <UserMinus className="h-4 w-4" />
+                                            </button>
+                                          )}
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                         </div>
-                      )}
-                    </li>
+                      </div>
+                    </section>
                   );
                 })}
-              </ul>
+              </div>
             )}
 
             {/* 未分班学生：当前学年下没有归属任何班级的学生（含从某班移除后的学生） */}
@@ -678,8 +787,8 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                 onChange={(e) => setNewClassGrade(Number(e.target.value))}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2"
               >
-                {GRADES.map((g) => (
-                  <option key={g} value={g}>G{g}</option>
+                {gradeConfig.items.map((item) => (
+                  <option key={item.id} value={item.level}>{item.label}</option>
                 ))}
               </select>
             </div>
@@ -819,7 +928,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
             >
               <option value="">—</option>
               {classes.map((c) => (
-                <option key={c.id} value={c.id}>G{c.grade} {c.name}</option>
+                <option key={c.id} value={c.id}>{getGradeLabelByLevel(gradeConfig, c.grade)} {c.name}</option>
               ))}
             </select>
           </div>

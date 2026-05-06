@@ -32,8 +32,13 @@ import {
   deleteStudent,
   addEnrollment,
 } from '../lib/classStorage';
+import { loadCategoryOrder, hydrateCategoryOrderFromCloud, loadGradeConfigSync } from '../lib/storage';
+import { getGradeLabelByLevel, normalizeGradeConfig } from '../lib/gradeConfig';
+import { sortCoursesLikeCurriculumRoadmap, getSubjectCategoryText } from '../lib/utils';
+import { courseAppliesToGrade } from '../lib/courseGradeUtils';
 import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, HomeroomCommentMode, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, StaffingAssignment, TargetLevel, Term } from '../types/classManagement';
 import ClassManagement from './ClassManagement';
+import CurriculumRoadmap from './CurriculumRoadmap';
 import CreateStudentDialog from './CreateStudentDialog';
 import { ArrowDown, ArrowUp, Eye, EyeOff, LogIn, Pencil, Plus, Trash2 } from 'lucide-react';
 
@@ -81,7 +86,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
   const [deleteLoading, setDeleteLoading] = useState(false);
 
-  const [adminTab, setAdminTab] = useState<'users' | 'years' | 'classes' | 'staffing' | 'students' | 'report-settings' | 'database'>('users');
+  const [adminTab, setAdminTab] = useState<'users' | 'years' | 'classes' | 'courses' | 'staffing' | 'students' | 'report-settings' | 'database'>('users');
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [currentYearId, setCurrentYearId] = useState<string | null>(null);
   const [yearLoading, setYearLoading] = useState(false);
@@ -176,6 +181,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [staffingTeachers, setStaffingTeachers] = useState<AdminUser[]>([]);
   const [staffingAssignments, setStaffingAssignments] = useState<StaffingAssignment[]>([]);
   const [staffingSavingKeys, setStaffingSavingKeys] = useState<Set<string>>(new Set());
+  /** 云端下学科顺序从 DB 拉取后 bump，岗位安排列与课程管理对齐 */
+  const [staffingCategoryOrderNonce, setStaffingCategoryOrderNonce] = useState(0);
 
   /** 用户管理：教职工列表 | 学生账号列表 */
   const [userListScope, setUserListScope] = useState<'staff' | 'students'>('staff');
@@ -518,6 +525,17 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       .finally(() => setStaffingLoading(false));
   }, [adminTab, staffingYearId]);
 
+  useEffect(() => {
+    if (adminTab !== 'staffing' || !USE_CLOUD_STORAGE) return;
+    let cancelled = false;
+    void hydrateCategoryOrderFromCloud().then(() => {
+      if (!cancelled) setStaffingCategoryOrderNonce((n) => n + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminTab]);
+
   const handleCreateYear = async () => {
     if (!newYearName.trim()) return;
     setYearSubmitLoading(true);
@@ -679,6 +697,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setError((e as Error)?.message || 'Failed to delete year');
     }
   };
+
+  const getGradeLabel = (level: number): string =>
+    getGradeLabelByLevel(normalizeGradeConfig(loadGradeConfigSync()), level);
 
   const handleCreate = async () => {
     if (!username || !password) return;
@@ -1211,20 +1232,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
   };
 
-  const parseGradeRange = (gradeRange?: string): number[] => {
-    if (!gradeRange || !String(gradeRange).trim()) return [1, 2, 3, 4, 5, 6, 7, 8, 9];
-    const raw = String(gradeRange).trim();
-    if (raw.includes('-')) {
-      const [start, end] = raw.split('-').map((n) => Number(n));
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
-      const low = Math.max(1, Math.min(start, end));
-      const high = Math.min(9, Math.max(start, end));
-      return Array.from({ length: high - low + 1 }, (_, i) => low + i);
-    }
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 1 && n <= 9 ? [n] : [];
-  };
-
   const normalizeSubjectKey = (input: string): string => {
     const normalized = input
       .trim()
@@ -1316,15 +1323,17 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [allClasses, staffingYearId],
   );
 
-  /** 与课程河流列顺序一致：一列一门课程（不按名称重排） */
-  const staffingCourseColumns = useMemo(
-    () => staffingCourses.map((course) => ({
+  /** 与课程管理 / 课程河流整体视图一致：按全局 categoryOrder + 学科分组展开为列 */
+  const curriculumCategoryOrderKey =
+    adminTab === 'staffing' ? JSON.stringify(loadCategoryOrder()) : '';
+  const staffingCourseColumns = useMemo(() => {
+    const sorted = sortCoursesLikeCurriculumRoadmap(staffingCourses, loadCategoryOrder());
+    return sorted.map((course) => ({
       course,
       key: normalizeSubjectKey(course.id || course.name),
-      name: course.name,
-    })),
-    [staffingCourses],
-  );
+      name: getSubjectCategoryText(course.subjectCategory, language) || course.name,
+    }));
+  }, [staffingCourses, curriculumCategoryOrderKey, staffingCategoryOrderNonce, language]);
 
   const staffingAssignmentsMap = useMemo(() => {
     const map = new Map<string, StaffingAssignment>();
@@ -1363,16 +1372,22 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       classMgmt: isZh ? '仅查看' : 'View only',
     },
   ];
+  /**
+   * 除「课程管理」全宽外，各 tab 共用同一最大宽度。
+   * 根布局为 flex-col 时，子项仅写 max-w + mx-auto 会在交叉轴上收缩为「内容宽度」；
+   * 学生管理因有宽表格看似正常，班级管理等窄内容会把 main 压成一条——必须加 w-full。
+   */
+  const adminContentFrameClass = 'w-full max-w-7xl mx-auto px-4 sm:px-6';
 
   return (
-    <div className="min-h-screen bg-slate-50 pt-14">
+    <div className={`${adminTab === 'courses' ? 'h-screen overflow-hidden' : 'min-h-screen'} bg-slate-50 pt-14 flex flex-col`}>
       <AppTopBar
         title={isZh ? '后台管理' : 'Admin'}
         showBack
         onBack={onBackToHub}
       />
-      <div className="border-b border-slate-200 bg-white">
-        <div className="max-w-4xl mx-auto px-4 flex gap-1 flex-wrap">
+      <div className="border-b border-slate-200 bg-white flex-shrink-0">
+        <div className={`${adminContentFrameClass} flex gap-1 flex-wrap`}>
           <button
             type="button"
             onClick={() => { setAdminTab('users'); setError(null); }}
@@ -1393,6 +1408,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'classes' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
             {isZh ? '班级管理' : 'Classes'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setAdminTab('courses'); setError(null); }}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'courses' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            {isZh ? '课程管理' : 'Courses'}
           </button>
           <button
             type="button"
@@ -1427,7 +1449,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         </div>
       </div>
       {error && (
-        <div className="max-w-4xl mx-auto px-4 pt-4">
+        <div className={`${adminContentFrameClass} pt-4`}>
           <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 flex items-center justify-between gap-2">
             <span>{error}</span>
             <button type="button" onClick={() => setError(null)} className="text-red-500 hover:text-red-800" aria-label={isZh ? '关闭' : 'Dismiss'}>
@@ -1436,7 +1458,18 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           </div>
         </div>
       )}
-      <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+      <main
+        className={
+          adminTab === 'courses'
+            ? 'flex-1 flex flex-col min-h-0 w-full px-2 py-2 overflow-hidden'
+            : `${adminContentFrameClass} py-6 space-y-6`
+        }
+      >
+        {adminTab === 'courses' && (
+          <div className="flex-1 min-h-0 flex flex-col rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+            <CurriculumRoadmap surface="admin-course-management" embedded />
+          </div>
+        )}
         {adminTab === 'users' && (
         <>
         {userListScope === 'staff' && (
@@ -1868,7 +1901,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                       <tbody>
                         {currentYearClasses.map(({ cls, studentCount }) => (
                           <tr key={cls.id} className="border-t border-slate-100">
-                            <td className="py-2 px-3 text-slate-700">G{cls.grade}</td>
+                            <td className="py-2 px-3 text-slate-700">{getGradeLabel(cls.grade)}</td>
                             <td className="py-2 px-3 text-slate-800">{cls.name}</td>
                             <td className="py-2 px-3 text-slate-700">{studentCount}</td>
                           </tr>
@@ -1883,7 +1916,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         )}
 
         {adminTab === 'classes' && (
-          <div className="mt-4">
+          <div className="mt-4 w-full min-w-0">
             <ClassManagement
               onBackToHub={() => {}}
               embedded
@@ -1902,8 +1935,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 </h2>
                 <p className="text-xs text-slate-500 mt-1 max-w-2xl">
                   {isZh
-                    ? '表头为课程河流课程顺序；左侧为班级。年级不匹配时格内为「—」。'
-                    : 'Header row: course order from Curriculum Roadmap. Left: classes. “—” when grade does not match.'}
+                    ? '表头为课程管理中的课程顺序；左侧为班级。年级不匹配时格内为「—」。'
+                    : 'Header row: course order from Admin → Courses. Left: classes. “—” when grade does not match.'}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1940,7 +1973,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <p className="px-3 py-4 text-sm text-slate-500">{isZh ? '该学年下暂无班级。' : 'No classes in this year.'}</p>
                   ) : staffingCourseColumns.length === 0 ? (
                     <p className="px-3 py-4 text-sm text-slate-500">
-                      {isZh ? '课程河流中暂无课程，请先在课程河流添加课程并设置年级跨度。' : 'No courses yet. Add courses in Curriculum Roadmap with grade ranges.'}
+                      {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
                     </p>
                   ) : (
                     <table className="min-w-max w-full text-sm border-collapse">
@@ -1970,10 +2003,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                         {staffingClassList.map((cls) => (
                           <tr key={cls.id} className="border-t border-slate-100">
                             <td className="sticky left z-[1] bg-white border-r border-slate-100 px-3 py-2 align-top">
-                              <div className="font-medium text-slate-800">{`G${cls.grade} ${cls.name}`}</div>
+                              <div className="font-medium text-slate-800">{`${getGradeLabel(cls.grade)} ${cls.name}`}</div>
                             </td>
                             {staffingCourseColumns.map((col) => {
-                              const applies = parseGradeRange(col.course.gradeRange).includes(cls.grade);
+                              const applies = courseAppliesToGrade(
+                                col.course,
+                                cls.grade,
+                                normalizeGradeConfig(loadGradeConfigSync()),
+                              );
                               if (!applies) {
                                 return (
                                   <td key={`${cls.id}-${col.key}`} className="px-2 py-2 align-top bg-slate-50/60 text-center text-slate-300 text-xs">

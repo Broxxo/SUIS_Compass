@@ -15,6 +15,8 @@ interface AppTopBarProps {
   showBack?: boolean;
   /** 点击返回时的回调 */
   onBack?: () => void;
+  /** 中间区域（如课程视图 Tab）：存在时与标题并排展示，标题缩至左侧辅助文案 */
+  centerContent?: ReactNode;
   /** 右侧区域：语言切换、添加课程、设置等 */
   rightChildren?: ReactNode;
 }
@@ -26,7 +28,7 @@ const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   student: { zh: '学生', en: 'Student' },
 };
 
-export default function AppTopBar({ title, showBack, onBack, rightChildren }: AppTopBarProps) {
+export default function AppTopBar({ title, showBack, onBack, centerContent, rightChildren }: AppTopBarProps) {
   const { user, logout } = useAuth();
   const { language } = useLanguage();
   const isZh = language === 'zh';
@@ -46,9 +48,13 @@ export default function AppTopBar({ title, showBack, onBack, rightChildren }: Ap
 
   return (
     <header className="fixed top-0 left-0 right-0 z-20 h-14 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
-      <div className="h-full mx-auto max-w-6xl px-4 flex items-center justify-between gap-4">
+      <div
+        className={`h-full mx-auto px-3 sm:px-4 flex items-center gap-2 sm:gap-3 ${
+          centerContent ? 'max-w-[100rem] justify-between' : 'max-w-6xl justify-between'
+        }`}
+      >
         {/* 左侧：主界面为 logo，子应用为返回按钮；右侧固定为用户头像 */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 shrink-0">
           {showBack && onBack ? (
             <Button
               variant="outline"
@@ -110,13 +116,23 @@ export default function AppTopBar({ title, showBack, onBack, rightChildren }: Ap
           </div>
         </div>
 
-        {/* 中间：当前功能名称 */}
-        <h1 className="absolute left-1/2 -translate-x-1/2 text-lg sm:text-xl font-semibold text-slate-800 truncate max-w-[50vw] pointer-events-none">
-          {title}
-        </h1>
+        {centerContent ? (
+          <>
+            <span className="hidden sm:inline text-sm font-medium text-slate-600 truncate max-w-[9rem] md:max-w-[12rem] shrink-0">
+              {title}
+            </span>
+            <div className="flex-1 min-w-0 flex justify-center overflow-x-auto overflow-y-hidden no-scrollbar">
+              {centerContent}
+            </div>
+          </>
+        ) : (
+          <h1 className="absolute left-1/2 -translate-x-1/2 text-lg sm:text-xl font-semibold text-slate-800 truncate max-w-[50vw] pointer-events-none">
+            {title}
+          </h1>
+        )}
 
         {/* 右侧：各应用功能按钮（返回已在左侧替代 logo） */}
-        <div className="flex items-center gap-2 ml-auto min-w-0">
+        <div className="flex items-center gap-1.5 sm:gap-2 ml-auto min-w-0 shrink-0">
           {rightChildren}
         </div>
       </div>

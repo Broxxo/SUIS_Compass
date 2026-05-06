@@ -8,6 +8,7 @@ export type TranslationKey =
   | 'view.concept'
   | 'view.showPeriods'
   | 'view.hidePeriods'
+  | 'view.roadmapNavAria'
   // Course management
   | 'course.add'
   | 'course.edit'
@@ -56,6 +57,16 @@ export type TranslationKey =
   | 'settings.title'
   | 'settings.description'
   | 'settings.courseManagement'
+  | 'settings.columnOrder'
+  | 'settings.columnOrderHint'
+  | 'settings.saveColumnOrder'
+  | 'settings.columnOrderSaved'
+  | 'settings.columnOrderSaveFailed'
+  | 'settings.unsavedColumnOrderConfirm'
+  | 'settings.exportCourseData'
+  | 'settings.importCourseData'
+  | 'settings.exportCourseDataTitle'
+  | 'settings.importCourseDataTitle'
   // AI
   | 'ai.generate'
   | 'ai.generating'
@@ -146,13 +157,14 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'view.concept': '概念视图',
     'view.showPeriods': '显示课时',
     'view.hidePeriods': '隐藏课时',
+    'view.roadmapNavAria': '课程视图切换',
     // Course management
     'course.add': '添加课程',
     'course.edit': '编辑课程',
     'course.delete': '删除课程',
     'course.settings': '设置',
     'course.subjectCategory': '课程类别',
-    'course.gradeRange': '年级跨度',
+    'course.gradeRange': '开设年级与周课时',
     'course.textbookVersion': '教材版本',
     'course.weeklyPeriods': '周课时数',
     'course.color': '选择颜色',
@@ -194,6 +206,16 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'settings.title': '设置',
     'settings.description': '管理课程设置',
     'settings.courseManagement': '课程设置',
+    'settings.columnOrder': '整体视图课程列顺序',
+    'settings.columnOrderHint': '左侧箭头调整整体视图中的学科列顺序；改完后请点击「保存顺序」同步（与岗位安排表头一致）。',
+    'settings.saveColumnOrder': '保存顺序',
+    'settings.columnOrderSaved': '顺序已保存。',
+    'settings.columnOrderSaveFailed': '保存顺序失败，请检查网络后重试。',
+    'settings.unsavedColumnOrderConfirm': '列顺序已修改但未保存，确定要关闭吗？',
+    'settings.exportCourseData': '导出课程数据',
+    'settings.importCourseData': '导入课程数据',
+    'settings.exportCourseDataTitle': '导出为 JSON：含 courses（applicableGrades、weeklyPeriodsByGrade）、semesterData、keyConcepts、categoryOrder 等（与「课程设置」内导出一致）',
+    'settings.importCourseDataTitle': '选择由本系统导出的 .json 文件；导入将覆盖当前账号下的课程与相关数据',
     // AI
     'ai.generate': '开始生成',
     'ai.generating': '生成中...',
@@ -240,9 +262,9 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'dialog.semester.description': '查看和管理该学期的单元',
     // Placeholders and hints
     'hint.subjectCategory': '例如：数学、语文、英语',
-    'hint.gradeRange': '拖拽选择该课程适用的年级范围，如"1-6"表示适用于G1到G6',
+    'hint.gradeRange': '单击切换单个年级；按住拖拽可一次选中连续年级（与原先拖拽一致）。可非连续开设（如仅 G1、G3、G5），在下方为每个年级填写周课时数。',
     'hint.textbookVersion': '例如：人教版、IGCSE0580、北师大版',
-    'hint.weeklyPeriods': '该课程每周的课时数，用于AI生成单元时自动计算单元总课时',
+    'hint.weeklyPeriods': '按年级分别设置周课时（可为 0.5 的倍数，如 0.5、1.5 表示单双周隔周上课）；AI 生成单元与整体视图中的课时均以此为依据。',
     'hint.courseNameAuto': '课程名称将自动生成为"课程类别-教材版本"',
     'hint.textbookInfoFormat': '格式：课程类别-教材版本-学期。已自动填充，可根据需要修改',
     // Semester selection
@@ -283,13 +305,14 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'view.concept': 'Concept View',
     'view.showPeriods': 'Show periods',
     'view.hidePeriods': 'Hide periods',
+    'view.roadmapNavAria': 'Curriculum view switcher',
     // Course management
     'course.add': 'Add Course',
     'course.edit': 'Edit Course',
     'course.delete': 'Delete Course',
     'course.settings': 'Settings',
     'course.subjectCategory': 'Subject Category',
-    'course.gradeRange': 'Grade Range',
+    'course.gradeRange': 'Grades & weekly periods',
     'course.textbookVersion': 'Textbook Version',
     'course.weeklyPeriods': 'Weekly Periods',
     'course.color': 'Color',
@@ -331,6 +354,16 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'settings.title': 'Settings',
     'settings.description': 'Manage course settings',
     'settings.courseManagement': 'Course Management',
+    'settings.columnOrder': 'Overview column order',
+    'settings.columnOrderHint': 'Use the arrows on the left to set overview column order. Click “Save order” to sync (same as staffing roster headers).',
+    'settings.saveColumnOrder': 'Save order',
+    'settings.columnOrderSaved': 'Order saved.',
+    'settings.columnOrderSaveFailed': 'Failed to save order. Check your connection and try again.',
+    'settings.unsavedColumnOrderConfirm': 'Column order was changed but not saved. Close anyway?',
+    'settings.exportCourseData': 'Export course data',
+    'settings.importCourseData': 'Import course data',
+    'settings.exportCourseDataTitle': 'Exports JSON with courses (applicableGrades, weeklyPeriodsByGrade), semesterData, keyConcepts, categoryOrder (same as in Course settings)',
+    'settings.importCourseDataTitle': 'Choose a .json file exported by this app; import overwrites data for the current account',
     // AI
     'ai.generate': 'Generate',
     'ai.generating': 'Generating...',
@@ -377,9 +410,9 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'dialog.semester.description': 'View and manage units for this semester',
     // Placeholders and hints
     'hint.subjectCategory': 'e.g., Math, Chinese, English',
-    'hint.gradeRange': 'Drag to select grade range, e.g., "1-6" means G1 to G6',
+    'hint.gradeRange': 'Click to toggle a grade. Click and drag across cells to select a contiguous range (same as before). Non-contiguous grades are OK; enter weekly periods for each selected grade below.',
     'hint.textbookVersion': 'e.g., People\'s Education Edition, IGCSE0580',
-    'hint.weeklyPeriods': 'Weekly class hours, used for AI unit generation',
+    'hint.weeklyPeriods': 'Weekly periods per grade in 0.5 increments (e.g. 0.5, 1.5 for alternate-week schedules); used for AI unit generation and the roadmap.',
     'hint.courseNameAuto': 'Course name will be auto-generated as "Subject Category-Textbook Version"',
     'hint.textbookInfoFormat': 'Format: Subject Category-Textbook Version-Semester. Auto-filled, can be modified',
     // Semester selection

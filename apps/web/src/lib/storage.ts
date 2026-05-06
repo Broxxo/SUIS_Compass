@@ -1,19 +1,11 @@
-import { Course, SemesterData } from '../types';
+import { Course, GradeConfig, SemesterData } from '../types';
 import { STORAGE_KEYS } from './constants';
 import { api, USE_CLOUD_STORAGE } from './api';
 import { getCurrentUserId } from './authUtils';
 import { logError, handleSilentError } from './errorHandler';
-
-/**
- * 获取用户特定的存储键
- */
-function getUserStorageKey(baseKey: string, userId: string | null): string {
-  if (!userId) {
-    // 如果没有用户ID，使用默认键（向后兼容）
-    return baseKey;
-  }
-  return `${baseKey}-user-${userId}`;
-}
+import { DEFAULT_GRADE_CONFIG } from './constants';
+import { normalizeGradeConfig } from './gradeConfig';
+import { migrateCoursesData } from './courseUtils';
 
 /**
  * 获取学期数据的存储键（课程河流现为全校共享，使用全局 key，不再按用户隔离）
@@ -302,12 +294,11 @@ export function hasSemesterUnits(
 }
 
 /**
- * 加载课程类别排序（用于课程河流列顺序）
+ * 从本地缓存读取学科列顺序（云端模式下由 hydrateCategoryOrderFromCloud / saveCategoryOrder 维护与 DB 一致）
  */
 export function loadCategoryOrder(): string[] {
   try {
-    const userId = getCurrentUserId();
-    const key = getUserStorageKey(STORAGE_KEYS.CATEGORY_ORDER, userId);
+    const key = STORAGE_KEYS.CATEGORY_ORDER;
     const stored = localStorage.getItem(key);
     if (stored) {
       const parsed = JSON.parse(stored);
@@ -319,17 +310,92 @@ export function loadCategoryOrder(): string[] {
   return [];
 }
 
-/**
- * 保存课程类别排序
- */
-export function saveCategoryOrder(order: string[]): void {
+function saveCategoryOrderLocal(order: string[]): void {
   try {
-    const userId = getCurrentUserId();
-    const key = getUserStorageKey(STORAGE_KEYS.CATEGORY_ORDER, userId);
-    localStorage.setItem(key, JSON.stringify(order));
+    localStorage.setItem(STORAGE_KEYS.CATEGORY_ORDER, JSON.stringify(order));
   } catch (error) {
-    logError('Failed to save category order', error);
+    logError('Failed to save category order to localStorage', error);
   }
+}
+
+/**
+ * 从云端拉取学科列顺序并写入本地缓存；未启用云端或未登录时返回本地已有顺序。
+ */
+export async function hydrateCategoryOrderFromCloud(): Promise<string[]> {
+  if (!USE_CLOUD_STORAGE || !getCurrentUserId()) {
+    return loadCategoryOrder();
+  }
+  try {
+    const order = await api.getCategoryOrder();
+    const arr = Array.isArray(order) ? order : [];
+    saveCategoryOrderLocal(arr);
+    return arr;
+  } catch (error) {
+    logError('Failed to hydrate category order from cloud', error);
+    return loadCategoryOrder();
+  }
+}
+
+/**
+ * 保存学科列顺序：始终写本地；云端模式下同步到数据库（仅 admin / system-admin 可调顺序，由 API 校验）
+ */
+export async function saveCategoryOrder(order: string[]): Promise<void> {
+  saveCategoryOrderLocal(order);
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    try {
+      await api.putCategoryOrder(order);
+    } catch (error) {
+      logError('Failed to save category order to cloud', error);
+      throw error;
+    }
+  }
+}
+
+/**
+ * 学校年级配置（全校共享）
+ */
+export function loadGradeConfigSync(): GradeConfig {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.GRADE_CONFIG);
+    if (!stored) return DEFAULT_GRADE_CONFIG;
+    return normalizeGradeConfig(JSON.parse(stored));
+  } catch (error) {
+    logError('Failed to load grade config', error);
+    return DEFAULT_GRADE_CONFIG;
+  }
+}
+
+export async function loadGradeConfig(): Promise<GradeConfig> {
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    try {
+      const fromCloud = normalizeGradeConfig(await api.getGradeConfig());
+      localStorage.setItem(STORAGE_KEYS.GRADE_CONFIG, JSON.stringify(fromCloud));
+      return fromCloud;
+    } catch (error) {
+      logError('Failed to load grade config from cloud, falling back to local', error);
+    }
+  }
+  return loadGradeConfigSync();
+}
+
+export async function saveGradeConfig(config: GradeConfig): Promise<GradeConfig> {
+  const normalized = normalizeGradeConfig(config);
+  try {
+    localStorage.setItem(STORAGE_KEYS.GRADE_CONFIG, JSON.stringify(normalized));
+  } catch (error) {
+    logError('Failed to save grade config to localStorage', error);
+    throw error;
+  }
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    try {
+      const saved = normalizeGradeConfig(await api.putGradeConfig(normalized));
+      localStorage.setItem(STORAGE_KEYS.GRADE_CONFIG, JSON.stringify(saved));
+      return saved;
+    } catch (error) {
+      logError('Failed to save grade config to cloud', error);
+    }
+  }
+  return normalized;
 }
 
 /**
@@ -363,7 +429,7 @@ export async function deleteCourse(courseId: string): Promise<void> {
  * 删除课程的所有学期数据
  */
 export async function deleteCourseSemesterData(courseId: string): Promise<void> {
-  const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const GRADES = loadGradeConfigSync().items.map((item) => item.level);
   const SEMESTERS: ('Semester 1' | 'Semester 2')[] = ['Semester 1', 'Semester 2'];
   
   for (const grade of GRADES) {
@@ -399,11 +465,9 @@ export async function loadKeyConcepts(): Promise<string[]> {
         console.log('[Cloud Storage] Loading key concepts from cloud...');
       }
       const keyConcepts = await api.getKeyConcepts();
-      // 同时保存到本地作为缓存
+      // 与 API 一致：全校共享列表，本地用全局键缓存
       handleSilentError(() => {
-        const userId = getCurrentUserId();
-        const key = getUserStorageKey(STORAGE_KEYS.KEY_CONCEPTS, userId);
-        localStorage.setItem(key, JSON.stringify(keyConcepts));
+        localStorage.setItem(STORAGE_KEYS.KEY_CONCEPTS, JSON.stringify(keyConcepts));
       }, undefined);
       return keyConcepts;
     } catch (error) {
@@ -412,11 +476,9 @@ export async function loadKeyConcepts(): Promise<string[]> {
     }
   }
 
-  // 从本地加载
+  // 从本地加载（全局键，与云端全校列表一致）
   try {
-    const userId = getCurrentUserId();
-    const key = getUserStorageKey(STORAGE_KEYS.KEY_CONCEPTS, userId);
-    const stored = localStorage.getItem(key);
+    const stored = localStorage.getItem(STORAGE_KEYS.KEY_CONCEPTS);
     if (stored) {
       const parsed = JSON.parse(stored);
       return Array.isArray(parsed) ? parsed : [];
@@ -432,9 +494,7 @@ export async function loadKeyConcepts(): Promise<string[]> {
  */
 export function loadKeyConceptsSync(): string[] {
   try {
-    const userId = getCurrentUserId();
-    const key = getUserStorageKey(STORAGE_KEYS.KEY_CONCEPTS, userId);
-    const stored = localStorage.getItem(key);
+    const stored = localStorage.getItem(STORAGE_KEYS.KEY_CONCEPTS);
     if (stored) {
       const parsed = JSON.parse(stored);
       return Array.isArray(parsed) ? parsed : [];
@@ -449,11 +509,9 @@ export function loadKeyConceptsSync(): string[] {
  * 保存关键概念列表到 localStorage 或云端
  */
 export async function saveKeyConcepts(concepts: string[]): Promise<void> {
-  // 总是先保存到本地（作为缓存）
+  // 总是先保存到本地（作为缓存，全局键）
   try {
-    const userId = getCurrentUserId();
-    const key = getUserStorageKey(STORAGE_KEYS.KEY_CONCEPTS, userId);
-    localStorage.setItem(key, JSON.stringify(concepts));
+    localStorage.setItem(STORAGE_KEYS.KEY_CONCEPTS, JSON.stringify(concepts));
   } catch (error) {
     logError('Failed to save key concepts to localStorage', error);
     throw error;
@@ -483,20 +541,22 @@ export function exportAllDataSync(): {
   semesterData: Record<string, SemesterData>;
   keyConcepts: string[];
   categoryOrder: string[];
+  gradeConfig: GradeConfig;
   exportDate: string;
   version: string;
 } {
   const courses = loadCoursesSync();
   const keyConcepts = loadKeyConceptsSync();
   const categoryOrder = loadCategoryOrder();
+  const gradeConfig = loadGradeConfigSync();
   
   // 收集所有学期数据
   const semesterData: Record<string, SemesterData> = {};
-  const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const gradeLevels = gradeConfig.items.map((item) => item.level);
   const SEMESTERS: ('Semester 1' | 'Semester 2')[] = ['Semester 1', 'Semester 2'];
   
   courses.forEach(course => {
-    GRADES.forEach(grade => {
+    gradeLevels.forEach(grade => {
       SEMESTERS.forEach(semester => {
         const data = loadSemesterDataSync(course.id, grade, semester);
         if (data) {
@@ -512,6 +572,7 @@ export function exportAllDataSync(): {
     semesterData,
     keyConcepts,
     categoryOrder,
+    gradeConfig,
     exportDate: new Date().toISOString(),
     version: '1.0'
   };
@@ -560,6 +621,7 @@ export async function importAllData(data: {
   semesterData?: Record<string, SemesterData>;
   keyConcepts?: string[];
   categoryOrder?: string[];
+  gradeConfig?: GradeConfig;
 }): Promise<{ success: boolean; error?: string }> {
   try {
     // 兼容旧/不同导出结构：有些版本会把真实数据包在 { data: ... } 里
@@ -568,6 +630,7 @@ export async function importAllData(data: {
       semesterData?: Record<string, SemesterData>;
       keyConcepts?: string[];
       categoryOrder?: string[];
+      gradeConfig?: GradeConfig;
     } =
       data && typeof data === 'object' && 'data' in (data as any) && (data as any).data && typeof (data as any).data === 'object'
         ? (data as any).data
@@ -579,11 +642,12 @@ export async function importAllData(data: {
     let courseIdReplacementMap = new Map<string, string>();
     if (normalized.courses && Array.isArray(normalized.courses)) {
       didImportAnything = true;
-      const saveResult = await saveCourses(normalized.courses);
+      const migratedCourses = migrateCoursesData(normalized.courses);
+      const saveResult = await saveCourses(migratedCourses);
       saveResult.idReplacements.forEach(({ oldId, newId }) => courseIdReplacementMap.set(oldId, newId));
 
       const verifyLocal = loadCoursesSync();
-      if (normalized.courses.length > 0 && verifyLocal.length === 0) {
+      if (migratedCourses.length > 0 && verifyLocal.length === 0) {
         const expectedKey = STORAGE_KEYS.COURSES;
         return {
           success: false,
@@ -591,11 +655,11 @@ export async function importAllData(data: {
         };
       }
       // 校验云端：只有数据库里已有导入的课程，才返回成功，刷新后 loadCourses 从数据库读取才能看到
-      if (USE_CLOUD_STORAGE && getCurrentUserId() && normalized.courses.length > 0) {
+      if (USE_CLOUD_STORAGE && getCurrentUserId() && migratedCourses.length > 0) {
         try {
           const cloudCourses = await api.getCourses();
           const cloudIds = new Set(cloudCourses.map((c) => c.id));
-          const missing = normalized.courses.filter((c) => !cloudIds.has(c.id));
+          const missing = migratedCourses.filter((c) => !cloudIds.has(c.id));
           if (missing.length > 0) {
             return {
               success: false,
@@ -649,14 +713,19 @@ export async function importAllData(data: {
       }
     }
     
-    // 导入类别排序（同步操作，但保持一致性）
+    // 导入类别排序（云端会写库）
     if (normalized.categoryOrder && Array.isArray(normalized.categoryOrder)) {
       didImportAnything = true;
-      saveCategoryOrder(normalized.categoryOrder);
+      await saveCategoryOrder(normalized.categoryOrder);
       const verification = verifyImportPersistence(normalized.categoryOrder, loadCategoryOrder(), 'category order');
       if (!verification.success) {
         return verification;
       }
+    }
+
+    if (normalized.gradeConfig) {
+      didImportAnything = true;
+      await saveGradeConfig(normalized.gradeConfig);
     }
 
     // 如果导入到其他账号时 categoryOrder 为空/缺失，自动根据课程生成（避免主界面“看起来空白”）
@@ -666,7 +735,7 @@ export async function importAllData(data: {
     if (currentCourses.length > 0 && currentOrder.length === 0) {
       const generatedOrder = generateCategoryOrderFromCourses(currentCourses);
       if (generatedOrder.length > 0) {
-        saveCategoryOrder(generatedOrder);
+        await saveCategoryOrder(generatedOrder);
       }
     }
 
@@ -675,7 +744,7 @@ export async function importAllData(data: {
       return {
         success: false,
         error:
-          'Invalid import file: no recognizable fields (expected courses / semesterData / keyConcepts / categoryOrder).',
+          'Invalid import file: no recognizable fields (expected courses / semesterData / keyConcepts / categoryOrder / gradeConfig).',
       };
     }
     

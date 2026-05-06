@@ -1,27 +1,42 @@
-export type CourseColor =
-  | 'light-blue'
-  | 'light-green'
-  | 'light-yellow'
-  | 'light-red'
-  | 'light-purple'
-  | 'light-orange'
-  | 'light-cyan'
-  | 'light-pink'
-  | 'light-indigo';
+import type { CourseColor } from './courseColors.js';
+export type { CourseColor } from './courseColors.js';
 
 export type SubjectCategory = {
   zh: string;
   en: string;
 };
 
+/** 学校年级配置项：id 稳定，label 可变，level 用于排序和学期数据映射 */
+export type GradeConfigItem = {
+  id: string; // 例如 g1
+  label: string; // 例如 G1 / G9国际
+  level: number; // 例如 1..12
+};
+
+/** 学段：整体视图可按学段 Tab 筛选；课程仍用全局 items 的 id / level */
+export type GradeConfigSegment = {
+  id: string;
+  label: string;
+  /** 该学段包含的年级 id，顺序即显示顺序 */
+  gradeIds: string[];
+};
+
+export type GradeConfig = {
+  items: GradeConfigItem[];
+  /** 有内容时整体视图显示「各学段 + 全学段」筛选 */
+  segments?: GradeConfigSegment[];
+};
+
 export type Course = {
   id: string;
   name: string;
   subjectCategory: SubjectCategory | string;
-  gradeRange?: string;
+  /** 开设年级（可非连续），按年级配置 id 关联 */
+  applicableGrades: string[];
+  /** 各年级周课时，键为年级 id（如 g1） */
+  weeklyPeriodsByGrade: Record<string, number>;
   textbookVersion?: string;
   color: CourseColor;
-  weeklyPeriods?: number;
 };
 
 export type Semester = {
@@ -29,7 +44,8 @@ export type Semester = {
   semester: 'Semester 1' | 'Semester 2';
 };
 
-export type Grade = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+/** 为兼容班级/学期等模块，Grade 保持 number */
+export type Grade = number;
 
 export type Unit = {
   id: string;
@@ -46,7 +62,6 @@ export type SemesterData = {
   grade: number;
   semester: 'Semester 1' | 'Semester 2';
   units: Unit[];
-  weeklyPeriods?: number;
 };
 
 /** 用户信息（API 返回不含 password）. 角色：系统管理员 > 管理员 > 教师；学生账号仅用于学生本人登录 */

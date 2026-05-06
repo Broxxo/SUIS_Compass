@@ -100,7 +100,7 @@ export function SchemeManagerDialog({
             </span>
             <Button
               size="sm"
-              className="rounded-xl bg-slate-800 hover:bg-slate-700"
+              className="rounded-xl"
               onClick={() => onCreateGroup(selectedSchemeId)}
             >
               <Plus className="h-4 w-4 mr-1" />

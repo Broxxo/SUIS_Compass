@@ -7,11 +7,13 @@ import { Loader2, Sparkles, CheckCircle2, AlertCircle, Edit2, Trash2, Upload, X 
 import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/aiModels';
 import { getSubjectCategoryText } from '../lib/utils';
 import { useLanguage } from '../contexts/LanguageContext';
-import { GRADE_LABELS, SEMESTER_LABELS } from '../lib/constants';
+import { SEMESTER_LABELS } from '../lib/constants';
 import { getKeyConcepts } from '../lib/utils';
-import { loadSemesterDataSync } from '../lib/storage';
+import { getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
 import { extractTextFromPDF } from '../lib/pdfParser';
 import { getApiUrl, getAuthHeaders } from '../lib/api';
+import { getGradeLabelByLevel } from '../lib/gradeConfig';
+import { loadGradeConfigSync } from '../lib/storage';
 
 /** 预计生成总时长（秒），用于进度估算 */
 const ESTIMATED_DURATION_SEC = 75;
@@ -43,6 +45,7 @@ export default function AIGenerateUnitsDialog({
   onConfirm,
 }: AIGenerateUnitsDialogProps) {
   const { language } = useLanguage();
+  const gradeConfig = loadGradeConfigSync();
   const [textbookInfo, setTextbookInfo] = useState('');
   const [extraPrompt, setExtraPrompt] = useState('');
   const [totalWeeks, setTotalWeeks] = useState(20);
@@ -62,29 +65,26 @@ export default function AIGenerateUnitsDialog({
   const [uploadedFileContent, setUploadedFileContent] = useState<string>('');
   const [isReadingFile, setIsReadingFile] = useState(false);
   
-  // 获取该学期的周课时数：优先使用 SemesterData.weeklyPeriods，否则使用 course.weeklyPeriods
-  const [weeklyPeriods, setWeeklyPeriods] = useState<number>(course.weeklyPeriods || 2);
-  
-  // 当对话框打开时，自动填充教材信息，并加载学期级别的周课时数
+  const [weeklyPeriods, setWeeklyPeriods] = useState<number>(() =>
+    getWeeklyPeriodsForGrade(course, semester.grade, gradeConfig),
+  );
+
   useEffect(() => {
     if (open && course && semester) {
       const category = getSubjectCategoryText(course.subjectCategory, language) || course.name;
       const version = course.textbookVersion || '人教版';
-      const gradeLabel = GRADE_LABELS[semester.grade];
+      const gradeLabel = getGradeLabelByLevel(gradeConfig, semester.grade);
       const semesterLabel = SEMESTER_LABELS[semester.semester];
       const defaultTextbookInfo = `${category}-${version}-${gradeLabel}${semesterLabel}`;
       setTextbookInfo(defaultTextbookInfo);
-      
-      // 加载学期级别的周课时数
-      const semesterData = loadSemesterDataSync(course.id, semester.grade, semester.semester);
-      setWeeklyPeriods(semesterData?.weeklyPeriods ?? course.weeklyPeriods ?? 2);
-      
-      // 重置上传状态与补充提示
+
+      setWeeklyPeriods(getWeeklyPeriodsForGrade(course, semester.grade, gradeConfig));
+
       setUploadedFile(null);
       setUploadedFileContent('');
       setExtraPrompt('');
     }
-  }, [open, course, semester, language]);
+  }, [open, course, semester, language, gradeConfig]);
   
   // 根据周次计算课时数的辅助函数
   const calculatePeriodsFromWeek = (week: string): number => {

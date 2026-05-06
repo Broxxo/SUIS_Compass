@@ -7,32 +7,35 @@ import BulkImportDialog from './BulkImportDialog';
 import AIGenerateUnitsDialog from './AIGenerateUnitsDialog';
 import { Sparkles, Trash2 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { GRADE_LABELS, SEMESTER_LABELS } from '../lib/constants';
-import { loadSemesterData, saveSemesterData } from '../lib/storage';
+import { SEMESTER_LABELS } from '../lib/constants';
+import { loadGradeConfigSync, loadSemesterData, saveSemesterData } from '../lib/storage';
+import { getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
+import { getGradeLabelByLevel } from '../lib/gradeConfig';
 
 interface SemesterOverviewDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   course: Course;
   semester: Semester;
+  /** 课程河流只读 / 无单元编辑权限时为 true */
+  readOnly?: boolean;
 }
 
-export default function SemesterOverviewDialog({ 
-  open, 
-  onOpenChange, 
+export default function SemesterOverviewDialog({
+  open,
+  onOpenChange,
   course,
-  semester 
+  semester,
+  readOnly = false,
 }: SemesterOverviewDialogProps) {
   const { t, language } = useLanguage();
+  const gradeConfig = loadGradeConfigSync();
   const [semesterData, setSemesterData] = useState<SemesterData | null>(null);
   const [isAddUnitDialogOpen, setIsAddUnitDialogOpen] = useState(false);
   const [isBulkImportDialogOpen, setIsBulkImportDialogOpen] = useState(false);
   const [isAIGenerateDialogOpen, setIsAIGenerateDialogOpen] = useState(false);
   const [editingUnit, setEditingUnit] = useState<Unit | null>(null);
   const [draggedUnitId, setDraggedUnitId] = useState<string | null>(null);
-  const [isEditingWeeklyPeriods, setIsEditingWeeklyPeriods] = useState(false);
-  const [tempWeeklyPeriods, setTempWeeklyPeriods] = useState<number>(2);
-
   // Load semester data from localStorage or cloud
   useEffect(() => {
     if (open && course && semester) {
@@ -42,24 +45,20 @@ export default function SemesterOverviewDialog({
           if (loaded) {
             setSemesterData(loaded);
           } else {
-            // Initialize new semester data with weeklyPeriods from course
             setSemesterData({
               courseId: course.id,
               grade: semester.grade,
               semester: semester.semester,
               units: [],
-              weeklyPeriods: course.weeklyPeriods || 2,
             });
           }
         } catch (error) {
           console.error('Failed to load semester data:', error);
-          // Fallback to empty data
           setSemesterData({
             courseId: course.id,
             grade: semester.grade,
             semester: semester.semester,
             units: [],
-            weeklyPeriods: course.weeklyPeriods || 2,
           });
         }
       };
@@ -69,6 +68,7 @@ export default function SemesterOverviewDialog({
 
   // Save semester data to localStorage or cloud
   useEffect(() => {
+    if (readOnly) return;
     if (semesterData && course && semester) {
       const saveData = async () => {
         try {
@@ -79,7 +79,7 @@ export default function SemesterOverviewDialog({
       };
       saveData();
     }
-  }, [semesterData, course, semester]);
+  }, [semesterData, course, semester, readOnly]);
 
   const handleAddUnit = (unitData: Omit<Unit, 'id' | 'order'>) => {
     if (!semesterData) return;
@@ -149,9 +149,10 @@ export default function SemesterOverviewDialog({
     if (!semesterData) return;
 
     const semesterKey = (semester?.semester || 'Semester 1') as 'Semester 1' | 'Semester 2';
+    const gradeLabel = getGradeLabelByLevel(gradeConfig, semester?.grade || 1);
     const confirmMsg = language === 'zh'
-      ? `确定要清除"${course?.name}" ${GRADE_LABELS[semester?.grade || 1]} ${SEMESTER_LABELS[semesterKey]}的所有单元吗？此操作不可恢复。`
-      : `Are you sure you want to clear all units for "${course?.name}" ${GRADE_LABELS[semester?.grade || 1]} ${SEMESTER_LABELS[semesterKey]}? This action cannot be undone.`;
+      ? `确定要清除"${course?.name}" ${gradeLabel} ${SEMESTER_LABELS[semesterKey]}的所有单元吗？此操作不可恢复。`
+      : `Are you sure you want to clear all units for "${course?.name}" ${gradeLabel} ${SEMESTER_LABELS[semesterKey]}? This action cannot be undone.`;
     
     if (window.confirm(confirmMsg)) {
       setSemesterData({
@@ -245,19 +246,7 @@ export default function SemesterOverviewDialog({
 
   const sortedUnits = semesterData?.units.sort((a, b) => a.order - b.order) || [];
   
-  // Get weekly periods: use semesterData.weeklyPeriods if set, otherwise fallback to course.weeklyPeriods
-  const currentWeeklyPeriods = semesterData?.weeklyPeriods ?? course.weeklyPeriods ?? 2;
-  
-  // Total periods calculation removed (not used)
-  
-  const handleUpdateWeeklyPeriods = () => {
-    if (!semesterData) return;
-    setSemesterData({
-      ...semesterData,
-      weeklyPeriods: tempWeeklyPeriods,
-    });
-    setIsEditingWeeklyPeriods(false);
-  };
+  const currentWeeklyPeriods = getWeeklyPeriodsForGrade(course, semester.grade, gradeConfig);
 
   return (
     <>
@@ -269,56 +258,19 @@ export default function SemesterOverviewDialog({
                 {course.name}
               </DialogTitle>
               <div className="text-sm text-gray-600 whitespace-nowrap">
-                {GRADE_LABELS[semester.grade]} {SEMESTER_LABELS[semester.semester as 'Semester 1' | 'Semester 2']} - {t('semester.overview')} | G{semester.grade} {semester.semester} {t('semester.overview')}
+                {getGradeLabelByLevel(gradeConfig, semester.grade)} {SEMESTER_LABELS[semester.semester as 'Semester 1' | 'Semester 2']} - {t('semester.overview')} | G{semester.grade} {semester.semester} {t('semester.overview')}
               </div>
             </div>
             <DialogDescription id="semester-overview-desc" className="text-sm text-muted-foreground">
-              {language === 'zh' ? '查看、添加与编辑本学期单元' : 'View, add and edit units for this semester'}
+              {readOnly
+                ? (language === 'zh' ? '仅查看本学期单元（编辑请使用后台「课程管理」）' : 'View only. Edit units in Admin → Course management.')
+                : (language === 'zh' ? '查看、添加与编辑本学期单元' : 'View, add and edit units for this semester')}
             </DialogDescription>
-            {/* Weekly Periods Display and Edit */}
             <div className="flex items-center gap-2 text-sm text-gray-600">
-              <span>{language === 'zh' ? '周课时数' : 'Weekly Periods'}:</span>
-              {isEditingWeeklyPeriods ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="1"
-                    max="10"
-                    value={tempWeeklyPeriods}
-                    onChange={(e) => setTempWeeklyPeriods(Math.max(1, Math.min(10, parseInt(e.target.value) || 2)))}
-                    className="w-16 px-2 py-1 border border-gray-300 rounded text-sm"
-                    autoFocus
-                  />
-                  <button
-                    onClick={handleUpdateWeeklyPeriods}
-                    className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
-                  >
-                    {t('common.save')}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsEditingWeeklyPeriods(false);
-                      setTempWeeklyPeriods(currentWeeklyPeriods);
-                    }}
-                    className="px-2 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
-                  >
-                    {t('common.cancel')}
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{currentWeeklyPeriods} {language === 'zh' ? '节/周' : 'periods/week'}</span>
-                  <button
-                    onClick={() => {
-                      setTempWeeklyPeriods(currentWeeklyPeriods);
-                      setIsEditingWeeklyPeriods(true);
-                    }}
-                    className="text-xs text-blue-600 hover:text-blue-700 underline"
-                  >
-                    {t('common.edit')}
-                  </button>
-                </div>
-              )}
+              <span>{language === 'zh' ? '该年级周课时（课程设置）' : 'Weekly periods for this grade (from course)'}:</span>
+              <span className="font-medium">
+                {currentWeeklyPeriods} {language === 'zh' ? '节/周' : 'periods/week'}
+              </span>
             </div>
           </DialogHeader>
 
@@ -332,20 +284,21 @@ export default function SemesterOverviewDialog({
               sortedUnits.map((unit, index) => (
                 <div
                   key={unit.id}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, unit.id)}
-                  onDragOver={handleDragOver}
-                  onDrop={(e) => handleDrop(e, unit.id)}
-                  onDragEnd={handleDragEnd}
+                  draggable={!readOnly}
+                  onDragStart={readOnly ? undefined : (e) => handleDragStart(e, unit.id)}
+                  onDragOver={readOnly ? undefined : handleDragOver}
+                  onDrop={readOnly ? undefined : (e) => handleDrop(e, unit.id)}
+                  onDragEnd={readOnly ? undefined : handleDragEnd}
                   onClick={(e) => {
+                    if (readOnly) return;
                     // 如果点击的不是箭头按钮，则打开编辑界面
                     if (!(e.target as HTMLElement).closest('button')) {
                       handleUnitClick(unit);
                     }
                   }}
-                  className={`flex items-stretch gap-0 border-2 rounded-lg shadow-md transition-all cursor-pointer overflow-hidden ${
-                    draggedUnitId === unit.id ? 'opacity-50' : 'hover:shadow-lg'
-                  }`}
+                  className={`flex items-stretch gap-0 border-2 rounded-lg shadow-md transition-all overflow-hidden ${
+                    readOnly ? 'cursor-default' : 'cursor-pointer'
+                  } ${draggedUnitId === unit.id ? 'opacity-50' : !readOnly ? 'hover:shadow-lg' : ''}`}
                   style={{
                     boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06), inset 0 1px 0 0 rgba(255, 255, 255, 0.3)',
                   }}
@@ -356,7 +309,7 @@ export default function SemesterOverviewDialog({
                     onClick={(e) => e.stopPropagation()}
                   >
                     {/* Up arrow */}
-                    {index > 0 && (
+                    {!readOnly && index > 0 && (
                       <button
                         type="button"
                         onClick={() => handleMoveUnit(unit.id, 'up')}
@@ -376,7 +329,7 @@ export default function SemesterOverviewDialog({
                     </div>
 
                     {/* Down arrow */}
-                    {index < sortedUnits.length - 1 && (
+                    {!readOnly && index < sortedUnits.length - 1 && (
                       <button
                         type="button"
                         onClick={() => handleMoveUnit(unit.id, 'down')}
@@ -457,38 +410,39 @@ export default function SemesterOverviewDialog({
         </div>
 
           {/* Footer */}
-          <div className="mt-4 pt-4 border-t flex justify-between items-center gap-2">
-            {/* 左侧：清除单元按钮 */}
-            <Button 
-              variant="outline" 
-              onClick={handleClearAllUnits}
-              disabled={!semesterData || semesterData.units.length === 0}
-              className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-300"
-            >
-              <Trash2 className="w-4 h-4 mr-2" />
-              {t('semester.clearAll')}
+          <div className={`mt-4 pt-4 border-t flex items-center gap-2 ${readOnly ? 'justify-end' : 'justify-between'}`}>
+            {!readOnly && (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={handleClearAllUnits}
+                  disabled={!semesterData || semesterData.units.length === 0}
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-300"
+                >
+                  <Trash2 className="w-4 h-4 mr-2" />
+                  {t('semester.clearAll')}
+                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => setIsAIGenerateDialogOpen(true)}
+                    className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-300"
+                  >
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    {t('common.aiImport')}
+                  </Button>
+                  <Button variant="outline" onClick={() => setIsBulkImportDialogOpen(true)}>
+                    {t('common.excelImport')}
+                  </Button>
+                  <Button onClick={() => setIsAddUnitDialogOpen(true)}>
+                    {t('semester.addUnit')}
+                  </Button>
+                </div>
+              </>
+            )}
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              {t('semester.close')}
             </Button>
-
-            {/* 右侧：其他操作按钮 */}
-            <div className="flex gap-2">
-              <Button 
-                variant="outline" 
-                onClick={() => setIsAIGenerateDialogOpen(true)}
-                className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-300"
-              >
-                <Sparkles className="w-4 h-4 mr-2" />
-                {t('common.aiImport')}
-              </Button>
-              <Button variant="outline" onClick={() => setIsBulkImportDialogOpen(true)}>
-                {t('common.excelImport')}
-              </Button>
-              <Button onClick={() => setIsAddUnitDialogOpen(true)}>
-                {t('semester.addUnit')}
-              </Button>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {t('semester.close')}
-          </Button>
-            </div>
           </div>
       </DialogContent>
     </Dialog>

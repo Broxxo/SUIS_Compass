@@ -1,7 +1,7 @@
 /**
  * 统一 SUIS AI 面板：从主界面（SUIS AI 格）或子应用顶栏打开，Gemini 风格布局。
- * 左侧可收缩对话历史 + 模型选择，主区空状态居中问候 + 输入框，有对话时输入框在底部。
- * 输入栏左侧：上传、模式、上下文选择（第三项）。
+ * 全屏主入口为左侧常驻对话列表；手机课程河流为抽屉；桌面半屏课程河流无侧栏，顶栏历史图标打开居中会话列表。
+ * 主区：模型选择、问候/消息、底部输入；输入栏左侧为上传、模式、上下文等。
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
@@ -27,6 +27,7 @@ import {
   FilePen,
   X,
   Menu,
+  History,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Button } from './ui/button';
@@ -127,13 +128,22 @@ interface AIPanelProps {
   /** 是否从主 Hub 直接进入；子应用半窗模式会传 false，用右上角 X 关闭 */
   fromHub: boolean;
   onClose: () => void;
+  /** 语言切换仅在主 HUB（CompassHub）展示；从 HUB 进入的 AI 顶栏不传或传 false */
+  showLanguageToggle?: boolean;
 }
 
-export default function AIPanel({ fullScreen: _fullScreen, fromHub: _fromHub, onClose }: AIPanelProps) {
+export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageToggle = false }: AIPanelProps) {
+  /** 课程河流半屏侧栏：不用全屏 fixed 顶栏，避免与左侧顶栏叠在一起且无明确关闭入口 */
+  const dockedInSplitView = !fullScreen && !fromHub;
+  /** 主 HUB 进入的全屏 SUIS AI：左侧对话列表常驻，不用抽屉遮罩 */
+  const persistLeftSidebar = fullScreen && fromHub;
+  /** 课程河流桌面半屏 AI：无左侧抽屉，用顶栏历史图标打开居中会话列表 */
+  const drawerSidebarMode = !persistLeftSidebar && !dockedInSplitView;
   const { user } = useAuth();
   const { t, language, setLanguage } = useLanguage();
   const { screenId, setScreenId, contextPayload, setContextPayload } = useAIContext();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => !persistLeftSidebar);
+  const [historyPopoverOpen, setHistoryPopoverOpen] = useState(false);
   const [enableWeb, setEnableWeb] = useState(false);
   const [chatList, setChatList] = useState<ChatEntry[]>(() => {
     try {
@@ -203,17 +213,30 @@ export default function AIPanel({ fullScreen: _fullScreen, fromHub: _fromHub, on
     return () => document.removeEventListener('click', close);
   }, []);
 
+  useEffect(() => {
+    if (!dockedInSplitView || !historyPopoverOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setHistoryPopoverOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dockedInSplitView, historyPopoverOpen]);
+
   const handleNewChat = () => {
     setCurrentChatId(null);
     setMessages([]);
     setContextMenuOpen(false);
-    setSidebarCollapsed(true);
+    if (persistLeftSidebar) return;
+    if (dockedInSplitView) setHistoryPopoverOpen(false);
+    else setSidebarCollapsed(true);
   };
 
   const handleSelectChat = (id: string) => {
     setCurrentChatId(id);
     loadMessagesFor(id);
-    setSidebarCollapsed(true);
+    if (persistLeftSidebar) return;
+    if (dockedInSplitView) setHistoryPopoverOpen(false);
+    else setSidebarCollapsed(true);
   };
 
   const handleDeleteChatConfirm = (chatId: string) => {
@@ -233,6 +256,7 @@ export default function AIPanel({ fullScreen: _fullScreen, fromHub: _fromHub, on
 
   const handleDeleteChatClick = (e: React.MouseEvent, chatId: string) => {
     e.stopPropagation();
+    if (dockedInSplitView) setHistoryPopoverOpen(false);
     setDeleteConfirmChatId(chatId);
   };
 
@@ -369,108 +393,154 @@ export default function AIPanel({ fullScreen: _fullScreen, fromHub: _fromHub, on
           : t('ai.panel.contextAssistant');
   const hasContext = screenId !== null && screenId !== 'hub';
 
+  const chatListItems = chatList.map((c) => (
+    <div
+      key={c.id}
+      className={`flex items-center gap-1 group rounded-lg ${
+        currentChatId === c.id ? 'bg-blue-100 text-blue-800' : 'hover:bg-slate-200/80 text-slate-700'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => handleSelectChat(c.id)}
+        className="flex-1 min-w-0 text-left px-3 py-2 rounded-lg text-sm truncate"
+      >
+        {c.title || c.id}
+      </button>
+      <button
+        type="button"
+        onClick={(e) => handleDeleteChatClick(e, c.id)}
+        className="p-1.5 rounded-md hover:bg-slate-300/80 text-slate-500 hover:text-slate-700 flex-shrink-0"
+        aria-label={isZh ? '删除对话' : 'Delete chat'}
+        title={isZh ? '删除对话' : 'Delete chat'}
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  ));
+
+  const langToggle = (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => setLanguage(isZh ? 'en' : 'zh')}
+      className="h-9 rounded-lg px-3 min-w-[2.5rem]"
+      title={isZh ? 'Switch to English' : '切换到中文'}
+    >
+      {isZh ? 'EN' : '中'}
+    </Button>
+  );
+
   const content = (
     <div className="flex flex-col h-full bg-white">
-      {/* 统一使用 AppTopBar，与其他入口一致 */}
-      <AppTopBar
-        title="SUIS AI"
-        showBack
-        onBack={onClose}
-        rightChildren={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-            className="h-9 rounded-lg px-3 min-w-[2.5rem]"
-            title={isZh ? 'Switch to English' : '切换到中文'}
-          >
-            {isZh ? 'EN' : '中'}
-          </Button>
-        }
-      />
-
-      <div className="flex flex-1 min-h-0 relative pt-14">
-        {/* 抽屉打开时的遮罩，点击关闭；过渡与抽屉一致，主界面不参与布局 */}
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => setSidebarCollapsed(true)}
-          onKeyDown={(e) => e.key === 'Enter' && setSidebarCollapsed(true)}
-          className={`fixed inset-0 top-14 z-20 bg-black/20 transition-opacity duration-200 ${
-            sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100'
-          }`}
-          aria-label="关闭侧边栏"
-          aria-hidden={sidebarCollapsed}
+      {dockedInSplitView ? (
+        <header className="shrink-0 z-40 flex h-14 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4">
+          <span className="text-base font-semibold text-slate-900 truncate">SUIS AI</span>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {showLanguageToggle && langToggle}
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={onClose}
+              className="h-9 w-9 rounded-lg"
+              title={isZh ? '关闭' : 'Close'}
+              aria-label={isZh ? '关闭 AI 侧边栏' : 'Close AI panel'}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        </header>
+      ) : (
+        <AppTopBar
+          title="SUIS AI"
+          showBack
+          onBack={onClose}
+          rightChildren={showLanguageToggle ? langToggle : undefined}
         />
-        {/* 左侧抽屉：始终 fixed + transform 滑入滑出，主界面保持不动 */}
-        <aside
-          className={`fixed left-0 top-14 bottom-0 z-30 w-[72%] max-w-[280px] sm:max-w-[320px] shadow-xl border-r border-slate-200 bg-white flex flex-col transition-transform duration-200 ease-out ${
-            sidebarCollapsed ? '-translate-x-full pointer-events-none' : 'translate-x-0'
-          }`}
-          aria-hidden={sidebarCollapsed}
-        >
-          {/* 顶行：新聊天（左）+ 关闭（右），无分隔线 */}
-          <div className="flex items-center justify-between gap-2 px-2 py-2 flex-shrink-0">
-            <button
-              type="button"
-              onClick={handleNewChat}
-              className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-200/80 text-sm font-medium text-slate-700"
-            >
-              <FilePen className="h-4 w-4 flex-shrink-0" />
-              {t('ai.panel.newChat')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setSidebarCollapsed(true)}
-              className="p-2 rounded-lg hover:bg-slate-200 text-slate-600"
-              aria-label="关闭"
-            >
-              <X className="h-5 w-5" />
-            </button>
-          </div>
-          <div className="px-3 pb-2 text-xs font-medium text-slate-500 flex-shrink-0">{t('ai.panel.chats')}</div>
-          <div className="flex-1 overflow-y-auto px-2 pb-4 space-y-0.5 min-h-0">
-            {chatList.map((c) => (
-              <div
-                key={c.id}
-                className={`flex items-center gap-1 group rounded-lg ${
-                  currentChatId === c.id ? 'bg-blue-100 text-blue-800' : 'hover:bg-slate-200/80 text-slate-700'
-                }`}
+      )}
+
+      <div
+        className={`flex flex-1 min-h-0 ${dockedInSplitView ? '' : 'pt-14'} ${
+          persistLeftSidebar ? 'flex-row min-w-0 overflow-hidden' : 'relative'
+        }`}
+      >
+        {/* 仅手机全屏课程河流 AI：遮罩 + 左侧滑入抽屉；半屏为居中历史浮层，无侧栏 */}
+        {drawerSidebarMode && (
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setSidebarCollapsed(true)}
+            onKeyDown={(e) => e.key === 'Enter' && setSidebarCollapsed(true)}
+            className={`fixed inset-0 top-14 z-20 bg-black/20 transition-opacity duration-200 ${
+              sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100'
+            }`}
+            aria-label="关闭侧边栏"
+            aria-hidden={sidebarCollapsed}
+          />
+        )}
+        {(persistLeftSidebar || drawerSidebarMode) && (
+          <aside
+            className={
+              persistLeftSidebar
+                ? 'flex h-full min-h-0 w-[202px] sm:w-[230px] shrink-0 flex-col border-r border-slate-200 bg-white'
+                : `fixed left-0 top-14 bottom-0 z-30 flex flex-col border-r border-slate-200 bg-white shadow-xl transition-transform duration-200 ease-out w-[51.84%] max-w-[202px] sm:max-w-[230px] ${
+                    sidebarCollapsed ? '-translate-x-full pointer-events-none' : 'translate-x-0'
+                  }`
+            }
+            aria-hidden={persistLeftSidebar ? undefined : sidebarCollapsed}
+          >
+            {/* 顶行：新聊天；抽屉模式右侧为收起 */}
+            <div className="flex items-center justify-between gap-2 px-2 py-2 flex-shrink-0">
+              <button
+                type="button"
+                onClick={handleNewChat}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-200/80 text-sm font-medium text-slate-700"
               >
+                <FilePen className="h-4 w-4 flex-shrink-0" />
+                {t('ai.panel.newChat')}
+              </button>
+              {drawerSidebarMode && (
                 <button
                   type="button"
-                  onClick={() => handleSelectChat(c.id)}
-                  className="flex-1 min-w-0 text-left px-3 py-2 rounded-lg text-sm truncate"
+                  onClick={() => setSidebarCollapsed(true)}
+                  className="p-2 rounded-lg hover:bg-slate-200 text-slate-600"
+                  aria-label="关闭"
                 >
-                  {c.title || c.id}
+                  <X className="h-5 w-5" />
                 </button>
-                <button
-                  type="button"
-                  onClick={(e) => handleDeleteChatClick(e, c.id)}
-                  className="p-1.5 rounded-md hover:bg-slate-300/80 text-slate-500 hover:text-slate-700 flex-shrink-0"
-                  aria-label={isZh ? '删除对话' : 'Delete chat'}
-                  title={isZh ? '删除对话' : 'Delete chat'}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        </aside>
+              )}
+            </div>
+            <div className="px-3 pb-2 text-xs font-medium text-slate-500 flex-shrink-0">{t('ai.panel.chats')}</div>
+            <div className="flex-1 overflow-y-auto px-2 pb-4 space-y-0.5 min-h-0">{chatListItems}</div>
+          </aside>
+        )}
 
         {/* Main */}
-        <main className="flex-1 flex flex-col min-w-0">
-          {/* 主内容区左上角：菜单按钮 + 模型选择（参考 Gemini） */}
+        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* 主内容区左上角：半屏为历史记录；手机抽屉为菜单；常驻侧栏时仅模型 */}
           <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2">
-            <button
-              type="button"
-              onClick={() => setSidebarCollapsed(false)}
-              className="p-2 rounded-lg hover:bg-slate-100 text-slate-600"
-              aria-label={isZh ? '打开菜单' : 'Open menu'}
-              title={isZh ? '打开对话与设置' : 'Open chats & settings'}
-            >
-              <Menu className="h-5 w-5" />
-            </button>
+            {dockedInSplitView && (
+              <button
+                type="button"
+                onClick={() => setHistoryPopoverOpen((open) => !open)}
+                className={`p-2 rounded-lg hover:bg-slate-100 text-slate-600 ${historyPopoverOpen ? 'bg-slate-100' : ''}`}
+                aria-label={isZh ? '聊天记录' : 'Chat history'}
+                title={isZh ? '聊天记录' : 'Chat history'}
+              >
+                <History className="h-5 w-5" />
+              </button>
+            )}
+            {drawerSidebarMode && (
+              <button
+                type="button"
+                onClick={() => setSidebarCollapsed(false)}
+                className="p-2 rounded-lg hover:bg-slate-100 text-slate-600"
+                aria-label={isZh ? '打开菜单' : 'Open menu'}
+                title={isZh ? '打开对话与设置' : 'Open chats & settings'}
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
             <select
               value={selectedModelId}
               onChange={(e) => {
@@ -712,6 +782,47 @@ export default function AIPanel({ fullScreen: _fullScreen, fromHub: _fromHub, on
                 </div>
               </div>
             </>
+          )}
+
+          {dockedInSplitView && historyPopoverOpen && (
+            <div
+              className="absolute inset-0 z-40 flex items-center justify-center bg-slate-900/25 p-4"
+              onClick={() => setHistoryPopoverOpen(false)}
+              role="presentation"
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="ai-history-popover-title"
+                className="flex max-h-[min(72vh,420px)] w-full max-w-sm flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-3 py-2.5">
+                  <span id="ai-history-popover-title" className="text-sm font-semibold text-slate-800">
+                    {t('ai.panel.chats')}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPopoverOpen(false)}
+                    className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                    aria-label={isZh ? '关闭' : 'Close'}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="flex-shrink-0 border-b border-slate-100 px-2 py-2">
+                  <button
+                    type="button"
+                    onClick={handleNewChat}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    <FilePen className="h-4 w-4 flex-shrink-0" />
+                    {t('ai.panel.newChat')}
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-0.5">{chatListItems}</div>
+              </div>
+            </div>
           )}
         </main>
       </div>

@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
-import { SubjectCategory } from "../types"
+import type { Course, SubjectCategory } from "../types"
 import { Language } from "../types/language"
 import { KEY_CONCEPTS_OPTIONS } from "./constants"
 import { loadKeyConceptsSync } from "./storage"
@@ -36,6 +36,30 @@ export function getCategoryCanonicalKey(subjectCategory: SubjectCategory | strin
   if (!subjectCategory) return '';
   if (typeof subjectCategory === 'object' && 'zh' in subjectCategory) return subjectCategory.zh;
   return String(subjectCategory);
+}
+
+/**
+ * 与课程管理 / 课程河流「整体视图」列顺序一致：先按 categoryOrder 中的学科键，
+ * 再补上未出现在顺序里的类别；同一类别内保持当前 courses 数组中的先后。
+ */
+export function sortCoursesLikeCurriculumRoadmap(courses: Course[], categoryOrder: string[]): Course[] {
+  const grouped: Record<string, Course[]> = {};
+  courses.forEach((c) => {
+    const canonical = getCategoryCanonicalKey(c.subjectCategory) || c.name;
+    if (!grouped[canonical]) grouped[canonical] = [];
+    grouped[canonical].push(c);
+  });
+  const orderedKeys = categoryOrder.filter((k) => grouped[k]?.length);
+  const keys: string[] = [...orderedKeys];
+  Object.keys(grouped).forEach((k) => {
+    if (!keys.includes(k)) keys.push(k);
+  });
+  const out: Course[] = [];
+  for (const k of keys) {
+    const list = grouped[k];
+    if (list?.length) out.push(...list);
+  }
+  return out;
 }
 
 /**

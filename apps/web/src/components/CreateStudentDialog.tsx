@@ -7,10 +7,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { useLanguage } from '../contexts/LanguageContext';
 import type { Student, ClassItem } from '../types/classManagement';
 import { createStudent } from '../lib/classStorage';
-import { GRADES } from '../lib/constants';
-
-/** 固定 9 个年级选项，显示为 G1-G9 */
-const GRADE_OPTIONS = GRADES;
+import { loadGradeConfigSync } from '../lib/storage';
+import { getGradeLabelByLevel } from '../lib/gradeConfig';
 
 export interface CreateStudentDialogProps {
   open: boolean;
@@ -41,10 +39,14 @@ export default function CreateStudentDialog({
 }: CreateStudentDialogProps) {
   const { language } = useLanguage();
   const isZh = language === 'zh';
+  const gradeConfig = loadGradeConfigSync();
+  const gradeOptions = gradeConfig.items;
 
   const [nameZh, setNameZh] = useState('');
   const [nameEn, setNameEn] = useState('');
-  const [grade, setGrade] = useState<string>(initialGrade != null ? String(initialGrade) : '1');
+  const [grade, setGrade] = useState<string>(
+    initialGrade != null ? String(initialGrade) : String(gradeOptions[0]?.level ?? 1),
+  );
   const [gender, setGender] = useState<Student['gender']>('male');
   const [division, setDivision] = useState('');
   const [entryDate, setEntryDate] = useState('');
@@ -58,7 +60,7 @@ export default function CreateStudentDialog({
     if (!open) return;
     setNameZh('');
     setNameEn('');
-    setGrade(initialGrade != null ? String(initialGrade) : '1');
+    setGrade(initialGrade != null ? String(initialGrade) : String(gradeOptions[0]?.level ?? 1));
     setGender('male');
     setDivision('');
     setEntryDate('');
@@ -66,7 +68,7 @@ export default function CreateStudentDialog({
     setStudentNumber('');
     setDateOfBirth('');
     setEnrollClassId('');
-  }, [open, initialGrade]);
+  }, [open, initialGrade, gradeOptions]);
 
   const handleSubmit = async () => {
     const zh = nameZh.trim();
@@ -143,8 +145,8 @@ export default function CreateStudentDialog({
               onChange={(e) => setGrade(e.target.value)}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
             >
-              {GRADE_OPTIONS.map((g) => (
-                <option key={g} value={String(g)}>G{g}</option>
+              {gradeOptions.map((item) => (
+                <option key={item.id} value={String(item.level)}>{getGradeLabelByLevel(gradeConfig, item.level)}</option>
               ))}
             </select>
           </div>
@@ -220,7 +222,7 @@ export default function CreateStudentDialog({
               >
                 <option value="">—</option>
                 {classesInYear.map((c) => (
-                  <option key={c.id} value={c.id}>G{c.grade} {c.name}</option>
+                  <option key={c.id} value={c.id}>{getGradeLabelByLevel(gradeConfig, c.grade)} {c.name}</option>
                 ))}
               </select>
             </div>

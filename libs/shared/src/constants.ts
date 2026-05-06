@@ -1,3 +1,5 @@
+import type { GradeConfig } from './types.js';
+
 export const GRADES: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 export const SEMESTERS: ('Semester 1' | 'Semester 2')[] = ['Semester 1', 'Semester 2'];
 
@@ -17,6 +19,21 @@ export const SEMESTER_LABELS: Record<'Semester 1' | 'Semester 2', string> = {
   'Semester 1': '上学期',
   'Semester 2': '下学期',
 };
+
+export function createDefaultGradeConfig(maxLevel = 9): GradeConfig {
+  return {
+    items: Array.from({ length: maxLevel }, (_, i) => {
+      const level = i + 1;
+      return {
+        id: `g${level}`,
+        label: `G${level}`,
+        level,
+      };
+    }),
+  };
+}
+
+export const DEFAULT_GRADE_CONFIG: GradeConfig = createDefaultGradeConfig(9);
 
 export const KEY_CONCEPTS_OPTIONS = [
   '审美 Aesthetics',

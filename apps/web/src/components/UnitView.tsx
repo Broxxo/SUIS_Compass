@@ -1,15 +1,19 @@
 import { useState, useEffect, useRef } from 'react';
-import { Course, Semester, Unit } from '../types';
+import { Course, GradeConfig, Semester, Unit } from '../types';
 import AddUnitDialog from './AddUnitDialog';
 import { useLanguage } from '../contexts/LanguageContext';
-import { GRADES, SEMESTERS, GRADE_LABELS, SEMESTER_LABELS } from '../lib/constants';
+import { SEMESTERS, SEMESTER_LABELS } from '../lib/constants';
 import { loadSemesterDataSync, saveSemesterData, loadSemesterData } from '../lib/storage';
-import { getColorGradient } from '../lib/courseUtils';
+import { getCourseTagChrome } from '../lib/courseUtils';
+import { getGradeLabelByLevel } from '../lib/gradeConfig';
 
 interface UnitViewProps {
   courses: Course[];
   selectedSemester: Semester;
   onSemesterChange: (semester: Semester) => void;
+  gradeConfig: GradeConfig;
+  /** 课程河流只读：禁止拖拽、改周次与编辑单元 */
+  readOnly?: boolean;
 }
 
 interface CourseUnitsData {
@@ -26,7 +30,13 @@ interface DragState {
   initialEnd: number;
 }
 
-export default function UnitView({ courses, selectedSemester, onSemesterChange }: UnitViewProps) {
+export default function UnitView({
+  courses,
+  selectedSemester,
+  onSemesterChange,
+  gradeConfig,
+  readOnly = false,
+}: UnitViewProps) {
   const { t } = useLanguage();
   const [courseUnitsData, setCourseUnitsData] = useState<CourseUnitsData[]>([]);
   const [editingUnit, setEditingUnit] = useState<{ unit: Unit; courseId: string } | null>(null);
@@ -124,6 +134,7 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
 
   // Drag and Resize Handlers
   const handlePointerDown = (e: React.PointerEvent, unit: Unit, courseId: string, type: 'drag' | 'resize-left' | 'resize-right') => {
+    if (readOnly) return;
     e.stopPropagation();
     if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
     setHoveredUnitId(null);
@@ -141,7 +152,7 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (!dragState) return;
+    if (readOnly || !dragState) return;
 
     const deltaX = e.clientX - dragState.startX;
     
@@ -209,7 +220,7 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    if (!dragState) return;
+    if (readOnly || !dragState) return;
 
     // Save ALL units for this course to localStorage to capture linked changes
     const courseData = courseUnitsData.find(c => c.course.id === dragState.courseId);
@@ -233,9 +244,9 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-white">
-      {/* Semester Selector */}
-      <div className="px-6 py-2 flex-shrink-0">
+    <div className="flex h-full min-h-0 w-full flex-col bg-white">
+      {/* Semester Selector（与概念视图同一套上下边距） */}
+      <div className="flex-shrink-0 px-6 py-1.5">
         <div className="flex items-center gap-3">
           <label className="text-sm font-semibold text-gray-700">{t('semester.select')}:</label>
           <select
@@ -246,10 +257,10 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
             }}
             className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
           >
-            {GRADES.map((grade) =>
+            {gradeConfig.items.map((item) =>
               SEMESTERS.map((semester) => (
-                <option key={`${grade}-${semester}`} value={`${grade}-${semester}`}>
-                  {GRADE_LABELS[grade]} {SEMESTER_LABELS[semester]} (G{grade} {semester})
+                <option key={`${item.level}-${semester}`} value={`${item.level}-${semester}`}>
+                  {getGradeLabelByLevel(gradeConfig, item.level)} {SEMESTER_LABELS[semester]} ({item.level} {semester})
                 </option>
               ))
             )}
@@ -257,9 +268,9 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-hidden flex flex-col pt-3 px-4 pb-4">
-        <div className="h-full w-full border border-gray-200 rounded-xl shadow-sm bg-white flex flex-col overflow-hidden">
+      {/* Main Content Area（与概念视图：pt/px/pb 一致，主框占满剩余高度） */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-3 pt-2">
+        <div className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           {/* Timeline and Grid Area */}
           <div className="flex-1 overflow-auto relative" ref={scrollContainerRef}>
             <div style={{ minWidth: `${COURSE_LABEL_WIDTH + TOTAL_WEEKS * WEEK_WIDTH}px` }}>
@@ -292,7 +303,7 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
               ) : (
                 <div className="flex flex-col">
                   {courseUnitsData.map(({ course, units }) => {
-                    const gradient = getColorGradient(course.color);
+                    const tagChrome = getCourseTagChrome(course.color);
                     const isRowHovered = hoveredUnitId && units.some(u => u.id === hoveredUnitId);
                     
                     return (
@@ -308,12 +319,18 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
                           className="flex-shrink-0 sticky left-0 z-10 flex items-center justify-center p-3 border-r border-gray-200 bg-white group-hover:bg-gray-50 transition-colors"
                         >
                           <div
-                            className="w-full py-2 px-3 rounded-lg shadow-sm text-center"
+                            className="w-full py-2 px-3 rounded-lg text-center"
                             style={{
-                              background: `linear-gradient(135deg, ${gradient.medium} 0%, ${gradient.dark} 50%, ${gradient.medium} 100%)`,
+                              backgroundColor: tagChrome.backgroundColor,
+                              boxShadow: tagChrome.boxShadow,
                             }}
                           >
-                            <span className="text-[10px] font-bold text-white line-clamp-2 leading-tight">{course.name}</span>
+                            <span
+                              className="text-[10px] font-bold text-white line-clamp-2 leading-tight"
+                              style={{ textShadow: tagChrome.labelTextShadow }}
+                            >
+                              {course.name}
+                            </span>
                           </div>
                         </div>
 
@@ -356,14 +373,17 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
                             const duration = displayEnd - displayStart;
                             const leftOffset = displayStart * WEEK_WIDTH;
                             const width = duration * WEEK_WIDTH;
-                            const gradient = getColorGradient(course.color);
                             const isUnitHovered = hoveredUnitId === unit.id;
 
                             return (
                               <div
                                 key={unit.id}
                                 className={`absolute top-1/2 -translate-y-1/2 h-[95%] px-0 group/unit-container transition-shadow ${
-                                  dragState?.unitId === unit.id ? 'cursor-grabbing z-[150] shadow-xl ring-2 ring-blue-500' : 'cursor-grab'
+                                  readOnly
+                                    ? 'cursor-default'
+                                    : dragState?.unitId === unit.id
+                                      ? 'cursor-grabbing z-[150] shadow-xl ring-2 ring-blue-500'
+                                      : 'cursor-grab'
                                 }`}
                                 style={{
                                   left: `${leftOffset}px`,
@@ -381,13 +401,14 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
                                   if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
                                   setHoveredUnitId(null);
                                 }}
-                                onPointerDown={(e) => handlePointerDown(e, unit, course.id, 'drag')}
-                                onPointerMove={handlePointerMove}
-                                onPointerUp={handlePointerUp}
+                                onPointerDown={readOnly ? undefined : (e) => handlePointerDown(e, unit, course.id, 'drag')}
+                                onPointerMove={readOnly ? undefined : handlePointerMove}
+                                onPointerUp={readOnly ? undefined : handlePointerUp}
                               >
                                 <div 
                                   className="h-full w-full bg-white rounded-lg shadow-sm border border-gray-200 p-2 pt-4 hover:shadow-md transition-all flex flex-col group/unit relative"
                                   onClick={() => {
+                                    if (readOnly) return;
                                     // If we just finished a drag or resize, don't open the edit dialog
                                     if (wasDraggingRef.current) {
                                       wasDraggingRef.current = false;
@@ -398,20 +419,25 @@ export default function UnitView({ courses, selectedSemester, onSemesterChange }
                                   }}
                                 >
                                   {/* Resize Handles */}
-                                  <div 
+                                  {!readOnly && (
+                                    <>
+                                  <div
                                     className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-400/30 rounded-l-lg z-20"
                                     onPointerDown={(e) => handlePointerDown(e, unit, course.id, 'resize-left')}
                                   />
-                                  <div 
+                                  <div
                                     className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-400/30 rounded-r-lg z-20"
                                     onPointerDown={(e) => handlePointerDown(e, unit, course.id, 'resize-right')}
                                   />
+                                    </>
+                                  )}
 
                                   {/* Unit Badge in top-left */}
                                   <div 
                                     className="absolute top-0 left-0 w-[18px] h-[18px] flex items-center justify-center text-[9px] font-bold text-white rounded-br-lg rounded-tl-lg z-10"
                                     style={{
-                                      background: `linear-gradient(135deg, ${gradient.medium} 0%, ${gradient.dark} 100%)`,
+                                      backgroundColor: tagChrome.backgroundColor,
+                                      textShadow: tagChrome.labelTextShadow,
                                     }}
                                   >
                                     {unit.order + 1}

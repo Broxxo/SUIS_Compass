@@ -111,6 +111,7 @@ function AppContent() {
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
           <CurriculumRoadmap
+            surface="hub"
             onBackToHub={() => setView('hub')}
             isAIOpen={aiOverlayOpen}
             onToggleAI={() => setAiOverlayOpen((open) => !open)}

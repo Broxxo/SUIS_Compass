@@ -7,6 +7,18 @@ export interface AcademicYear {
   isCurrent?: boolean;
 }
 
+/** 全校组织架构部门（树形；parentId 为空表示根部门） */
+export interface OrgDepartment {
+  id: string;
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+}
+
+export interface OrgDepartmentNode extends OrgDepartment {
+  children: OrgDepartmentNode[];
+}
+
 /** 班级（属于某学年） */
 export interface ClassItem {
   id: string;
@@ -109,6 +121,8 @@ export interface StudentTermSubjectReport {
   midtermGrade: ReportGrade | null;
   finalScore: number | null;
   finalGrade: ReportGrade | null;
+  /** 学习品质等第（A–D），与模板 enableLearningQuality 一致时填写 */
+  learningQualityGrade?: TargetLevel | null;
   teacherComment: string | null;
   teacherId: string | null;
   dimensions: StudentTermTargetDimension[];
@@ -152,6 +166,8 @@ export interface ReportTemplateSubject {
   moduleType: EvaluationModuleType;
   enableScore: boolean;
   enableTeacherComment: boolean;
+  /** 是否展示「学习品质」A–D 评价 */
+  enableLearningQuality?: boolean;
   scoreVisibility: ScoreVisibility;
   sortOrder: number;
   dimensions: ReportTemplateDimension[];
@@ -162,6 +178,10 @@ export interface ReportTemplate {
   academicYearId: string;
   term: Term;
   title: string | null;
+  /** 与课程设置中学段 id 一致；空字符串表示未区分学段（兼容旧数据） */
+  schoolSegmentId?: string;
+  /** 与模板学段对应的分数→等第下限（合并默认值后下发，便于前端换算展示） */
+  scoreGradeMinScores?: Partial<Record<ReportGrade, number>> | Record<ReportGrade, number>;
   templateType?: 'portrait-evaluation';
   isActive?: boolean;
   publishedAt?: string | null;
@@ -182,6 +202,73 @@ export interface EvaluationTemplateSummary {
   isActive: boolean;
   publishedAt: string | null;
   releasedAt: string | null;
+  homeroomCommentMode?: HomeroomCommentMode;
+  schoolSegmentId?: string;
+  updatedAt: string | null;
+}
+
+export interface ReportYearDimensionPresetSubject {
+  courseId?: string;
+  subjectKey: string;
+  subjectNameZh: string;
+  subjectNameEn: string;
+  enableScore: boolean;
+  enableTeacherComment: boolean;
+  enableTarget: boolean;
+  gradeDimensions?: Array<{
+    gradeId: string;
+    dimensions: Array<{
+      dimensionLabelZh: string;
+      dimensionLabelEn: string;
+      levelDescriptions: Partial<Record<TargetLevel, string>>;
+    }>;
+  }>;
+  dimensions: Array<{
+    dimensionLabelZh: string;
+    dimensionLabelEn: string;
+    levelDescriptions: Partial<Record<TargetLevel, string>>;
+  }>;
+}
+
+export interface ReportExamDimensionScore {
+  dimensionLabelZh: string;
+  dimensionLabelEn: string;
+  score: number;
+}
+
+export interface ReportExamGradeConfig {
+  gradeId: string;
+  /** 百分比阈值（0-100），例如 A+=95 表示 >=95% 为 A+ */
+  percentBands: Partial<Record<ReportGrade, number>>;
+  /** 各维度分值（同第一步目标维度），总分由前端按明细自动汇总 */
+  dimensionScores: ReportExamDimensionScore[];
+}
+
+export interface ReportExamSubjectConfig {
+  courseId: string;
+  subjectKey: string;
+  subjectNameZh: string;
+  subjectNameEn: string;
+  gradeConfigs: ReportExamGradeConfig[];
+}
+
+export interface ReportExamConfigScope {
+  /** 纳入考试评价的课程 id（与课程设置一致） */
+  subjectInclusion: string[];
+  /** 已配置考试规则的学科明细 */
+  subjects: ReportExamSubjectConfig[];
+}
+
+export interface ReportYearDimensionPreset {
+  academicYearId: string;
+  homeroomCommentMode: HomeroomCommentMode;
+  subjects: ReportYearDimensionPresetSubject[];
+  /** 学段 id → 纳入学业报告的课程 id 列表；缺省某学段时由前端按该学段年级上已保存的目标维度推断，推断为空则该学段暂无纳入课程（需勾选并保存「当前学科设置」） */
+  stageInclusion?: Record<string, string[]>;
+  /** key = `${term}::${schoolSegmentId}` 的考试配置 */
+  examConfigs?: Record<string, ReportExamConfigScope>;
+  /** 全学年共用的 A–D 等第说明（学科维度不再单独存 ABCD 描述） */
+  unifiedLevelDescriptions?: Partial<Record<TargetLevel, string>>;
   updatedAt: string | null;
 }
 
@@ -226,5 +313,7 @@ export interface StaffingAssignment {
   subjectName: string;
   teacherId: string;
   teacherName: string;
+  /** 合作教学第二位教师为 1，默认可省略视为 0 */
+  teacherSlot?: 0 | 1;
   updatedAt: string | null;
 }

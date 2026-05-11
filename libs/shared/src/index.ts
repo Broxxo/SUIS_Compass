@@ -6,3 +6,11 @@ export {
   getCourseCellHex,
   getCourseColorGradient,
 } from './courseColors.js';
+export { staffingSubjectKeyFromCourse } from './staffingSubjectKey.js';
+export {
+  REPORT_SCORE_LETTER_GRADES,
+  defaultReportScoreGradeMinScores,
+  mergeReportScoreGradeMinScores,
+  reportLetterGradeFromScore,
+  type ReportScoreLetterGrade,
+} from './reportScoreGradeScale.js';

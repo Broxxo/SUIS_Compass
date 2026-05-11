@@ -16,6 +16,7 @@ import { Course } from '../types';
 import { loadSemesterDataSync } from '../lib/storage';
 import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/aiModels';
 import { getApiUrl, getAuthHeaders } from '../lib/api';
+import { formatNavUserLabel } from '../lib/userDisplay';
 import {
   Send,
   User,
@@ -176,7 +177,7 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
   const scrollRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
-  const displayName = user?.displayName || user?.username || (language === 'zh' ? '用户' : 'User');
+  const displayName = user != null ? formatNavUserLabel(user) : language === 'zh' ? '用户' : 'User';
   const isZh = language === 'zh';
   const greetingText = isZh ? t('ai.panel.greeting').replace('{name}', displayName) : t('ai.panel.greetingEn').replace('{name}', displayName);
 

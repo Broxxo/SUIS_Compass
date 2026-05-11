@@ -35,6 +35,8 @@ export type Course = {
   applicableGrades: string[];
   /** 各年级周课时，键为年级 id（如 g1） */
   weeklyPeriodsByGrade: Record<string, number>;
+  /** 合作教学：岗位安排需填两位教师，周课时统计时两人各计该课全周课时 */
+  coTeaching?: boolean;
   textbookVersion?: string;
   color: CourseColor;
 };
@@ -69,7 +71,12 @@ export type User = {
   id: string;
   username: string;
   role: 'system-admin' | 'admin' | 'teacher' | 'student';
+  /** 展示用：优先中文名，否则英文名，否则兼容旧库的 display_name */
   displayName: string;
+  /** 教职工等：中文名（与 nameEn 至少其一有值时用于展示与导入） */
+  nameZh?: string | null;
+  /** 英文名 */
+  nameEn?: string | null;
   /** 学籍 students.id，仅学生登录账号有值，用于画像等自有数据接口 */
   studentId?: string | null;
 };

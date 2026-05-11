@@ -38,6 +38,55 @@ export function getCategoryCanonicalKey(subjectCategory: SubjectCategory | strin
   return String(subjectCategory);
 }
 
+/** 从「语文－语文－人教版」类合成名取首段，避免把版本号整串用作展示 */
+function firstSegmentOfCompoundCourseName(name: string): string {
+  const t = (name || '').trim();
+  if (!t) return '';
+  const parts = t.split(/[－\-–—]/u).map((s) => s.trim()).filter(Boolean);
+  return parts[0] ?? t;
+}
+
+function parseCourseCategoryZhEn(course: Course): { zh: string; en: string } {
+  let zh = '';
+  let en = '';
+  const sc = course.subjectCategory;
+  if (sc && typeof sc === 'object' && 'zh' in sc) {
+    zh = (sc.zh ?? '').trim();
+    en = (sc.en ?? '').trim();
+  } else if (typeof sc === 'string') {
+    zh = sc.trim();
+  }
+  return { zh, en };
+}
+
+/**
+ * 评价报告模板等：学科中英文名（不拼接完整合成课程名里的版本段）。
+ * 无独立英文时 `subjectNameEn` 与中文相同，便于 API / 校验；展示请用 {@link formatCourseBilingualDisplayName}。
+ */
+export function getCourseReportSubjectLabels(course: Course): { subjectNameZh: string; subjectNameEn: string } {
+  const { zh, en } = parseCourseCategoryZhEn(course);
+  const fb = firstSegmentOfCompoundCourseName(course.name);
+  const nameTrim = (course.name || '').trim();
+  const subjectNameZh = zh || fb || nameTrim;
+  const subjectNameEn = en || subjectNameZh;
+  return { subjectNameZh, subjectNameEn };
+}
+
+/**
+ * 课程下拉等：双语「中文 英文」，例如「语文 Chinese」；仅有中文时只显示中文。
+ */
+export function formatCourseBilingualDisplayName(course: Course): string {
+  const { zh, en } = parseCourseCategoryZhEn(course);
+  const fb = firstSegmentOfCompoundCourseName(course.name);
+  const nameTrim = (course.name || '').trim();
+  const zhOut = zh || fb || nameTrim;
+  const enOut = en;
+  if (zhOut && enOut && zhOut !== enOut) {
+    return `${zhOut} ${enOut}`;
+  }
+  return zhOut || enOut;
+}
+
 /**
  * 与课程管理 / 课程河流「整体视图」列顺序一致：先按 categoryOrder 中的学科键，
  * 再补上未出现在顺序里的类别；同一类别内保持当前 courses 数组中的先后。

@@ -6,6 +6,28 @@ import { JWT_SECRET, JWT_EXPIRES_IN } from '../config/auth.js';
 
 const router = express.Router();
 
+let ensuredUsersNameZhEn = false;
+async function ensureUsersNameZhEn(): Promise<void> {
+  if (ensuredUsersNameZhEn) return;
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name_zh VARCHAR(100)');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name_en VARCHAR(100)');
+  ensuredUsersNameZhEn = true;
+}
+
+function resolveUserDisplayLabel(row: {
+  name_zh?: string | null;
+  name_en?: string | null;
+  display_name?: string | null;
+  username?: string | null;
+}): string {
+  const z = (row.name_zh ?? '').toString().trim();
+  const e = (row.name_en ?? '').toString().trim();
+  if (z || e) return z || e;
+  const d = (row.display_name ?? '').toString().trim();
+  if (d) return d;
+  return (row.username ?? '').toString().trim() || '';
+}
+
 async function resolveUserId(req: Request): Promise<string | null> {
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -26,13 +48,18 @@ function toUserRow(row: {
   username: string;
   role: string;
   display_name: string;
+  name_zh?: string | null;
+  name_en?: string | null;
   student_id?: string | null;
 }) {
+  const displayName = resolveUserDisplayLabel(row);
   return {
     id: row.id,
     username: row.username,
     role: row.role,
-    displayName: row.display_name,
+    displayName,
+    nameZh: (row.name_zh ?? '').toString().trim() || null,
+    nameEn: (row.name_en ?? '').toString().trim() || null,
     studentId: row.student_id ?? null,
   };
 }
@@ -46,8 +73,9 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
+    await ensureUsersNameZhEn();
     const result = await pool.query(
-      'SELECT id, username, role, display_name, student_id, password, password_hash FROM users WHERE username = $1',
+      'SELECT id, username, role, display_name, name_zh, name_en, student_id, password, password_hash FROM users WHERE username = $1',
       [username]
     );
 
@@ -60,6 +88,8 @@ router.post('/login', async (req, res) => {
       username: string;
       role: string;
       display_name: string;
+      name_zh: string | null;
+      name_en: string | null;
       student_id: string | null;
       password: string | null;
       password_hash: string | null;
@@ -107,8 +137,9 @@ router.get('/user', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
+    await ensureUsersNameZhEn();
     const result = await pool.query(
-      'SELECT id, username, role, display_name, student_id FROM users WHERE id = $1',
+      'SELECT id, username, role, display_name, name_zh, name_en, student_id FROM users WHERE id = $1',
       [userId]
     );
 
@@ -121,6 +152,8 @@ router.get('/user', async (req, res) => {
       username: string;
       role: string;
       display_name: string;
+      name_zh: string | null;
+      name_en: string | null;
       student_id: string | null;
     };
     res.json({ user: toUserRow(row) });

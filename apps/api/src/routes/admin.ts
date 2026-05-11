@@ -2,6 +2,8 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import pool from '../config/database.js';
+import { mergeReportScoreGradeMinScores, REPORT_SCORE_LETTER_GRADES, type ReportScoreLetterGrade } from '@repo/shared';
+import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
 
 const router = express.Router();
 
@@ -15,10 +17,13 @@ type TemplateStatus = 'draft' | 'published' | 'closed';
 type HomeroomCommentMode = 'disabled' | 'optional' | 'required';
 type ModuleType = 'subject_score' | 'subject_comment' | 'non_score_comment';
 type ScoreVisibility = 'teacher_homeroom_admin';
+type TargetLevel = 'A' | 'B' | 'C' | 'D';
 
 let ensuredUsersStudentIdColumn = false;
+let ensuredUsersPrimarySubjectColumn = false;
+let ensuredUsersNameZhEn = false;
 let ensuredReportTemplateTables = false;
-let ensuredStaffingTables = false;
+let ensuredOrgDepartmentsTable = false;
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
@@ -32,6 +37,318 @@ function normalizeIdentifier(input: string): string {
     .replace(/^_+|_+$/g, '')
     .replace(/_+/g, '_');
   return normalized || 'item';
+}
+
+function sanitizePresetSubjects(raw: unknown): Array<{
+  courseId: string;
+  subjectKey: string;
+  subjectNameZh: string;
+  subjectNameEn: string;
+  enableScore: boolean;
+  enableTeacherComment: boolean;
+  enableTarget: boolean;
+  gradeDimensions: Array<{
+    gradeId: string;
+    dimensions: Array<{
+      dimensionLabelZh: string;
+      dimensionLabelEn: string;
+      levelDescriptions: Partial<Record<TargetLevel, string>>;
+    }>;
+  }>;
+  dimensions: Array<{
+    dimensionLabelZh: string;
+    dimensionLabelEn: string;
+    levelDescriptions: Partial<Record<TargetLevel, string>>;
+  }>;
+}> {
+  if (!Array.isArray(raw)) return [];
+  const usedSubjectKeys = new Set<string>();
+  const out: Array<{
+    courseId: string;
+    subjectKey: string;
+    subjectNameZh: string;
+    subjectNameEn: string;
+    enableScore: boolean;
+    enableTeacherComment: boolean;
+    enableTarget: boolean;
+    gradeDimensions: Array<{
+      gradeId: string;
+      dimensions: Array<{
+        dimensionLabelZh: string;
+        dimensionLabelEn: string;
+        levelDescriptions: Partial<Record<TargetLevel, string>>;
+      }>;
+    }>;
+    dimensions: Array<{
+      dimensionLabelZh: string;
+      dimensionLabelEn: string;
+      levelDescriptions: Partial<Record<TargetLevel, string>>;
+    }>;
+  }> = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const row = raw[i] as Record<string, unknown>;
+    const subjectNameZh = String(row.subjectNameZh ?? '').trim();
+    const subjectNameEn = String(row.subjectNameEn ?? '').trim();
+    if (!subjectNameZh || !subjectNameEn) continue;
+    const courseId = String(row.courseId ?? '').trim();
+    const requestedKey = String(row.subjectKey ?? '').trim();
+    const baseKey = normalizeIdentifier(requestedKey || subjectNameEn);
+    let subjectKey = baseKey;
+    let seq = 2;
+    while (usedSubjectKeys.has(subjectKey)) {
+      subjectKey = `${baseKey}_${seq}`;
+      seq += 1;
+    }
+    usedSubjectKeys.add(subjectKey);
+    const dimsRaw = Array.isArray(row.dimensions) ? row.dimensions : [];
+    const gradeDimsRaw = Array.isArray(row.gradeDimensions) ? row.gradeDimensions : [];
+    const usedDimKeys = new Set<string>();
+    const dimensions: Array<{
+      dimensionLabelZh: string;
+      dimensionLabelEn: string;
+      levelDescriptions: Partial<Record<TargetLevel, string>>;
+    }> = [];
+    for (let j = 0; j < dimsRaw.length; j += 1) {
+      const dim = dimsRaw[j] as Record<string, unknown>;
+      const dimensionLabelZh = String(dim.dimensionLabelZh ?? '').trim();
+      const dimensionLabelEn = String(dim.dimensionLabelEn ?? '').trim();
+      if (!dimensionLabelZh || !dimensionLabelEn) continue;
+      // 不能仅用 normalizeIdentifier(en)：纯中文等标签会被压成同一 key「item」，导致只保留第一列
+      const key = `${dimensionLabelZh}\u0001${dimensionLabelEn}`;
+      if (usedDimKeys.has(key)) continue;
+      usedDimKeys.add(key);
+      dimensions.push({
+        dimensionLabelZh,
+        dimensionLabelEn,
+        levelDescriptions: {},
+      });
+    }
+    const gradeDimensions: Array<{
+      gradeId: string;
+      dimensions: Array<{
+        dimensionLabelZh: string;
+        dimensionLabelEn: string;
+        levelDescriptions: Partial<Record<TargetLevel, string>>;
+      }>;
+    }> = [];
+    for (let j = 0; j < gradeDimsRaw.length; j += 1) {
+      const rowGrade = gradeDimsRaw[j] as Record<string, unknown>;
+      const gradeId = String(rowGrade.gradeId ?? '').trim();
+      if (!gradeId) continue;
+      const eachDimsRaw = Array.isArray(rowGrade.dimensions) ? rowGrade.dimensions : [];
+      const usedEachDimKeys = new Set<string>();
+      const eachDimensions: Array<{
+        dimensionLabelZh: string;
+        dimensionLabelEn: string;
+        levelDescriptions: Partial<Record<TargetLevel, string>>;
+      }> = [];
+      for (let k = 0; k < eachDimsRaw.length; k += 1) {
+        const dim = eachDimsRaw[k] as Record<string, unknown>;
+        const dimensionLabelZh = String(dim.dimensionLabelZh ?? '').trim();
+        const dimensionLabelEn = String(dim.dimensionLabelEn ?? '').trim();
+        if (!dimensionLabelZh || !dimensionLabelEn) continue;
+        const key = `${dimensionLabelZh}\u0001${dimensionLabelEn}`;
+        if (usedEachDimKeys.has(key)) continue;
+        usedEachDimKeys.add(key);
+        eachDimensions.push({
+          dimensionLabelZh,
+          dimensionLabelEn,
+          levelDescriptions: {},
+        });
+      }
+      gradeDimensions.push({ gradeId, dimensions: eachDimensions });
+    }
+    const fallbackDimensions =
+      gradeDimensions.find((g) => g.dimensions.length > 0)?.dimensions ?? dimensions;
+    const enableTarget =
+      row.enableTarget === false
+        ? false
+        : (gradeDimensions.some((g) => g.dimensions.length > 0) || fallbackDimensions.length > 0);
+    out.push({
+      courseId,
+      subjectKey,
+      subjectNameZh,
+      subjectNameEn,
+      enableScore: row.enableScore !== false,
+      enableTeacherComment: row.enableTeacherComment !== false,
+      enableTarget,
+      gradeDimensions,
+      dimensions: enableTarget ? fallbackDimensions : [],
+    });
+  }
+  return out;
+}
+
+function extractPresetSubjectsArray(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === 'object') {
+    const subs = (raw as { subjects?: unknown }).subjects;
+    if (Array.isArray(subs)) return subs;
+  }
+  return [];
+}
+
+function extractStageInclusion(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const si = (raw as { stageInclusion?: unknown }).stageInclusion;
+  if (!si || typeof si !== 'object' || Array.isArray(si)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(si)) {
+    const key = String(k).trim();
+    if (!key) continue;
+    if (!Array.isArray(v)) continue;
+    out[key] = v.map((x) => String(x).trim()).filter(Boolean);
+  }
+  return out;
+}
+
+function sanitizeUnifiedLevelDescriptions(raw: unknown): Partial<Record<TargetLevel, string>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const rec = raw as Record<string, unknown>;
+  const out: Partial<Record<TargetLevel, string>> = {};
+  for (const lv of ['A', 'B', 'C', 'D'] as const) {
+    const v = String(rec[lv] ?? '').trim();
+    if (v) out[lv] = v;
+  }
+  return out;
+}
+
+function extractUnifiedLevelDescriptions(raw: unknown): Partial<Record<TargetLevel, string>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const ul = (raw as { unifiedLevelDescriptions?: unknown }).unifiedLevelDescriptions;
+  return sanitizeUnifiedLevelDescriptions(ul);
+}
+
+function sanitizeExamPercentBands(raw: unknown): Partial<Record<ReportScoreLetterGrade, number>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const rec = raw as Record<string, unknown>;
+  const out: Partial<Record<ReportScoreLetterGrade, number>> = {};
+  for (const g of REPORT_SCORE_LETTER_GRADES) {
+    const v = Number(rec[g]);
+    if (!Number.isFinite(v)) continue;
+    out[g] = Math.max(0, Math.min(100, Math.round(v * 100) / 100));
+  }
+  return out;
+}
+
+function sanitizeExamConfigs(raw: unknown): Record<string, {
+  subjectInclusion: string[];
+  subjects: Array<{
+    courseId: string;
+    subjectKey: string;
+    subjectNameZh: string;
+    subjectNameEn: string;
+    gradeConfigs: Array<{
+      gradeId: string;
+      percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
+      dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
+    }>;
+  }>;
+}> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const source = (raw as { examConfigs?: unknown }).examConfigs;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+  const out: Record<string, {
+    subjectInclusion: string[];
+    subjects: Array<{
+      courseId: string;
+      subjectKey: string;
+      subjectNameZh: string;
+      subjectNameEn: string;
+      gradeConfigs: Array<{
+        gradeId: string;
+        percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
+        dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
+      }>;
+    }>;
+  }> = {};
+  for (const [rawKey, rawScope] of Object.entries(source as Record<string, unknown>)) {
+    const key = String(rawKey ?? '').trim();
+    if (!key) continue;
+    const scope = rawScope && typeof rawScope === 'object' && !Array.isArray(rawScope)
+      ? (rawScope as Record<string, unknown>)
+      : {};
+    const subjectInclusion = Array.isArray(scope.subjectInclusion)
+      ? scope.subjectInclusion.map((x) => String(x).trim()).filter(Boolean)
+      : [];
+    const usedCourses = new Set<string>();
+    const subjectsRaw = Array.isArray(scope.subjects) ? scope.subjects : [];
+    const subjects: Array<{
+      courseId: string;
+      subjectKey: string;
+      subjectNameZh: string;
+      subjectNameEn: string;
+      gradeConfigs: Array<{
+        gradeId: string;
+        percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
+        dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
+      }>;
+    }> = [];
+    for (const row of subjectsRaw) {
+      const rec = row as Record<string, unknown>;
+      const courseId = String(rec.courseId ?? '').trim();
+      if (!courseId || usedCourses.has(courseId)) continue;
+      usedCourses.add(courseId);
+      const subjectKey = String(rec.subjectKey ?? '').trim();
+      const subjectNameZh = String(rec.subjectNameZh ?? '').trim();
+      const subjectNameEn = String(rec.subjectNameEn ?? '').trim();
+      const gradeConfigsRaw = Array.isArray(rec.gradeConfigs) ? rec.gradeConfigs : [];
+      const usedGrades = new Set<string>();
+      const gradeConfigs: Array<{
+        gradeId: string;
+        percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
+        dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
+      }> = [];
+      for (const g of gradeConfigsRaw) {
+        const gRec = g as Record<string, unknown>;
+        const gradeId = String(gRec.gradeId ?? '').trim();
+        if (!gradeId || usedGrades.has(gradeId)) continue;
+        usedGrades.add(gradeId);
+        const dimsRaw = Array.isArray(gRec.dimensionScores) ? gRec.dimensionScores : [];
+        const dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }> = [];
+        for (const dim of dimsRaw) {
+          const d = dim as Record<string, unknown>;
+          const dimensionLabelZh = String(d.dimensionLabelZh ?? '').trim();
+          const dimensionLabelEn = String(d.dimensionLabelEn ?? '').trim();
+          const score = Number(d.score);
+          if (!dimensionLabelZh || !dimensionLabelEn || !Number.isFinite(score) || score < 0) continue;
+          dimensionScores.push({
+            dimensionLabelZh,
+            dimensionLabelEn,
+            score: Math.round(score * 100) / 100,
+          });
+        }
+        gradeConfigs.push({
+          gradeId,
+          percentBands: sanitizeExamPercentBands(gRec.percentBands),
+          dimensionScores,
+        });
+      }
+      subjects.push({
+        courseId,
+        subjectKey,
+        subjectNameZh,
+        subjectNameEn,
+        gradeConfigs,
+      });
+    }
+    out[key] = { subjectInclusion, subjects };
+  }
+  return out;
+}
+
+function parsePresetPayload(payload: unknown): {
+  subjects: ReturnType<typeof sanitizePresetSubjects>;
+  stageInclusion: Record<string, string[]>;
+  examConfigs: ReturnType<typeof sanitizeExamConfigs>;
+  unifiedLevelDescriptions: Partial<Record<TargetLevel, string>>;
+} {
+  return {
+    subjects: sanitizePresetSubjects(extractPresetSubjectsArray(payload)),
+    stageInclusion: extractStageInclusion(payload),
+    examConfigs: sanitizeExamConfigs(payload),
+    unifiedLevelDescriptions: extractUnifiedLevelDescriptions(payload),
+  };
 }
 
 async function getCallerRole(userId: string | undefined): Promise<string | null> {
@@ -73,6 +390,33 @@ async function ensureUsersStudentIdColumn(): Promise<void> {
   ensuredUsersStudentIdColumn = true;
 }
 
+async function ensureUsersPrimarySubjectColumn(): Promise<void> {
+  if (ensuredUsersPrimarySubjectColumn) return;
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS primary_subject VARCHAR(120)');
+  ensuredUsersPrimarySubjectColumn = true;
+}
+
+async function ensureUsersNameZhEn(): Promise<void> {
+  if (ensuredUsersNameZhEn) return;
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name_zh VARCHAR(100)');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name_en VARCHAR(100)');
+  ensuredUsersNameZhEn = true;
+}
+
+function resolveUserDisplayLabel(row: {
+  name_zh?: string | null;
+  name_en?: string | null;
+  display_name?: string | null;
+  username?: string | null;
+}): string {
+  const z = (row.name_zh ?? '').toString().trim();
+  const e = (row.name_en ?? '').toString().trim();
+  if (z || e) return z || e;
+  const d = (row.display_name ?? '').toString().trim();
+  if (d) return d;
+  return (row.username ?? '').toString().trim() || '';
+}
+
 async function ensureReportTemplateTables(): Promise<void> {
   if (ensuredReportTemplateTables) return;
   await pool.query(`
@@ -112,6 +456,24 @@ async function ensureReportTemplateTables(): Promise<void> {
   await pool.query(`ALTER TABLE student_report_templates ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE`);
   await pool.query(`ALTER TABLE student_report_templates ADD COLUMN IF NOT EXISTS published_at TIMESTAMP`);
   await pool.query(`ALTER TABLE student_report_templates ADD COLUMN IF NOT EXISTS released_at TIMESTAMP`);
+  await pool.query(
+    `ALTER TABLE student_report_templates ADD COLUMN IF NOT EXISTS school_segment_id VARCHAR(120) NOT NULL DEFAULT ''`,
+  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS student_report_score_grade_bands (
+      academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+      term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+      school_segment_id VARCHAR(120) NOT NULL DEFAULT '',
+      min_scores JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (academic_year_id, term, school_segment_id)
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_report_score_grade_bands_year_admin
+      ON student_report_score_grade_bands(academic_year_id)
+  `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS student_report_template_subjects (
       id VARCHAR(100) PRIMARY KEY,
@@ -136,6 +498,9 @@ async function ensureReportTemplateTables(): Promise<void> {
   await pool.query(`ALTER TABLE student_report_template_subjects ADD COLUMN IF NOT EXISTS enable_score BOOLEAN NOT NULL DEFAULT TRUE`);
   await pool.query(`ALTER TABLE student_report_template_subjects ADD COLUMN IF NOT EXISTS enable_teacher_comment BOOLEAN NOT NULL DEFAULT TRUE`);
   await pool.query(`ALTER TABLE student_report_template_subjects ADD COLUMN IF NOT EXISTS score_visibility VARCHAR(40) NOT NULL DEFAULT 'teacher_homeroom_admin'`);
+  await pool.query(
+    `ALTER TABLE student_report_template_subjects ADD COLUMN IF NOT EXISTS enable_learning_quality BOOLEAN NOT NULL DEFAULT TRUE`,
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS student_report_template_dimensions (
       id VARCHAR(100) PRIMARY KEY,
@@ -163,35 +528,104 @@ async function ensureReportTemplateTables(): Promise<void> {
       UNIQUE(template_dimension_id, level)
     )
   `);
-  ensuredReportTemplateTables = true;
-}
-
-async function ensureStaffingTables(): Promise<void> {
-  if (ensuredStaffingTables) return;
+  // 历史库为 VARCHAR(120)：双语维度名、等第说明、长课程名保存时会触发 value too long → 500
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS class_subject_teacher_assignments (
-      id VARCHAR(100) PRIMARY KEY,
-      academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
-      class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
-      subject_key VARCHAR(120) NOT NULL,
-      subject_name VARCHAR(160) NOT NULL,
-      teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+    CREATE TABLE IF NOT EXISTS student_report_year_dimension_presets (
+      academic_year_id VARCHAR(50) PRIMARY KEY REFERENCES academic_years(id) ON DELETE CASCADE,
+      homeroom_comment_mode VARCHAR(20) NOT NULL DEFAULT 'optional' CHECK (homeroom_comment_mode IN ('disabled', 'optional', 'required')),
+      payload JSONB NOT NULL DEFAULT '[]'::jsonb,
       updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(academic_year_id, class_id, subject_key)
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_csta_year_class
-      ON class_subject_teacher_assignments(academic_year_id, class_id)
+    ALTER TABLE student_report_year_dimension_presets
+    ADD COLUMN IF NOT EXISTS homeroom_comment_mode VARCHAR(20) NOT NULL DEFAULT 'optional'
   `);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_csta_teacher
-      ON class_subject_teacher_assignments(teacher_id)
+    ALTER TABLE student_report_year_dimension_presets
+    ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '[]'::jsonb
   `);
-  ensuredStaffingTables = true;
+  await pool.query(`
+    DO $widen$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema = 'public' AND c.table_name = 'student_report_template_subjects'
+          AND c.column_name = 'subject_name_zh' AND c.data_type = 'character varying'
+      ) THEN
+        ALTER TABLE student_report_template_subjects
+          ALTER COLUMN subject_name TYPE TEXT,
+          ALTER COLUMN subject_name_zh TYPE TEXT,
+          ALTER COLUMN subject_name_en TYPE TEXT;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema = 'public' AND c.table_name = 'student_report_template_subjects'
+          AND c.column_name = 'subject_key' AND c.data_type = 'character varying'
+          AND c.character_maximum_length IS NOT NULL AND c.character_maximum_length < 200
+      ) THEN
+        ALTER TABLE student_report_template_subjects
+          ALTER COLUMN subject_key TYPE VARCHAR(255);
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema = 'public' AND c.table_name = 'student_report_template_dimensions'
+          AND c.column_name = 'dimension_label_zh' AND c.data_type = 'character varying'
+      ) THEN
+        ALTER TABLE student_report_template_dimensions
+          ALTER COLUMN dimension_label TYPE TEXT,
+          ALTER COLUMN dimension_label_zh TYPE TEXT,
+          ALTER COLUMN dimension_label_en TYPE TEXT;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema = 'public' AND c.table_name = 'student_report_template_dimensions'
+          AND c.column_name = 'dimension_key' AND c.data_type = 'character varying'
+          AND c.character_maximum_length IS NOT NULL AND c.character_maximum_length < 200
+      ) THEN
+        ALTER TABLE student_report_template_dimensions
+          ALTER COLUMN dimension_key TYPE VARCHAR(255);
+      END IF;
+    END $widen$
+  `);
+  ensuredReportTemplateTables = true;
+}
+
+async function ensureOrgDepartmentsTable(): Promise<void> {
+  if (ensuredOrgDepartmentsTable) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS org_departments (
+      id VARCHAR(50) PRIMARY KEY,
+      name VARCHAR(160) NOT NULL,
+      parent_id VARCHAR(50) REFERENCES org_departments(id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_org_departments_parent ON org_departments(parent_id)');
+  ensuredOrgDepartmentsTable = true;
+}
+
+/** 从 nodeId 沿 parent 链向上走，若遇到 ancestorId 则 nodeId 在 ancestorId 子树内 */
+async function isOrgDeptUnderAncestor(ancestorId: string, nodeId: string): Promise<boolean> {
+  let cur: string | null = nodeId;
+  const guard: Set<string> = new Set();
+  for (;;) {
+    if (cur == null) break;
+    if (cur === ancestorId) return true;
+    if (guard.has(cur)) break;
+    guard.add(cur);
+    const thisId: string = cur;
+    const res: { rows: Array<{ parent_id: string | null }> } = await pool.query(
+      'SELECT parent_id FROM org_departments WHERE id = $1',
+      [thisId],
+    );
+    const nextParent: string | null = res.rows[0]?.parent_id ?? null;
+    cur = nextParent;
+  }
+  return false;
 }
 
 async function assertTeacherUser(teacherId: string): Promise<boolean> {
@@ -348,6 +782,8 @@ router.get('/database/tables/:tableName/rows', async (req: AuthedRequest, res: R
 router.get('/users', async (req: AuthedRequest, res: Response) => {
   try {
     await ensureUsersStudentIdColumn();
+    await ensureUsersPrimarySubjectColumn();
+    await ensureUsersNameZhEn();
     const callerId = req.userId!;
     const callerResult = await pool.query('SELECT role FROM users WHERE id = $1', [callerId]);
     const callerRole = callerResult.rows[0]?.role as string;
@@ -355,45 +791,66 @@ router.get('/users', async (req: AuthedRequest, res: Response) => {
 
     if (scope === 'students') {
       const result = await pool.query(
-        `SELECT u.id, u.username, u.role, u.display_name, u.password, u.department, u.student_id, u.created_at,
+        `SELECT u.id, u.username, u.role, u.display_name, u.name_zh AS user_name_zh, u.name_en AS user_name_en,
+                u.password, u.department, u.primary_subject, u.student_id, u.created_at,
                 s.name_zh, s.name_en
          FROM users u
          LEFT JOIN students s ON s.id = u.student_id
          WHERE u.role = 'student'
          ORDER BY u.created_at DESC NULLS LAST, u.username ASC`,
       );
-      const users = result.rows.map((row) => ({
-        id: row.id as string,
-        username: row.username as string,
-        role: row.role as string,
-        displayName: (row.display_name as string) ?? '',
-        password: (row.password as string | null) ?? null,
-        department: (row.department as string | null) ?? null,
-        studentId: (row.student_id as string | null) ?? null,
-        studentNameZh: (row.name_zh as string | null) ?? null,
-        studentNameEn: (row.name_en as string | null) ?? null,
-        createdAt: (row.created_at as Date | null)?.toISOString() ?? undefined,
-      }));
+      const users = result.rows.map((row) => {
+        const userNameZh = (row.user_name_zh as string | null) ?? null;
+        const userNameEn = (row.user_name_en as string | null) ?? null;
+        return {
+          id: row.id as string,
+          username: row.username as string,
+          role: row.role as string,
+          displayName: resolveUserDisplayLabel({
+            name_zh: userNameZh,
+            name_en: userNameEn,
+            display_name: row.display_name as string | null,
+            username: row.username as string,
+          }),
+          nameZh: userNameZh,
+          nameEn: userNameEn,
+          password: (row.password as string | null) ?? null,
+          department: (row.department as string | null) ?? null,
+          primarySubject: (row.primary_subject as string | null) ?? null,
+          studentId: (row.student_id as string | null) ?? null,
+          studentNameZh: (row.name_zh as string | null) ?? null,
+          studentNameEn: (row.name_en as string | null) ?? null,
+          createdAt: (row.created_at as Date | null)?.toISOString() ?? undefined,
+        };
+      });
       return res.json({ users });
     }
 
     let result;
     if (callerRole === 'system-admin') {
       result = await pool.query(
-        "SELECT id, username, role, display_name, password, department, created_at FROM users WHERE role IN ('admin', 'teacher') ORDER BY created_at DESC, username ASC",
+        "SELECT id, username, role, display_name, name_zh, name_en, password, department, primary_subject, created_at FROM users WHERE role IN ('admin', 'teacher') ORDER BY created_at DESC, username ASC",
       );
     } else {
       result = await pool.query(
-        "SELECT id, username, role, display_name, password, department, created_at FROM users WHERE role = 'teacher' ORDER BY created_at DESC, username ASC",
+        "SELECT id, username, role, display_name, name_zh, name_en, password, department, primary_subject, created_at FROM users WHERE role = 'teacher' ORDER BY created_at DESC, username ASC",
       );
     }
     const users = result.rows.map((row) => ({
       id: row.id as string,
       username: row.username as string,
       role: row.role as string,
-      displayName: (row.display_name as string) ?? '',
+      displayName: resolveUserDisplayLabel({
+        name_zh: row.name_zh as string | null,
+        name_en: row.name_en as string | null,
+        display_name: row.display_name as string | null,
+        username: row.username as string,
+      }),
+      nameZh: (row.name_zh as string | null) ?? null,
+      nameEn: (row.name_en as string | null) ?? null,
       password: (row.password as string | null) ?? null,
       department: (row.department as string | null) ?? null,
+      primarySubject: (row.primary_subject as string | null) ?? null,
       createdAt: (row.created_at as Date | null)?.toISOString() ?? undefined,
     }));
     res.json({ users });
@@ -408,6 +865,7 @@ router.post('/users/import-student-accounts', async (req: AuthedRequest, res: Re
   const client = await pool.connect();
   try {
     await ensureUsersStudentIdColumn();
+    await ensureUsersNameZhEn();
     const body = req.body as {
       items?: Array<{ studentId: string; password: string }>;
     };
@@ -466,11 +924,13 @@ router.post('/users/import-student-accounts', async (req: AuthedRequest, res: Re
       }
       const hash = await bcrypt.hash(plain, 10);
       const displayName = String(s.name_zh || s.name_en || s.name || uname).trim() || uname;
+      const nmZh = String(s.name_zh || '').trim() || null;
+      const nmEn = String(s.name_en || '').trim() || null;
       const newId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       await client.query(
-        `INSERT INTO users (id, username, display_name, role, password_hash, password, student_id, department, created_at, updated_at)
-         VALUES ($1, $2, $3, 'student', $4, $5, $6, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [newId, uname, displayName, hash, plain, s.id],
+        `INSERT INTO users (id, username, display_name, name_zh, name_en, role, password_hash, password, student_id, department, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'student', $6, $7, $8, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [newId, uname, displayName, nmZh, nmEn, hash, plain, s.id],
       );
       created.push({ studentId: s.id, username: uname, password: plain, displayName, userId: newId });
     }
@@ -488,21 +948,41 @@ router.post('/users/import-student-accounts', async (req: AuthedRequest, res: Re
 // 创建新用户：system-admin 可创建管理员或教师，admin 仅可创建教师
 router.post('/users', async (req: AuthedRequest, res: Response) => {
   try {
+    await ensureUsersPrimarySubjectColumn();
+    await ensureUsersNameZhEn();
     const callerId = req.userId!;
     const callerResult = await pool.query('SELECT role FROM users WHERE id = $1', [callerId]);
     const callerRole = callerResult.rows[0]?.role as string;
 
-    const { username, displayName, role, password, department } = req.body as {
+    const { username, displayName, nameZh, nameEn, role, password, department, primarySubject } = req.body as {
       username?: string;
       displayName?: string;
+      nameZh?: string | null;
+      nameEn?: string | null;
       role?: string;
       password?: string;
       department?: string | null;
+      primarySubject?: string | null;
     };
 
     if (!username || !password || !role) {
       return res.status(400).json({ error: 'username, password and role are required' });
     }
+
+    const nz = nameZh !== undefined && nameZh !== null ? String(nameZh).trim() : '';
+    const ne = nameEn !== undefined && nameEn !== null ? String(nameEn).trim() : '';
+    const legacyDisp = displayName !== undefined && displayName !== null ? String(displayName).trim() : '';
+    let nameZhVal = nz;
+    let nameEnVal = ne;
+    if (!nameZhVal && !nameEnVal && legacyDisp) {
+      nameZhVal = legacyDisp;
+    }
+    if (!nameZhVal && !nameEnVal) {
+      return res.status(400).json({ error: 'At least one of nameZh or nameEn is required' });
+    }
+    const displayLabel = (nameZhVal || nameEnVal || username.trim()).trim();
+    const nameZhDb = nameZhVal.length > 0 ? nameZhVal : null;
+    const nameEnDb = nameEnVal.length > 0 ? nameEnVal : null;
 
     if (!VALID_ROLES.includes(role as any)) {
       return res.status(400).json({ error: 'Invalid role' });
@@ -521,10 +1001,12 @@ router.post('/users', async (req: AuthedRequest, res: Response) => {
 
     const hash = await bcrypt.hash(password, 10);
     const dept = department && String(department).trim() ? String(department).trim() : null;
+    const subjRaw = primarySubject === undefined || primarySubject === null ? '' : String(primarySubject).trim();
+    const subj = subjRaw === '' ? null : subjRaw;
     const newId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const result = await pool.query(
-      'INSERT INTO users (id, username, display_name, role, password_hash, password, department, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id, username, role, display_name, password, department, created_at',
-      [newId, username.trim(), (displayName ?? username).trim(), role, hash, password, dept],
+      'INSERT INTO users (id, username, display_name, name_zh, name_en, role, password_hash, password, department, primary_subject, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id, username, role, display_name, name_zh, name_en, password, department, primary_subject, created_at',
+      [newId, username.trim(), displayLabel, nameZhDb, nameEnDb, role, hash, password, dept, subj],
     );
 
     const row = result.rows[0] as {
@@ -532,8 +1014,11 @@ router.post('/users', async (req: AuthedRequest, res: Response) => {
       username: string;
       role: string;
       display_name: string | null;
+      name_zh: string | null;
+      name_en: string | null;
       password: string | null;
       department: string | null;
+      primary_subject: string | null;
       created_at: Date | null;
     };
 
@@ -542,9 +1027,17 @@ router.post('/users', async (req: AuthedRequest, res: Response) => {
         id: row.id,
         username: row.username,
         role: row.role,
-        displayName: row.display_name ?? '',
+        displayName: resolveUserDisplayLabel({
+          name_zh: row.name_zh,
+          name_en: row.name_en,
+          display_name: row.display_name,
+          username: row.username,
+        }),
+        nameZh: row.name_zh ?? null,
+        nameEn: row.name_en ?? null,
         password: row.password ?? password,
         department: row.department ?? null,
+        primarySubject: row.primary_subject ?? null,
         createdAt: row.created_at?.toISOString(),
       },
     });
@@ -588,45 +1081,144 @@ router.delete('/users/:id', async (req: AuthedRequest, res: Response) => {
   }
 });
 
-// 更新单个用户部门
+// 更新单个用户部门、主学科与/或姓名（至少传一项可写字段）
 router.patch('/users/:id', async (req: AuthedRequest, res: Response) => {
   try {
+    await ensureUsersPrimarySubjectColumn();
+    await ensureUsersNameZhEn();
     const callerId = req.userId!;
     const callerResult = await pool.query('SELECT role FROM users WHERE id = $1', [callerId]);
     const callerRole = callerResult.rows[0]?.role as string;
 
     const { id } = req.params;
-    const { department } = req.body as { department?: string | null };
-    const dept = department === undefined ? undefined : (department == null || String(department).trim() === '' ? null : String(department).trim());
-    if (dept === undefined) {
-      return res.status(400).json({ error: 'department is required' });
+    const body = req.body as {
+      department?: string | null;
+      primarySubject?: string | null;
+      nameZh?: string | null;
+      nameEn?: string | null;
+    };
+    const hasDept = Object.prototype.hasOwnProperty.call(body, 'department');
+    const hasSubj = Object.prototype.hasOwnProperty.call(body, 'primarySubject');
+    const hasNameZh = Object.prototype.hasOwnProperty.call(body, 'nameZh');
+    const hasNameEn = Object.prototype.hasOwnProperty.call(body, 'nameEn');
+
+    const normNameField = (v: unknown): string | null => {
+      if (v === undefined || v === null) return null;
+      const t = String(v).trim();
+      return t === '' ? null : t;
+    };
+
+    const dept = hasDept
+      ? body.department == null || String(body.department).trim() === ''
+        ? null
+        : String(body.department).trim()
+      : undefined;
+    const subj = hasSubj
+      ? body.primarySubject == null || String(body.primarySubject).trim() === ''
+        ? null
+        : String(body.primarySubject).trim()
+      : undefined;
+
+    if (!hasDept && !hasSubj && !hasNameZh && !hasNameEn) {
+      return res.status(400).json({ error: 'At least one of department, primarySubject, nameZh, nameEn is required' });
     }
-    const targetResult = await pool.query('SELECT role FROM users WHERE id = $1', [id]);
+
+    const targetResult = await pool.query(
+      'SELECT role, name_zh, name_en, username, display_name FROM users WHERE id = $1',
+      [id],
+    );
     if (targetResult.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-    const targetRole = targetResult.rows[0].role as string;
+    const cur = targetResult.rows[0] as {
+      role: string;
+      name_zh: string | null;
+      name_en: string | null;
+      username: string;
+      display_name: string | null;
+    };
+    const targetRole = cur.role as string;
     if (targetRole === 'student') {
-      return res.status(403).json({ error: 'Student accounts have no department; remove the login account to revoke access' });
+      return res.status(403).json({ error: 'Student accounts cannot be updated here; remove the login account to revoke access' });
     }
     if (callerRole === 'admin' && targetRole !== 'teacher') {
       return res.status(403).json({ error: 'Admin can only update teacher accounts' });
     }
+
+    let nextZh = normNameField(cur.name_zh);
+    let nextEn = normNameField(cur.name_en);
+    if (hasNameZh) nextZh = normNameField(body.nameZh);
+    if (hasNameEn) nextEn = normNameField(body.nameEn);
+    if (hasNameZh || hasNameEn) {
+      if (!nextZh && !nextEn) {
+        return res.status(400).json({ error: 'At least one of nameZh or nameEn is required' });
+      }
+    }
+
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let i = 1;
+    if (dept !== undefined) {
+      sets.push(`department = $${i}`);
+      params.push(dept);
+      i += 1;
+    }
+    if (subj !== undefined) {
+      sets.push(`primary_subject = $${i}`);
+      params.push(subj);
+      i += 1;
+    }
+    if (hasNameZh || hasNameEn) {
+      const displayLabel = resolveUserDisplayLabel({
+        name_zh: nextZh,
+        name_en: nextEn,
+        display_name: cur.display_name,
+        username: cur.username,
+      });
+      sets.push(`name_zh = $${i}`);
+      params.push(nextZh);
+      i += 1;
+      sets.push(`name_en = $${i}`);
+      params.push(nextEn);
+      i += 1;
+      sets.push(`display_name = $${i}`);
+      params.push(displayLabel);
+      i += 1;
+    }
+    params.push(id);
     const result = await pool.query(
-      'UPDATE users SET department = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, username, role, display_name, department, created_at',
-      [dept, id],
+      `UPDATE users SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${i} RETURNING id, username, role, display_name, name_zh, name_en, department, primary_subject, created_at`,
+      params,
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-    const row = result.rows[0] as { id: string; username: string; role: string; display_name: string | null; department: string | null; created_at: Date | null };
+    const row = result.rows[0] as {
+      id: string;
+      username: string;
+      role: string;
+      display_name: string | null;
+      name_zh: string | null;
+      name_en: string | null;
+      department: string | null;
+      primary_subject: string | null;
+      created_at: Date | null;
+    };
     res.json({
       user: {
         id: row.id,
         username: row.username,
         role: row.role,
-        displayName: row.display_name ?? '',
+        displayName: resolveUserDisplayLabel({
+          name_zh: row.name_zh,
+          name_en: row.name_en,
+          display_name: row.display_name,
+          username: row.username,
+        }),
+        nameZh: row.name_zh ?? null,
+        nameEn: row.name_en ?? null,
         department: row.department ?? null,
+        primarySubject: row.primary_subject ?? null,
         createdAt: row.created_at?.toISOString(),
       },
     });
@@ -706,10 +1298,25 @@ router.post('/users/batch-department', async (req: AuthedRequest, res: Response)
   }
 });
 
+async function loadAdminScoreMinScores(
+  academicYearId: string,
+  term: Term,
+  schoolSegmentId: string,
+): Promise<Record<ReportScoreLetterGrade, number>> {
+  const seg = String(schoolSegmentId ?? '').trim();
+  const r = await pool.query(
+    `SELECT min_scores FROM student_report_score_grade_bands
+     WHERE academic_year_id = $1 AND term = $2 AND school_segment_id = $3`,
+    [academicYearId, term, seg],
+  );
+  return mergeReportScoreGradeMinScores(r.rows[0]?.min_scores as Partial<Record<string, number>> | undefined);
+}
+
 async function loadTemplateDetail(templateId: string) {
   const tpl = (await pool.query(
     `SELECT id, academic_year_id, term, title, status, homeroom_comment_mode,
-            template_type, is_active, published_at, released_at
+            template_type, is_active, published_at, released_at,
+            COALESCE(school_segment_id, '') AS school_segment_id
      FROM student_report_templates
      WHERE id = $1
      LIMIT 1`,
@@ -726,12 +1333,13 @@ async function loadTemplateDetail(templateId: string) {
       is_active: boolean | null;
       published_at: Date | null;
       released_at: Date | null;
+      school_segment_id: string;
     }
     | undefined;
   if (!tpl) return null;
   const rows = (await pool.query(
     `SELECT s.id AS subject_id, s.subject_key, s.subject_name, s.subject_name_zh, s.subject_name_en,
-            s.module_type, s.enable_score, s.enable_teacher_comment, s.score_visibility, s.sort_order,
+            s.module_type, s.enable_score, s.enable_teacher_comment, s.enable_learning_quality, s.score_visibility, s.sort_order,
             d.id AS dimension_id, d.dimension_key, d.dimension_label, d.dimension_label_zh, d.dimension_label_en, d.sort_order AS dimension_sort,
             ld.level, ld.description
      FROM student_report_template_subjects s
@@ -749,6 +1357,7 @@ async function loadTemplateDetail(templateId: string) {
     module_type: ModuleType | null;
     enable_score: boolean | null;
     enable_teacher_comment: boolean | null;
+    enable_learning_quality: boolean | null;
     score_visibility: ScoreVisibility | null;
     sort_order: number;
     dimension_id: string | null;
@@ -769,6 +1378,7 @@ async function loadTemplateDetail(templateId: string) {
     moduleType: ModuleType;
     enableScore: boolean;
     enableTeacherComment: boolean;
+    enableLearningQuality: boolean;
     scoreVisibility: ScoreVisibility;
     sortOrder: number;
     dimensions: Array<{
@@ -800,6 +1410,7 @@ async function loadTemplateDetail(templateId: string) {
       moduleType: (row.module_type ?? 'subject_score') as ModuleType,
       enableScore: row.enable_score !== false,
       enableTeacherComment: row.enable_teacher_comment !== false,
+      enableLearningQuality: row.enable_learning_quality !== false,
       scoreVisibility: (row.score_visibility ?? 'teacher_homeroom_admin') as ScoreVisibility,
       sortOrder: row.sort_order,
       dimensions: [],
@@ -825,6 +1436,8 @@ async function loadTemplateDetail(templateId: string) {
       .sort((a, b) => a.sortOrder - b.sortOrder);
   }
   const subjects = Array.from(subjectMap.values()).sort((a, b) => a.sortOrder - b.sortOrder);
+  const schoolSegmentId = String(tpl.school_segment_id ?? '').trim();
+  const scoreGradeMinScores = await loadAdminScoreMinScores(tpl.academic_year_id, tpl.term, schoolSegmentId);
   return {
     id: tpl.id,
     academicYearId: tpl.academic_year_id,
@@ -836,6 +1449,8 @@ async function loadTemplateDetail(templateId: string) {
     publishedAt: tpl.published_at?.toISOString() ?? null,
     releasedAt: tpl.released_at?.toISOString() ?? null,
     homeroomCommentMode: tpl.homeroom_comment_mode ?? 'optional',
+    schoolSegmentId,
+    scoreGradeMinScores,
     subjects,
   };
 }
@@ -859,7 +1474,8 @@ router.get('/report-templates', async (req: AuthedRequest, res: Response) => {
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = (await pool.query(
       `SELECT t.id, t.academic_year_id, t.term, t.title, t.status, t.homeroom_comment_mode,
-              t.template_type, t.is_active, t.published_at, t.released_at, t.updated_at, ay.name AS academic_year_name
+              t.template_type, t.is_active, t.published_at, t.released_at, t.updated_at,
+              COALESCE(t.school_segment_id, '') AS school_segment_id, ay.name AS academic_year_name
        FROM student_report_templates t
        JOIN academic_years ay ON ay.id = t.academic_year_id
        ${whereSql}
@@ -878,12 +1494,176 @@ router.get('/report-templates', async (req: AuthedRequest, res: Response) => {
       publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
       releasedAt: (r.released_at as Date | null)?.toISOString() ?? null,
       homeroomCommentMode: (r.homeroom_comment_mode as HomeroomCommentMode | null) ?? 'optional',
+      schoolSegmentId: String(r.school_segment_id ?? '').trim(),
       updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
     }));
     res.json({ templates });
   } catch (error) {
     console.error('Get report templates error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 学年学科目标维度框架（用于期中/期末模板快速复用）
+router.get('/report-dimension-presets/:academicYearId', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureReportTemplateTables();
+    const academicYearId = String(req.params.academicYearId ?? '').trim();
+    if (!academicYearId) return res.status(400).json({ error: 'academicYearId required' });
+    const row = (await pool.query(
+      `SELECT academic_year_id, homeroom_comment_mode, payload, updated_at
+       FROM student_report_year_dimension_presets
+       WHERE academic_year_id = $1
+       LIMIT 1`,
+      [academicYearId]
+    )).rows[0] as
+      | {
+        academic_year_id: string;
+        homeroom_comment_mode: HomeroomCommentMode | null;
+        payload: unknown;
+        updated_at: Date | null;
+      }
+      | undefined;
+    if (!row) return res.json({ preset: null });
+    const parsed = parsePresetPayload(row.payload);
+    const preset = {
+      academicYearId: row.academic_year_id,
+      homeroomCommentMode: row.homeroom_comment_mode ?? 'optional',
+      subjects: parsed.subjects,
+      stageInclusion: parsed.stageInclusion,
+      examConfigs: parsed.examConfigs,
+      unifiedLevelDescriptions: parsed.unifiedLevelDescriptions,
+      updatedAt: row.updated_at?.toISOString() ?? null,
+    };
+    return res.json({ preset });
+  } catch (error) {
+    console.error('Get report dimension preset error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/report-dimension-presets/:academicYearId', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureReportTemplateTables();
+    const academicYearId = String(req.params.academicYearId ?? '').trim();
+    if (!academicYearId) return res.status(400).json({ error: 'academicYearId required' });
+    const homeroomCommentMode = (req.body?.homeroomCommentMode ?? 'optional') as HomeroomCommentMode;
+    if (!['disabled', 'optional', 'required'].includes(homeroomCommentMode)) {
+      return res.status(400).json({ error: 'homeroomCommentMode must be disabled|optional|required' });
+    }
+    const existingRow = (
+      await pool.query(`SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`, [academicYearId])
+    ).rows[0] as { payload: unknown } | undefined;
+    const existing = existingRow
+      ? parsePresetPayload(existingRow.payload)
+      : {
+          subjects: [] as ReturnType<typeof sanitizePresetSubjects>,
+          stageInclusion: {} as Record<string, string[]>,
+          examConfigs: {} as ReturnType<typeof sanitizeExamConfigs>,
+          unifiedLevelDescriptions: {} as Partial<Record<TargetLevel, string>>,
+        };
+    const newSubjects = sanitizePresetSubjects(req.body?.subjects);
+    const subjectsToStore = newSubjects.length > 0 ? newSubjects : existing.subjects;
+    const stageInclusion =
+      req.body?.stageInclusion !== undefined && req.body?.stageInclusion !== null
+        ? extractStageInclusion({ stageInclusion: req.body.stageInclusion })
+        : existing.stageInclusion;
+    const examConfigs =
+      req.body?.examConfigs !== undefined && req.body?.examConfigs !== null
+        ? sanitizeExamConfigs({ examConfigs: req.body.examConfigs })
+        : existing.examConfigs;
+    const unifiedLevelDescriptions =
+      req.body?.unifiedLevelDescriptions !== undefined && req.body?.unifiedLevelDescriptions !== null
+        ? sanitizeUnifiedLevelDescriptions(req.body.unifiedLevelDescriptions)
+        : existing.unifiedLevelDescriptions;
+    const payload = JSON.stringify({ subjects: subjectsToStore, stageInclusion, examConfigs, unifiedLevelDescriptions });
+    await pool.query(
+      `INSERT INTO student_report_year_dimension_presets
+        (academic_year_id, homeroom_comment_mode, payload, updated_by, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, CURRENT_TIMESTAMP)
+       ON CONFLICT (academic_year_id) DO UPDATE
+       SET homeroom_comment_mode = EXCLUDED.homeroom_comment_mode,
+           payload = EXCLUDED.payload,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = CURRENT_TIMESTAMP`,
+      [academicYearId, homeroomCommentMode, payload, req.userId ?? null]
+    );
+    return res.json({
+      success: true,
+      preset: {
+        academicYearId,
+        homeroomCommentMode,
+        subjects: subjectsToStore,
+        stageInclusion,
+        examConfigs,
+        unifiedLevelDescriptions,
+      },
+    });
+  } catch (error) {
+    console.error('Upsert report dimension preset error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/report-score-grade-bands', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureReportTemplateTables();
+    const academicYearId = String(req.query.academicYearId ?? '').trim();
+    const term = req.query.term === 'Semester 1' || req.query.term === 'Semester 2' ? (req.query.term as Term) : null;
+    const schoolSegmentId = String(req.query.schoolSegmentId ?? '').trim();
+    if (!academicYearId || !term) {
+      return res.status(400).json({ error: 'academicYearId and term are required' });
+    }
+    const minScores = await loadAdminScoreMinScores(academicYearId, term, schoolSegmentId);
+    return res.json({ academicYearId, term, schoolSegmentId, minScores });
+  } catch (error) {
+    console.error('Get report score grade bands error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/report-score-grade-bands', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureReportTemplateTables();
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const term = req.body?.term === 'Semester 1' || req.body?.term === 'Semester 2' ? (req.body.term as Term) : null;
+    const schoolSegmentId = String(req.body?.schoolSegmentId ?? '').trim();
+    const raw = req.body?.minScores;
+    if (!academicYearId || !term) {
+      return res.status(400).json({ error: 'academicYearId and term are required' });
+    }
+    if (!schoolSegmentId) {
+      return res.status(400).json({ error: 'schoolSegmentId is required' });
+    }
+    if (!raw || typeof raw !== 'object') {
+      return res.status(400).json({ error: 'minScores object is required' });
+    }
+    const merged = mergeReportScoreGradeMinScores(raw as Partial<Record<string, number>>);
+    for (const g of REPORT_SCORE_LETTER_GRADES) {
+      const n = merged[g];
+      if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 100) {
+        return res.status(400).json({ error: `Invalid min score for ${g}` });
+      }
+    }
+    for (let i = 0; i < REPORT_SCORE_LETTER_GRADES.length - 1; i += 1) {
+      const hi = REPORT_SCORE_LETTER_GRADES[i];
+      const lo = REPORT_SCORE_LETTER_GRADES[i + 1];
+      if (merged[hi] < merged[lo]) {
+        return res.status(400).json({ error: 'Each grade must have a min score ≥ the next grade (A+ down to D)' });
+      }
+    }
+    await pool.query(
+      `INSERT INTO student_report_score_grade_bands
+        (academic_year_id, term, school_segment_id, min_scores, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, CURRENT_TIMESTAMP)
+       ON CONFLICT (academic_year_id, term, school_segment_id)
+       DO UPDATE SET min_scores = EXCLUDED.min_scores, updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP`,
+      [academicYearId, term, schoolSegmentId, JSON.stringify(merged), req.userId ?? null],
+    );
+    return res.json({ success: true, academicYearId, term, schoolSegmentId, minScores: merged });
+  } catch (error) {
+    console.error('Put report score grade bands error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -896,33 +1676,36 @@ router.post('/report-templates', async (req: AuthedRequest, res: Response) => {
     const term = req.body?.term === 'Semester 1' || req.body?.term === 'Semester 2' ? req.body.term as Term : null;
     const title = typeof req.body?.title === 'string' ? req.body.title.trim() : null;
     const sourceTemplateId = typeof req.body?.sourceTemplateId === 'string' ? req.body.sourceTemplateId.trim() : '';
+    let schoolSegmentId = typeof req.body?.schoolSegmentId === 'string' ? req.body.schoolSegmentId.trim() : '';
     if (!academicYearId || !term) {
       return res.status(400).json({ error: 'academicYearId and term are required' });
     }
     const templateId = `srt-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     await client.query('BEGIN');
     let homeroomCommentMode: HomeroomCommentMode = 'optional';
+    let sourceTemplate: Awaited<ReturnType<typeof loadTemplateDetail>> = null;
     if (sourceTemplateId) {
-      const sourceTemplate = await loadTemplateDetail(sourceTemplateId);
+      sourceTemplate = await loadTemplateDetail(sourceTemplateId);
       if (!sourceTemplate) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'sourceTemplateId not found' });
       }
       homeroomCommentMode = sourceTemplate.homeroomCommentMode;
+      if (!schoolSegmentId) schoolSegmentId = sourceTemplate.schoolSegmentId ?? '';
     }
     await client.query(
       `INSERT INTO student_report_templates
-        (id, academic_year_id, term, title, status, template_type, is_active, homeroom_comment_mode, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, 'draft', 'portrait-evaluation', TRUE, $5, $6, $7)`,
-      [templateId, academicYearId, term, title || null, homeroomCommentMode, req.userId ?? null, req.userId ?? null]
+        (id, academic_year_id, term, title, status, template_type, is_active, homeroom_comment_mode, school_segment_id, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, 'draft', 'portrait-evaluation', TRUE, $5, $6, $7, $8)`,
+      [templateId, academicYearId, term, title || null, homeroomCommentMode, schoolSegmentId, req.userId ?? null, req.userId ?? null]
     );
-    if (sourceTemplateId) {
-      const sourceTemplate = await loadTemplateDetail(sourceTemplateId);
-      if (sourceTemplate) {
+    if (sourceTemplateId && sourceTemplate) {
         const usedSubjectKeys = new Set<string>();
         for (let i = 0; i < sourceTemplate.subjects.length; i += 1) {
           const s = sourceTemplate.subjects[i];
-          const baseSubjectKey = normalizeIdentifier(String(s.subjectNameEn ?? s.subjectName ?? '').trim());
+          const baseSubjectKey = normalizeIdentifier(
+            String((s as { subjectKey?: string }).subjectKey ?? s.subjectNameEn ?? s.subjectName ?? '').trim(),
+          );
           let subjectKey = baseSubjectKey || `subject_${i + 1}`;
           let seq = 2;
           while (usedSubjectKeys.has(subjectKey)) {
@@ -933,8 +1716,8 @@ router.post('/report-templates', async (req: AuthedRequest, res: Response) => {
           const subjectId = `srts-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
           await client.query(
             `INSERT INTO student_report_template_subjects
-              (id, template_id, subject_key, subject_name, subject_name_zh, subject_name_en, module_type, enable_score, enable_teacher_comment, score_visibility, sort_order)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              (id, template_id, subject_key, subject_name, subject_name_zh, subject_name_en, module_type, enable_score, enable_teacher_comment, enable_learning_quality, score_visibility, sort_order)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
             [
               subjectId,
               templateId,
@@ -945,6 +1728,7 @@ router.post('/report-templates', async (req: AuthedRequest, res: Response) => {
               s.moduleType ?? 'subject_score',
               s.enableScore !== false,
               s.enableTeacherComment !== false,
+              s.enableLearningQuality !== false,
               s.scoreVisibility ?? 'teacher_homeroom_admin',
               i,
             ],
@@ -987,7 +1771,6 @@ router.post('/report-templates', async (req: AuthedRequest, res: Response) => {
             }
           }
         }
-      }
     }
     await client.query('COMMIT');
     const template = await loadTemplateDetail(templateId);
@@ -1038,11 +1821,13 @@ router.put('/report-templates/:templateId', async (req: AuthedRequest, res: Resp
       return res.status(400).json({ error: 'homeroomCommentMode must be disabled|optional|required' });
     }
     const subjects = Array.isArray(req.body?.subjects) ? req.body.subjects as Array<{
+      subjectKey?: string;
       subjectNameZh: string;
       subjectNameEn: string;
       moduleType?: ModuleType;
       enableScore?: boolean;
       enableTeacherComment?: boolean;
+      enableLearningQuality?: boolean;
       scoreVisibility?: ScoreVisibility;
       dimensions?: Array<{
         dimensionLabelZh: string;
@@ -1056,12 +1841,19 @@ router.put('/report-templates/:templateId', async (req: AuthedRequest, res: Resp
       `UPDATE student_report_templates
        SET title = $1,
            status = $2,
-           released_at = CASE WHEN $2 IN ('draft', 'published') THEN NULL ELSE released_at END,
+           released_at = CASE WHEN $6 THEN NULL ELSE released_at END,
            homeroom_comment_mode = $3,
            updated_by = $4,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $5`,
-      [title || null, status, homeroomCommentMode, req.userId ?? null, templateId]
+      [
+        title || null,
+        status,
+        homeroomCommentMode,
+        req.userId ?? null,
+        templateId,
+        status === 'draft' || status === 'published',
+      ]
     );
 
     await client.query(
@@ -1090,8 +1882,12 @@ router.put('/report-templates/:templateId', async (req: AuthedRequest, res: Resp
       const moduleType = (s.moduleType ?? 'subject_score') as ModuleType;
       const enableScore = s.enableScore ?? moduleType === 'subject_score';
       const enableTeacherComment = s.enableTeacherComment ?? true;
+      const enableLearningQuality = s.enableLearningQuality !== false;
       const scoreVisibility = (s.scoreVisibility ?? 'teacher_homeroom_admin') as ScoreVisibility;
-      const baseSubjectKey = normalizeIdentifier(subjectNameEn);
+      const clientKeyRaw = String(s.subjectKey ?? '').trim();
+      const baseSubjectKey = clientKeyRaw
+        ? normalizeIdentifier(clientKeyRaw)
+        : normalizeIdentifier(subjectNameEn);
       let subjectKey = baseSubjectKey;
       let subjectSeq = 2;
       while (usedSubjectKeys.has(subjectKey)) {
@@ -1103,9 +1899,22 @@ router.put('/report-templates/:templateId', async (req: AuthedRequest, res: Resp
       const subjectId = `srts-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
       await client.query(
         `INSERT INTO student_report_template_subjects
-          (id, template_id, subject_key, subject_name, subject_name_zh, subject_name_en, module_type, enable_score, enable_teacher_comment, score_visibility, sort_order)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [subjectId, templateId, subjectKey, subjectName, subjectNameZh, subjectNameEn, moduleType, enableScore, enableTeacherComment, scoreVisibility, i]
+          (id, template_id, subject_key, subject_name, subject_name_zh, subject_name_en, module_type, enable_score, enable_teacher_comment, enable_learning_quality, score_visibility, sort_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          subjectId,
+          templateId,
+          subjectKey,
+          subjectName,
+          subjectNameZh,
+          subjectNameEn,
+          moduleType,
+          enableScore,
+          enableTeacherComment,
+          enableLearningQuality,
+          scoreVisibility,
+          i,
+        ],
       );
       const dimensions = Array.isArray(s.dimensions) ? s.dimensions : [];
       const usedDimensionKeys = new Set<string>();
@@ -1149,7 +1958,16 @@ router.put('/report-templates/:templateId', async (req: AuthedRequest, res: Resp
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Upsert report template error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const msg = error instanceof Error ? error.message : String(error);
+    const isPgLen =
+      /value too long|character varying|text data.*would be truncated/i.test(msg) ||
+      String((error as { code?: string })?.code) === '22001';
+    res.status(500).json({
+      error: isPgLen
+        ? 'Save failed: a name or description exceeds database limits. Try shortening dimension or subject text, then save again.'
+        : 'Internal server error',
+      detail: process.env.NODE_ENV !== 'production' ? msg : undefined,
+    });
   } finally {
     client.release();
   }
@@ -1264,14 +2082,14 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
       `SELECT class_id, teacher_id, teacher_name
        FROM (
          SELECT c.id AS class_id, u.id AS teacher_id,
-                COALESCE(NULLIF(u.display_name, ''), u.username, u.id) AS teacher_name
+                COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
          FROM classes c
          JOIN class_teacher_assignments a ON a.class_id = c.id AND a.unassigned_at IS NULL
          JOIN users u ON u.id = a.teacher_id
          WHERE c.academic_year_id = $1
          UNION ALL
          SELECT c.id AS class_id, u.id AS teacher_id,
-                COALESCE(NULLIF(u.display_name, ''), u.username, u.id) AS teacher_name
+                COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
          FROM classes c
          JOIN users u ON u.id = c.teacher_id
          WHERE c.academic_year_id = $1 AND c.teacher_id IS NOT NULL
@@ -1457,14 +2275,15 @@ router.get('/staffing/assignments', async (req: AuthedRequest, res: Response) =>
       return res.status(400).json({ error: 'academicYearId is required' });
     }
     const rows = (await pool.query(
-      `SELECT a.id, a.academic_year_id, a.class_id, a.subject_key, a.subject_name, a.teacher_id, a.updated_at,
+      `SELECT a.id, a.academic_year_id, a.class_id, a.subject_key, a.subject_name, a.teacher_id,
+              COALESCE(a.teacher_slot, 0)::int AS teacher_slot, a.updated_at,
               c.name AS class_name, c.grade AS class_grade,
-              COALESCE(NULLIF(u.display_name, ''), u.username, u.id) AS teacher_name
+              COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
        FROM class_subject_teacher_assignments a
        JOIN classes c ON c.id = a.class_id
        JOIN users u ON u.id = a.teacher_id
        WHERE a.academic_year_id = $1
-       ORDER BY c.grade ASC, c.name ASC, a.subject_name ASC`,
+       ORDER BY c.grade ASC, c.name ASC, a.subject_name ASC, a.teacher_slot ASC`,
       [academicYearId]
     )).rows;
     const assignments = rows.map((r) => ({
@@ -1477,6 +2296,7 @@ router.get('/staffing/assignments', async (req: AuthedRequest, res: Response) =>
       subjectName: r.subject_name as string,
       teacherId: r.teacher_id as string,
       teacherName: r.teacher_name as string,
+      teacherSlot: Number(r.teacher_slot ?? 0) === 1 ? 1 : 0,
       updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
     }));
     return res.json({ assignments });
@@ -1494,6 +2314,7 @@ router.put('/staffing/assignments', async (req: AuthedRequest, res: Response) =>
     const subjectKey = String(req.body?.subjectKey ?? '').trim();
     const subjectName = String(req.body?.subjectName ?? '').trim();
     const teacherId = String(req.body?.teacherId ?? '').trim();
+    const teacherSlot = req.body?.teacherSlot === 1 ? 1 : 0;
     if (!academicYearId || !classId || !subjectKey || !subjectName || !teacherId) {
       return res.status(400).json({ error: 'academicYearId, classId, subjectKey, subjectName, teacherId are required' });
     }
@@ -1514,16 +2335,16 @@ router.put('/staffing/assignments', async (req: AuthedRequest, res: Response) =>
     const id = `csta-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const result = await pool.query(
       `INSERT INTO class_subject_teacher_assignments
-        (id, academic_year_id, class_id, subject_key, subject_name, teacher_id, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-       ON CONFLICT (academic_year_id, class_id, subject_key)
+        (id, academic_year_id, class_id, subject_key, subject_name, teacher_id, teacher_slot, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+       ON CONFLICT (academic_year_id, class_id, subject_key, teacher_slot)
        DO UPDATE SET
          subject_name = EXCLUDED.subject_name,
          teacher_id = EXCLUDED.teacher_id,
          updated_by = EXCLUDED.updated_by,
          updated_at = CURRENT_TIMESTAMP
        RETURNING id`,
-      [id, academicYearId, classId, subjectKey, subjectName, teacherId, req.userId ?? null]
+      [id, academicYearId, classId, subjectKey, subjectName, teacherId, teacherSlot, req.userId ?? null]
     );
     return res.json({ success: true, id: result.rows[0]?.id ?? id });
   } catch (error) {
@@ -1541,11 +2362,21 @@ router.delete('/staffing/assignments/:academicYearId/:classId/:subjectKey', asyn
     if (!academicYearId || !classId || !subjectKey) {
       return res.status(400).json({ error: 'academicYearId, classId, subjectKey are required' });
     }
-    await pool.query(
-      `DELETE FROM class_subject_teacher_assignments
-       WHERE academic_year_id = $1 AND class_id = $2 AND subject_key = $3`,
-      [academicYearId, classId, subjectKey]
-    );
+    const slotQ = typeof req.query.slot === 'string' ? req.query.slot.trim() : '';
+    const teacherSlot = slotQ === '0' || slotQ === '1' ? Number(slotQ) : null;
+    if (teacherSlot === 0 || teacherSlot === 1) {
+      await pool.query(
+        `DELETE FROM class_subject_teacher_assignments
+         WHERE academic_year_id = $1 AND class_id = $2 AND subject_key = $3 AND teacher_slot = $4`,
+        [academicYearId, classId, subjectKey, teacherSlot],
+      );
+    } else {
+      await pool.query(
+        `DELETE FROM class_subject_teacher_assignments
+         WHERE academic_year_id = $1 AND class_id = $2 AND subject_key = $3`,
+        [academicYearId, classId, subjectKey],
+      );
+    }
     return res.json({ success: true });
   } catch (error) {
     console.error('Delete staffing assignment error:', error);
@@ -1554,21 +2385,182 @@ router.delete('/staffing/assignments/:academicYearId/:classId/:subjectKey', asyn
 });
 
 router.delete('/report-templates/:templateId', async (req: AuthedRequest, res: Response) => {
+  const client = await pool.connect();
   try {
     await ensureReportTemplateTables();
     const templateId = String(req.params.templateId ?? '').trim();
     if (!templateId) return res.status(400).json({ error: 'templateId required' });
-    const result = await pool.query(
+
+    // FK is ON DELETE SET NULL, but idx_student_term_reports_student_term_template_unique
+    // uses COALESCE(template_id,''). Multiple rows per student/term with different templates
+    // would both become '' and violate the unique index — delete filled reports first.
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM student_term_reports WHERE template_id = $1`, [templateId]);
+    const result = await client.query(
       `DELETE FROM student_report_templates
        WHERE id = $1
        RETURNING id`,
       [templateId],
     );
-    if ((result.rowCount ?? 0) === 0) return res.status(404).json({ error: 'Template not found' });
+    if ((result.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    await client.query('COMMIT');
     res.json({ success: true });
   } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* ignore rollback errors */
+    }
     console.error('Delete report template error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// —— 组织架构：部门树（全校共享；仅 system-admin 可写） ——
+router.get('/org-departments', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureOrgDepartmentsTable();
+    const result = await pool.query(
+      `SELECT id, name, parent_id AS "parentId", sort_order AS "sortOrder"
+       FROM org_departments
+       ORDER BY parent_id NULLS FIRST, sort_order ASC, name ASC`
+    );
+    return res.json({ departments: result.rows });
+  } catch (error) {
+    console.error('List org departments error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/org-departments', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureOrgDepartmentsTable();
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: only system-admin can modify org structure' });
+    }
+    const name = String((req.body as { name?: string })?.name ?? '').trim();
+    if (!name || name.length > 160) {
+      return res.status(400).json({ error: 'name is required (max 160 chars)' });
+    }
+    const parentIdRaw = (req.body as { parentId?: string | null })?.parentId;
+    const parentId = parentIdRaw == null || parentIdRaw === '' ? null : String(parentIdRaw).trim();
+    if (!parentId) {
+      const existingRoot = await pool.query('SELECT id FROM org_departments WHERE parent_id IS NULL LIMIT 1');
+      if ((existingRoot.rowCount ?? 0) > 0) {
+        return res.status(400).json({ error: 'School root already exists; add departments under it or delete the root first.' });
+      }
+    }
+    if (parentId) {
+      const p = await pool.query('SELECT id FROM org_departments WHERE id = $1', [parentId]);
+      if ((p.rowCount ?? 0) === 0) return res.status(400).json({ error: 'parentId not found' });
+    }
+    const sortResult = await pool.query(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 AS n
+       FROM org_departments
+       WHERE parent_id IS NOT DISTINCT FROM $1`,
+      [parentId]
+    );
+    const sortOrder = Number(sortResult.rows[0]?.n ?? 0);
+    const id = `orgd-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    await pool.query(
+      `INSERT INTO org_departments (id, name, parent_id, sort_order, updated_at)
+       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)`,
+      [id, name, parentId, sortOrder]
+    );
+    const row = (await pool.query(
+      `SELECT id, name, parent_id AS "parentId", sort_order AS "sortOrder"
+       FROM org_departments WHERE id = $1`,
+      [id]
+    )).rows[0];
+    return res.status(201).json({ department: row });
+  } catch (error) {
+    console.error('Create org department error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.patch('/org-departments/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureOrgDepartmentsTable();
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: only system-admin can modify org structure' });
+    }
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const exists = await pool.query('SELECT id FROM org_departments WHERE id = $1', [id]);
+    if ((exists.rowCount ?? 0) === 0) return res.status(404).json({ error: 'Department not found' });
+
+    const body = req.body as { name?: string; parentId?: string | null; sortOrder?: number };
+    if (body.name !== undefined) {
+      const name = String(body.name ?? '').trim();
+      if (!name || name.length > 160) return res.status(400).json({ error: 'invalid name' });
+      await pool.query(
+        `UPDATE org_departments SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [name, id]
+      );
+    }
+    if (body.parentId !== undefined) {
+      let newParent: string | null = body.parentId == null || body.parentId === ''
+        ? null
+        : String(body.parentId).trim();
+      if (newParent === id) {
+        return res.status(400).json({ error: 'Cannot set parent to self' });
+      }
+      if (newParent) {
+        const p = await pool.query('SELECT id FROM org_departments WHERE id = $1', [newParent]);
+        if ((p.rowCount ?? 0) === 0) return res.status(400).json({ error: 'parentId not found' });
+        const cycle = await isOrgDeptUnderAncestor(id, newParent);
+        if (cycle) {
+          return res.status(400).json({ error: 'Cannot move under own descendant' });
+        }
+      }
+      await pool.query(
+        `UPDATE org_departments SET parent_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [newParent, id]
+      );
+    }
+    if (body.sortOrder !== undefined) {
+      const n = Number(body.sortOrder);
+      if (!Number.isFinite(n)) return res.status(400).json({ error: 'invalid sortOrder' });
+      await pool.query(
+        `UPDATE org_departments SET sort_order = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [Math.floor(n), id]
+      );
+    }
+    const row = (await pool.query(
+      `SELECT id, name, parent_id AS "parentId", sort_order AS "sortOrder"
+       FROM org_departments WHERE id = $1`,
+      [id]
+    )).rows[0];
+    return res.json({ department: row });
+  } catch (error) {
+    console.error('Patch org department error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/org-departments/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    await ensureOrgDepartmentsTable();
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: only system-admin can modify org structure' });
+    }
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const result = await pool.query('DELETE FROM org_departments WHERE id = $1 RETURNING id', [id]);
+    if ((result.rowCount ?? 0) === 0) return res.status(404).json({ error: 'Department not found' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete org department error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

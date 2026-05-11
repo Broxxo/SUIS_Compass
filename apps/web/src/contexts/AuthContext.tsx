@@ -19,6 +19,8 @@ function toUser(r: {
   username: string;
   role: string;
   displayName: string;
+  nameZh?: string | null;
+  nameEn?: string | null;
   studentId?: string | null;
 }): User {
   return {
@@ -26,6 +28,8 @@ function toUser(r: {
     username: r.username,
     role: r.role as User['role'],
     displayName: r.displayName,
+    nameZh: r.nameZh ?? null,
+    nameEn: r.nameEn ?? null,
     studentId: r.studentId ?? null,
   };
 }
@@ -57,10 +61,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (parsed.user && typeof parsed.user === 'object' && 'id' in parsed.user) {
-        const raw = parsed.user as { id: string; username: string; role: string; displayName: string };
-        const normalized = raw.username === 'Admin'
-          ? { ...raw, role: (raw.role === 'admin' ? 'system-admin' : raw.role) as 'system-admin' | 'admin' | 'teacher', displayName: '系统管理员' }
-          : raw;
+        const raw = parsed.user as {
+          id: string;
+          username: string;
+          role: string;
+          displayName: string;
+          nameZh?: string | null;
+          nameEn?: string | null;
+        };
+        const normalized =
+          raw.username === 'Admin'
+            ? {
+                ...raw,
+                role: (raw.role === 'admin' ? 'system-admin' : raw.role) as 'system-admin' | 'admin' | 'teacher',
+                displayName: '系统管理员',
+                nameZh: raw.nameZh ?? '系统管理员',
+                nameEn: raw.nameEn ?? null,
+              }
+            : raw;
         const userObj = toUser(normalized);
         setUser(userObj);
         if (normalized !== raw) {
@@ -79,7 +97,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await api.login(username, password) as {
           success?: boolean;
           token?: string;
-          user?: { id: string; username: string; role: string; displayName: string; studentId?: string | null };
+          user?: {
+            id: string;
+            username: string;
+            role: string;
+            displayName: string;
+            nameZh?: string | null;
+            nameEn?: string | null;
+            studentId?: string | null;
+          };
         };
         if (data.success && data.token && data.user) {
           const u = toUser(data.user);

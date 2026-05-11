@@ -7,6 +7,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { LogOut, ArrowLeft, User as UserIcon } from 'lucide-react';
 import { Button } from './ui/button';
 import type { User } from '../types';
+import { formatNavUserLabel } from '../lib/userDisplay';
 
 interface AppTopBarProps {
   /** 中间显示的功能名称（单语：中文界面用中文，英文界面用英文） */
@@ -35,6 +36,7 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const roleLabel = user?.role ? ROLE_LABELS[user.role][isZh ? 'zh' : 'en'] : '';
+  const navUserLabel = user ? formatNavUserLabel(user) : '';
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -68,21 +70,29 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
           ) : (
             <img src="/suislogo.png" alt="SUIS" className="h-8 w-auto object-contain flex-shrink-0" />
           )}
-          <div className="relative" ref={userMenuRef}>
+          <div className="relative flex items-center gap-2 min-w-0" ref={userMenuRef}>
             <Button
               variant="outline"
               size="icon"
               type="button"
               onClick={() => user && setUserMenuOpen((o) => !o)}
               className="h-9 w-9 rounded-full flex-shrink-0 p-0"
-              title={user ? user.displayName || user.username : isZh ? '未登录' : 'Not logged in'}
+              title={user ? navUserLabel : isZh ? '未登录' : 'Not logged in'}
             >
               <UserIcon className="h-4 w-4" />
             </Button>
+            {user && (
+              <span
+                className="hidden sm:inline-block text-sm font-medium text-slate-700 truncate max-w-[10rem] md:max-w-[14rem]"
+                title={navUserLabel}
+              >
+                {navUserLabel}
+              </span>
+            )}
             {user && userMenuOpen && (
               <div className="absolute left-0 top-full mt-1 min-w-[140px] rounded-xl border border-slate-200 bg-white shadow-lg py-1 z-30">
-                <div className="px-3 py-2 text-xs text-slate-500 border-b border-slate-100 truncate max-w-[200px]">
-                  {user.displayName || user.username}
+                <div className="px-3 py-2 text-xs text-slate-500 border-b border-slate-100 truncate max-w-[240px]">
+                  {navUserLabel}
                   {roleLabel && <span className="text-slate-400">（{roleLabel}）</span>}
                 </div>
                 {(user.role === 'system-admin' || user.role === 'admin') && (

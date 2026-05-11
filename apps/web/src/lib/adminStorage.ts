@@ -14,6 +14,8 @@ export type AdminUser = User & {
   createdAt?: string;
   password?: string | null;
   department?: string | null;
+  /** 主学科；空或 null 表示无 */
+  primarySubject?: string | null;
   studentId?: string | null;
   studentNameZh?: string | null;
   studentNameEn?: string | null;
@@ -38,8 +40,11 @@ function getPresetAsAdminUsers(): AdminUser[] {
     username: u.username,
     role: u.role,
     displayName: u.displayName,
+    nameZh: u.nameZh ?? null,
+    nameEn: u.nameEn ?? null,
     password: u.password,
     department: null,
+    primarySubject: null,
     createdAt: undefined,
   }));
 }
@@ -59,7 +64,16 @@ function saveToLocal(users: AdminUser[]): void {
 export function authenticateLocalAdminUser(username: string, password: string): User | null {
   const list = loadFromLocal();
   const u = list.find((x) => x.username === username && (x.password ?? '') === password);
-  return u ? { id: u.id, username: u.username, role: u.role, displayName: u.displayName } : null;
+  return u
+    ? {
+        id: u.id,
+        username: u.username,
+        role: u.role,
+        displayName: u.displayName,
+        nameZh: u.nameZh ?? null,
+        nameEn: u.nameEn ?? null,
+      }
+    : null;
 }
 
 /** 加载用户列表：云端时先拉 API；教职工列表写入本地缓存。scope=students 时仅云端可用，本地模式返回空数组。 */
@@ -94,20 +108,36 @@ export async function importStudentAccounts(items: { studentId: string; password
 export async function createUser(input: {
   username: string;
   displayName?: string;
+  nameZh?: string | null;
+  nameEn?: string | null;
   role: User['role'];
   password: string;
   department?: string | null;
+  primarySubject?: string | null;
 }): Promise<AdminUser> {
   const id = `admin-user-${Date.now()}`;
   const now = new Date().toISOString();
+  const ps = input.primarySubject?.trim() || null;
+  const nz = (input.nameZh ?? '').trim();
+  const ne = (input.nameEn ?? '').trim();
+  const legacy = (input.displayName ?? '').trim();
+  let nameZhVal = nz;
+  let nameEnVal = ne;
+  if (!nameZhVal && !nameEnVal && legacy) {
+    nameZhVal = legacy;
+  }
+  const displayName = nameZhVal || nameEnVal || input.username;
   const user: AdminUser = {
     id,
     username: input.username,
-    displayName: input.displayName ?? input.username,
+    displayName,
+    nameZh: nameZhVal || null,
+    nameEn: nameEnVal || null,
     role: input.role,
     createdAt: now,
     password: input.password,
     department: input.department ?? null,
+    primarySubject: ps,
   };
   const users = loadFromLocal();
   users.unshift(user);
@@ -135,9 +165,59 @@ export async function updateUserDepartment(userId: string, department: string | 
   saveToLocal(users);
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
-      await api.updateUserDepartment(userId, department);
+      await api.patchUserStaffFields(userId, { department });
     } catch (e) {
       logError('updateUserDepartment to cloud', e);
+    }
+  }
+}
+
+/** 更新单个用户主学科 */
+export async function updateUserPrimarySubject(userId: string, primarySubject: string | null): Promise<void> {
+  const users = loadFromLocal();
+  const idx = users.findIndex((u) => u.id === userId);
+  if (idx === -1) return;
+  users[idx] = { ...users[idx], primarySubject };
+  saveToLocal(users);
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    try {
+      await api.patchUserStaffFields(userId, { primarySubject });
+    } catch (e) {
+      logError('updateUserPrimarySubject to cloud', e);
+    }
+  }
+}
+
+/** 更新教职工中文名/英文名（至少合并后仍须其一非空） */
+export async function updateUserStaffNameFields(
+  userId: string,
+  patch: { nameZh?: string | null; nameEn?: string | null },
+): Promise<void> {
+  const hasZh = Object.prototype.hasOwnProperty.call(patch, 'nameZh');
+  const hasEn = Object.prototype.hasOwnProperty.call(patch, 'nameEn');
+  if (!hasZh && !hasEn) return;
+
+  const users = loadFromLocal();
+  const idx = users.findIndex((u) => u.id === userId);
+  if (idx === -1) return;
+  const u = users[idx];
+  const nz = hasZh ? (patch.nameZh?.trim() ? patch.nameZh.trim() : null) : (u.nameZh ?? null)?.trim() || null;
+  const ne = hasEn ? (patch.nameEn?.trim() ? patch.nameEn.trim() : null) : (u.nameEn ?? null)?.trim() || null;
+  if (!nz && !ne) {
+    throw new Error('At least one of Chinese or English name is required');
+  }
+  const displayName = nz || ne || u.username;
+  users[idx] = { ...u, nameZh: nz, nameEn: ne, displayName };
+  saveToLocal(users);
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    try {
+      const body: { nameZh?: string | null; nameEn?: string | null } = {};
+      if (hasZh) body.nameZh = nz;
+      if (hasEn) body.nameEn = ne;
+      await api.patchUserStaffFields(userId, body);
+    } catch (e) {
+      logError('updateUserStaffNameFields to cloud', e);
+      throw e;
     }
   }
 }

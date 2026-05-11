@@ -27,3 +27,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local launcher (not tracked)
+start-local-test.command
+
+# API static frontend build output (copied from apps/web/dist by npm run build)
+apps/api/public/assets/

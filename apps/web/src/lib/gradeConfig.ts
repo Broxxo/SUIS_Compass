@@ -135,3 +135,19 @@ export function getGradeLevelById(config: GradeConfig, id: string): number {
 export function getGradeLabelByLevel(config: GradeConfig, level: number): string {
   return getGradeItemByLevel(config, level)?.label ?? `G${level}`;
 }
+
+/** 根据学生年级 level 解析所属学段 id（与课程管理中学段 Tab 一致）；无学段配置时返回 null */
+export function getSchoolSegmentIdForStudentGradeLevel(
+  config: GradeConfig,
+  gradeLevel: number | null | undefined,
+): string | null {
+  if (gradeLevel == null || !Number.isFinite(gradeLevel)) return null;
+  const norm = normalizeGradeConfig(config);
+  const lv = Math.round(Number(gradeLevel));
+  const gradeItem = norm.items.find((it) => it.level === lv);
+  if (!gradeItem) return null;
+  const segs = norm.segments;
+  if (!segs?.length) return null;
+  const found = segs.find((s) => s.gradeIds.includes(gradeItem.id));
+  return found?.id ?? null;
+}

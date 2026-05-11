@@ -16,28 +16,22 @@ import type {
 } from '../types/classManagement';
 import { loadAcademicYears, loadCurrentAcademicYearId, loadAllClasses, loadStudents, loadEnrollments } from '../lib/classStorage';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
+import { fullUnifiedLevelTextFromPreset } from '../lib/reportPresetUnifiedLevels';
+import { reportLetterGradeFromScore } from '@repo/shared';
+import { normalizeGradeConfig, getSchoolSegmentIdForStudentGradeLevel } from '../lib/gradeConfig';
+import { loadGradeConfigSync } from '../lib/storage';
 
 type PortraitTab = 'overview' | 'my-students';
-type DetailTab = 'radar' | 'report';
 
-type ModuleField = {
-  id: string;
-  fieldKey: string;
-  label: string;
-  fieldType: 'text' | 'number' | 'single-select' | 'multi-select' | 'score';
-  scoreMin?: number | null;
-  scoreMax?: number | null;
-  sortOrder: number;
-};
+/** 学生画像内：长期发展各框架入口；当前仅「学业报告」承载按模板的学期学科评价与班主任评语。 */
+type PortraitLensTab = 'academic' | 'interests' | 'generalLearning' | 'socialEmotional';
 
-type ProfileModule = {
-  id: string;
-  key: string;
-  name: string;
-  fields: ModuleField[];
-  /** 来自 API；全本地模式下无此项 */
-  isEnabled?: boolean;
-};
+const PORTRAIT_LENS_TABS: { id: PortraitLensTab; labelZh: string; labelEn: string }[] = [
+  { id: 'academic', labelZh: '学业报告', labelEn: 'Academic report' },
+  { id: 'interests', labelZh: '兴趣特长', labelEn: 'Interests & strengths' },
+  { id: 'generalLearning', labelZh: '通用学习能力', labelEn: 'General learning skills' },
+  { id: 'socialEmotional', labelZh: '社会情感能力', labelEn: 'Social-emotional learning' },
+];
 
 type SubjectDraft = {
   id: string;
@@ -47,6 +41,7 @@ type SubjectDraft = {
   midtermGrade: string | null;
   finalScore: number | null;
   finalGrade: string | null;
+  learningQualityGrade: TargetLevel | null;
   teacherComment: string | null;
   teacherId: string | null;
   dimensions: Array<{
@@ -58,83 +53,71 @@ type SubjectDraft = {
   }>;
 };
 
-function toReportGrade(score: number | null | undefined): string | null {
-  if (score == null || Number.isNaN(score)) return null;
-  if (score === 100) return 'A+';
-  if (score >= 95 && score < 100) return 'A';
-  if (score >= 90 && score < 95) return 'A-';
-  if (score >= 85 && score < 90) return 'B+';
-  if (score >= 80 && score < 85) return 'B';
-  if (score >= 75 && score < 80) return 'B-';
-  if (score >= 70 && score < 75) return 'C+';
-  if (score >= 65 && score < 70) return 'C';
-  if (score >= 60 && score < 65) return 'C-';
-  if (score >= 0 && score < 60) return 'D';
-  return null;
-}
-
-function RadarChart({
-  dimensions,
-  scores,
-  maxScore,
-}: {
-  dimensions: string[];
-  scores: number[];
-  maxScore: number;
-}) {
-  const size = 220;
-  const cx = size / 2;
-  const cy = size / 2;
-  const radius = 78;
-  const levels = 5;
-  const angleStep = (Math.PI * 2) / dimensions.length;
-
-  const toPoint = (idx: number, value: number) => {
-    const ratio = Math.max(0, Math.min(1, value / maxScore));
-    const a = -Math.PI / 2 + idx * angleStep;
-    return {
-      x: cx + Math.cos(a) * radius * ratio,
-      y: cy + Math.sin(a) * radius * ratio,
-    };
+/**
+ * GET 报告详情可能按角色过滤 subjectReports；与模板合并后才能稳定展示全部学科行（与初次进入页面的 useEffect 逻辑一致）。
+ */
+function mergeStudentTermReportWithTemplate(
+  detail: StudentTermReport,
+  template: ReportTemplate | null
+): StudentTermReport {
+  const normalized: StudentTermReport = {
+    ...detail,
+    subjectReports: (detail.subjectReports ?? []).map((s) => ({
+      ...s,
+      dimensions: (s.dimensions ?? []).map((d) => ({
+        ...d,
+        rating: (d.rating ?? 'A') as TargetLevel,
+      })),
+    })),
   };
-
-  const polygon = scores
-    .map((v, i) => {
-      const p = toPoint(i, v);
-      return `${p.x},${p.y}`;
-    })
-    .join(' ');
-
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="max-w-full h-auto">
-      {[...Array(levels)].map((_, i) => {
-        const ratio = (i + 1) / levels;
-        const pts = dimensions
-          .map((__, idx) => {
-            const a = -Math.PI / 2 + idx * angleStep;
-            const x = cx + Math.cos(a) * radius * ratio;
-            const y = cy + Math.sin(a) * radius * ratio;
-            return `${x},${y}`;
-          })
-          .join(' ');
-        return <polygon key={i} points={pts} fill="none" stroke="#cbd5e1" strokeWidth="1" />;
-      })}
-      {dimensions.map((label, idx) => {
-        const a = -Math.PI / 2 + idx * angleStep;
-        const x = cx + Math.cos(a) * (radius + 18);
-        const y = cy + Math.sin(a) * (radius + 18);
-        return (
-          <g key={label}>
-            <line x1={cx} y1={cy} x2={cx + Math.cos(a) * radius} y2={cy + Math.sin(a) * radius} stroke="#e2e8f0" />
-            <text x={x} y={y} textAnchor="middle" className="fill-slate-500 text-[10px]">
-              {label}
-            </text>
-          </g>
-        );
-      })}
-      <polygon points={polygon} fill="rgba(14, 165, 233, 0.25)" stroke="#0284c7" strokeWidth="2" />
-    </svg>
-  );
+  const tplSubjects = template?.subjects ?? [];
+  if (tplSubjects.length === 0) {
+    return normalized;
+  }
+  const mergedSubjects: StudentTermSubjectReport[] = tplSubjects.map((tplSubject) => {
+    const existing = normalized.subjectReports.find((s) => s.subjectKey === tplSubject.subjectKey);
+    if (existing) {
+      return {
+        ...existing,
+        subjectName: tplSubject.subjectName,
+        learningQualityGrade: existing.learningQualityGrade ?? null,
+        dimensions: tplSubject.dimensions.map((tplDim) => {
+          const oldDim = existing.dimensions.find((d) => d.dimensionKey === tplDim.dimensionKey);
+          return {
+            id: oldDim?.id ?? tplDim.id,
+            dimensionKey: tplDim.dimensionKey,
+            dimensionLabel: tplDim.dimensionLabel,
+            sortOrder: tplDim.sortOrder,
+            rating: (oldDim?.rating ?? 'A') as TargetLevel,
+            levelDescriptions: tplDim.levelDescriptions,
+          };
+        }),
+      };
+    }
+    return {
+      id: `tpl-${tplSubject.id}`,
+      subjectKey: tplSubject.subjectKey,
+      subjectName: tplSubject.subjectName,
+      midtermScore: null,
+      midtermGrade: null,
+      finalScore: null,
+      finalGrade: null,
+      learningQualityGrade: null,
+      teacherComment: null,
+      teacherId: null,
+      dimensions: tplSubject.dimensions.map((d) => ({
+        id: d.id,
+        dimensionKey: d.dimensionKey,
+        dimensionLabel: d.dimensionLabel,
+        sortOrder: d.sortOrder,
+        rating: 'A' as TargetLevel,
+        levelDescriptions: d.levelDescriptions,
+      })),
+      createdAt: null,
+      updatedAt: null,
+    };
+  });
+  return { ...normalized, subjectReports: mergedSubjects };
 }
 
 export default function StudentPortrait({
@@ -149,19 +132,16 @@ export default function StudentPortrait({
   const isZh = language === 'zh';
   const isStudentSelf = user?.role === 'student';
   const [tab, setTab] = useState<PortraitTab>(initialTab);
-  const [detailTab, setDetailTab] = useState<DetailTab>('report');
+  const [portraitLensTab, setPortraitLensTab] = useState<PortraitLensTab>('academic');
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [currentYearId, setCurrentYearId] = useState<string | null>(null);
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
-  const [modules, setModules] = useState<ProfileModule[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string>('');
   const [selectedStudentId, setSelectedStudentId] = useState<string>('');
-  const [studentValues, setStudentValues] = useState<Record<string, Record<string, unknown>>>({});
   const [homeroomEditable, setHomeroomEditable] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportSaving, setReportSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,6 +162,9 @@ export default function StudentPortrait({
   const [reportDetail, setReportDetail] = useState<StudentTermReport | null>(null);
   const [reportTemplate, setReportTemplate] = useState<ReportTemplate | null>(null);
   const [homeroomCommentDraft, setHomeroomCommentDraft] = useState('');
+  const [mySubjectAssignments, setMySubjectAssignments] = useState<Array<{ classId: string; subjectKey: string }>>([]);
+  /** 学年学科目标预设中的全学科共用 A–D 说明（用于学业报告开头展示一次） */
+  const [academicYearRubric, setAcademicYearRubric] = useState<Record<TargetLevel, string> | null>(null);
 
   useEffect(() => {
     if (isStudentSelf) return;
@@ -193,16 +176,14 @@ export default function StudentPortrait({
       loadAllClasses(),
       loadStudents(),
       loadEnrollments(),
-      USE_CLOUD_STORAGE ? api.getStudentProfileModules() : Promise.resolve([]),
     ])
-      .then(([y, current, cls, stu, enr, mods]) => {
+      .then(([y, current, cls, stu, enr]) => {
         if (cancelled) return;
         setYears(y);
         setCurrentYearId(current || y[0]?.id || null);
         setClasses(cls);
         setStudents(stu);
         setEnrollments(enr);
-        setModules((mods as ProfileModule[]).filter((m) => m.isEnabled !== false));
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -232,21 +213,16 @@ export default function StudentPortrait({
       setError(isZh ? '该账号未关联学籍，无法展示画像。请联系管理员。' : 'This account is not linked to a student record.');
       return;
     }
-    Promise.all([
-      api.getStudentProfileModules(),
-      api.getStudents(),
-      api.getStudentProfileValues(sid),
-    ])
-      .then(([mods, stuList, values]) => {
+    api
+      .getStudents()
+      .then((stuList) => {
         if (cancelled) return;
         setYears([]);
         setCurrentYearId(null);
         setClasses([]);
         setStudents(stuList);
         setEnrollments([]);
-        setModules((mods as ProfileModule[]).filter((m) => m.isEnabled !== false));
         setSelectedStudentId(sid);
-        setStudentValues(values);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -259,6 +235,10 @@ export default function StudentPortrait({
       cancelled = true;
     };
   }, [isStudentSelf, user?.studentId, user?.id, isZh]);
+
+  useEffect(() => {
+    setPortraitLensTab('academic');
+  }, [selectedStudentId]);
 
   const yearClasses = useMemo(
     () => classes.filter((c) => !currentYearId || c.academicYearId === currentYearId),
@@ -287,25 +267,49 @@ export default function StudentPortrait({
     [students, selectedStudentId]
   );
 
-  const abilityModule = useMemo(
-    () => modules.find((m) => m.key === 'ability') ?? null,
-    [modules]
-  );
-
-  const canEditProfile = useMemo(
-    () =>
-      !isStudentSelf && (user?.role === 'admin' || user?.role === 'system-admin' || homeroomEditable),
-    [user?.role, homeroomEditable, isStudentSelf]
-  );
   const isAdminRole = user?.role === 'admin' || user?.role === 'system-admin';
+  const canViewSchoolDashboard = !isStudentSelf && isAdminRole;
   const canEditHomeroomComment = !isStudentSelf && (isAdminRole || homeroomEditable) && reportTemplate?.homeroomCommentMode !== 'disabled';
   const homeroomCommentRequired = reportTemplate?.homeroomCommentMode === 'required';
   const showHomeroomComment = reportTemplate?.homeroomCommentMode !== 'disabled';
   const canTeacherEditReport = !isStudentSelf && (isAdminRole || reportTemplate?.status === 'published');
+  const teacherStaffedSubjectKeysForClass = useMemo(() => {
+    if (user?.role !== 'teacher' || !selectedClassId) return new Set<string>();
+    return new Set(
+      mySubjectAssignments.filter((a) => a.classId === selectedClassId).map((a) => a.subjectKey),
+    );
+  }, [user?.role, selectedClassId, mySubjectAssignments]);
+  const canEditSubjectTermReport = (subjectKey: string) =>
+    canTeacherEditReport &&
+    (isAdminRole || (user?.role === 'teacher' && teacherStaffedSubjectKeysForClass.has(subjectKey)));
+  const canHintEditTermReport = useMemo(
+    () =>
+      !isStudentSelf &&
+      canTeacherEditReport &&
+      (isAdminRole ||
+        homeroomEditable ||
+        (user?.role === 'teacher' && !!selectedClassId && teacherStaffedSubjectKeysForClass.size > 0)),
+    [
+      isStudentSelf,
+      canTeacherEditReport,
+      isAdminRole,
+      homeroomEditable,
+      user?.role,
+      selectedClassId,
+      teacherStaffedSubjectKeysForClass,
+    ]
+  );
   const templateSubjectMap = useMemo(
     () => new Map((reportTemplate?.subjects ?? []).map((s) => [s.subjectKey, s] as const)),
     [reportTemplate],
   );
+
+  useEffect(() => {
+    if (isStudentSelf) return;
+    if (!canViewSchoolDashboard && tab === 'overview') {
+      setTab('my-students');
+    }
+  }, [isStudentSelf, canViewSchoolDashboard, tab]);
 
   useEffect(() => {
     if (isStudentSelf) {
@@ -330,17 +334,44 @@ export default function StudentPortrait({
   }, [selectedClassId, user?.id, user?.role, isStudentSelf]);
 
   useEffect(() => {
-    if (isStudentSelf) return;
-    if (!selectedStudentId) return;
-    if (!USE_CLOUD_STORAGE) {
-      setStudentValues({});
+    if (isStudentSelf || !USE_CLOUD_STORAGE || user?.role !== 'teacher' || !currentYearId) {
+      setMySubjectAssignments([]);
       return;
     }
+    let cancelled = false;
     api
-      .getStudentProfileValues(selectedStudentId)
-      .then((values) => setStudentValues(values))
-      .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load profile values'));
-  }, [selectedStudentId, isStudentSelf]);
+      .getMySubjectAssignments(currentYearId)
+      .then((rows) => {
+        if (!cancelled) setMySubjectAssignments(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setMySubjectAssignments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStudentSelf, user?.role, currentYearId]);
+
+  useEffect(() => {
+    if (!USE_CLOUD_STORAGE || !currentYearId) {
+      setAcademicYearRubric(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getAdminReportYearDimensionPreset(currentYearId)
+      .then((p) => {
+        if (cancelled) return;
+        setAcademicYearRubric(fullUnifiedLevelTextFromPreset(p?.unifiedLevelDescriptions));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAcademicYearRubric(fullUnifiedLevelTextFromPreset(null));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentYearId]);
 
   useEffect(() => {
     if (!USE_CLOUD_STORAGE) return;
@@ -383,7 +414,13 @@ export default function StudentPortrait({
     }
     let cancelled = false;
     setReportLoading(true);
-    api.getReportTemplatesForTerm(currentYearId, reportTerm)
+    const gc = normalizeGradeConfig(loadGradeConfigSync());
+    const schoolSeg = getSchoolSegmentIdForStudentGradeLevel(
+      gc,
+      students.find((x) => x.id === selectedStudentId)?.currentGrade ?? null,
+    );
+    api
+      .getReportTemplatesForTerm(currentYearId, reportTerm, schoolSeg ? { schoolSegmentId: schoolSeg } : undefined)
       .then(async (templates) => {
         if (cancelled) return;
         setReportTemplates(templates);
@@ -402,60 +439,10 @@ export default function StudentPortrait({
           api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, effectiveTemplateId),
         ]);
         if (cancelled) return;
-        const normalized: StudentTermReport = {
-          ...detail,
-          subjectReports: (detail.subjectReports ?? []).map((s) => ({
-            ...s,
-            dimensions: (s.dimensions ?? []).map((d) => ({
-              ...d,
-              rating: (d.rating ?? 'A') as TargetLevel,
-            })),
-          })),
-        };
-        const mergedSubjects: StudentTermSubjectReport[] = (template.subjects ?? []).map((tplSubject) => {
-          const existing = normalized.subjectReports.find((s) => s.subjectKey === tplSubject.subjectKey);
-          if (existing) {
-            return {
-              ...existing,
-              subjectName: tplSubject.subjectName,
-              dimensions: tplSubject.dimensions.map((tplDim) => {
-                const oldDim = existing.dimensions.find((d) => d.dimensionKey === tplDim.dimensionKey);
-                return {
-                  id: oldDim?.id ?? tplDim.id,
-                  dimensionKey: tplDim.dimensionKey,
-                  dimensionLabel: tplDim.dimensionLabel,
-                  sortOrder: tplDim.sortOrder,
-                  rating: (oldDim?.rating ?? 'A') as TargetLevel,
-                  levelDescriptions: tplDim.levelDescriptions,
-                };
-              }),
-            };
-          }
-          return {
-            id: `tpl-${tplSubject.id}`,
-            subjectKey: tplSubject.subjectKey,
-            subjectName: tplSubject.subjectName,
-            midtermScore: null,
-            midtermGrade: null,
-            finalScore: null,
-            finalGrade: null,
-            teacherComment: null,
-            teacherId: null,
-            dimensions: tplSubject.dimensions.map((d) => ({
-              id: d.id,
-              dimensionKey: d.dimensionKey,
-              dimensionLabel: d.dimensionLabel,
-              sortOrder: d.sortOrder,
-              rating: 'A' as TargetLevel,
-              levelDescriptions: d.levelDescriptions,
-            })),
-            createdAt: null,
-            updatedAt: null,
-          };
-        });
         setReportTemplate(template);
-        setReportDetail({ ...normalized, subjectReports: mergedSubjects });
-        setHomeroomCommentDraft(normalized.homeroomComment ?? '');
+        const merged = mergeStudentTermReportWithTemplate(detail, template);
+        setReportDetail(merged);
+        setHomeroomCommentDraft(merged.homeroomComment ?? '');
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -467,7 +454,7 @@ export default function StudentPortrait({
     return () => {
       cancelled = true;
     };
-  }, [selectedStudentId, currentYearId, reportTerm, selectedTemplateId]);
+  }, [selectedStudentId, currentYearId, reportTerm, selectedTemplateId, students]);
 
   const learningStats = useMemo(() => {
     const inYearStudentIds = new Set(activeEnrollments.map((e) => e.studentId));
@@ -490,40 +477,6 @@ export default function StudentPortrait({
     };
   }, [activeEnrollments, students, isZh]);
 
-  const abilityFields = useMemo(
-    () => (abilityModule?.fields ?? []).filter((f) => f.fieldType === 'score').sort((a, b) => a.sortOrder - b.sortOrder),
-    [abilityModule]
-  );
-
-  const abilityValues = useMemo(() => {
-    if (!abilityModule) return {} as Record<string, number>;
-    const map: Record<string, number> = {};
-    const modVals = studentValues[abilityModule.id] ?? {};
-    for (const f of abilityFields) {
-      const raw = modVals[f.fieldKey];
-      const n = typeof raw === 'number' ? raw : Number(raw ?? 0);
-      map[f.fieldKey] = Number.isNaN(n) ? 0 : n;
-    }
-    return map;
-  }, [studentValues, abilityModule, abilityFields]);
-
-  const saveAbility = async () => {
-    if (!selectedStudentId || !abilityModule) return;
-    if (!USE_CLOUD_STORAGE) {
-      setError(isZh ? '全本地模式下画像分值无法同步到服务器，联调 API 时请打开 VITE_USE_CLOUD_STORAGE。' : 'Profile scores need API when cloud storage is off.');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      await api.putStudentProfileModuleValues(selectedStudentId, abilityModule.id, abilityValues);
-    } catch (e: unknown) {
-      setError((e as Error)?.message || 'Failed to save profile');
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const upsertSubjectDraft = (subjectKey: string, updater: (draft: SubjectDraft) => SubjectDraft) => {
     setReportDetail((prev) => {
       if (!prev) return prev;
@@ -539,6 +492,7 @@ export default function StudentPortrait({
         midtermGrade: base.midtermGrade,
         finalScore: base.finalScore,
         finalGrade: base.finalGrade,
+        learningQualityGrade: base.learningQualityGrade ?? null,
         teacherComment: base.teacherComment,
         teacherId: base.teacherId,
         dimensions: base.dimensions.map((d) => ({
@@ -560,6 +514,10 @@ export default function StudentPortrait({
 
   const saveSubjectReport = async (subject: StudentTermSubjectReport) => {
     if (!selectedStudentId || !currentYearId || !selectedTemplateId) return;
+    if (!canEditSubjectTermReport(subject.subjectKey)) {
+      setError(isZh ? '您无权保存该学科报告。' : 'You are not allowed to save this subject report.');
+      return;
+    }
     setReportSaving(true);
     setError(null);
     try {
@@ -568,6 +526,7 @@ export default function StudentPortrait({
         midtermScore: subject.midtermScore,
         finalScore: subject.finalScore,
         teacherComment: subject.teacherComment,
+        learningQualityGrade: subject.learningQualityGrade ?? null,
         dimensions: subject.dimensions.map((d) => ({
           dimensionKey: d.dimensionKey,
           dimensionLabel: d.dimensionLabel,
@@ -575,9 +534,14 @@ export default function StudentPortrait({
           levelDescriptions: d.levelDescriptions,
         })),
       });
-      const next = await api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId);
-      setReportDetail(next);
-      setHomeroomCommentDraft(next.homeroomComment ?? '');
+      const [next, tpl] = await Promise.all([
+        api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId),
+        api.getReportTemplateById(selectedTemplateId),
+      ]);
+      setReportTemplate(tpl);
+      const merged = mergeStudentTermReportWithTemplate(next, tpl);
+      setReportDetail(merged);
+      setHomeroomCommentDraft(merged.homeroomComment ?? '');
       const list = await api.getStudentTermReports(selectedStudentId);
       setReportList(list);
     } catch (e: unknown) {
@@ -597,9 +561,14 @@ export default function StudentPortrait({
     setError(null);
     try {
       await api.updateStudentTermHomeroomComment(selectedStudentId, currentYearId, reportTerm, selectedTemplateId, homeroomCommentDraft || null);
-      const next = await api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId);
-      setReportDetail(next);
-      setHomeroomCommentDraft(next.homeroomComment ?? '');
+      const [next, tpl] = await Promise.all([
+        api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId),
+        api.getReportTemplateById(selectedTemplateId),
+      ]);
+      setReportTemplate(tpl);
+      const merged = mergeStudentTermReportWithTemplate(next, tpl);
+      setReportDetail(merged);
+      setHomeroomCommentDraft(merged.homeroomComment ?? '');
       const list = await api.getStudentTermReports(selectedStudentId);
       setReportList(list);
     } catch (e: unknown) {
@@ -628,9 +597,11 @@ export default function StudentPortrait({
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-4">
         {!isStudentSelf && (
           <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
-            <Button variant={tab === 'overview' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('overview')}>
-              {isZh ? '学校看板' : 'School dashboard'}
-            </Button>
+            {canViewSchoolDashboard && (
+              <Button variant={tab === 'overview' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('overview')}>
+                {isZh ? '学校看板' : 'School dashboard'}
+              </Button>
+            )}
             <Button variant={tab === 'my-students' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('my-students')}>
               {isZh ? '我的学生' : 'My Students'}
             </Button>
@@ -641,8 +612,8 @@ export default function StudentPortrait({
         {!USE_CLOUD_STORAGE && !loading && !isStudentSelf && (
           <div className="text-sm text-sky-900 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
             {isZh
-              ? '本地模式：看板与班级学生列表来自 localStorage；能力雷达等画像模块需开启 VITE_USE_CLOUD_STORAGE 并联调后端 API。'
-              : 'Local mode: dashboard and class lists use localStorage; profile modules need API (set VITE_USE_CLOUD_STORAGE=true).'}
+              ? '本地模式：看板与班级学生列表来自 localStorage；学期学业报告等需开启 VITE_USE_CLOUD_STORAGE 并联调后端 API。'
+              : 'Local mode: dashboard and class lists use localStorage; term academic reports need API (set VITE_USE_CLOUD_STORAGE=true).'}
           </div>
         )}
         {loading && <div className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</div>}
@@ -650,44 +621,37 @@ export default function StudentPortrait({
         {!loading && isStudentSelf && selectedStudent && (
           <section className="space-y-4">
             <p className="text-sm text-slate-600">
-              {isZh ? '以下为你在校能力画像（只读）。基础学籍信息如有误请联系班主任或管理员。' : 'Your learning profile (read-only). Contact your teacher or admin if core records are wrong.'}
+              {isZh ? '以下为学生画像（只读）。基础学籍信息如有误请联系班主任或管理员。' : 'Your student portrait (read-only). Contact your teacher or admin if core records are wrong.'}
             </p>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <div className="bg-white border border-slate-200 rounded-xl p-4 lg:col-span-3">
-                <div className="rounded-xl border border-slate-200 p-4 bg-gradient-to-r from-slate-50 to-white mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="h-14 w-14 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 font-semibold">
-                      {(selectedStudent.nameZh || selectedStudent.name).slice(0, 1)}
-                    </div>
-                    <div>
-                      <div className="text-lg font-semibold text-slate-800">{selectedStudent.nameZh || selectedStudent.name}</div>
-                      <div className="text-sm text-slate-500">
-                        {selectedStudent.nameEn || '—'} · {selectedStudent.studentNumber || '—'} · {selectedStudent.status || 'active'}
-                      </div>
-                    </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex flex-wrap gap-1">
+              {PORTRAIT_LENS_TABS.map((t) => (
+                <Button
+                  key={t.id}
+                  variant={portraitLensTab === t.id ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPortraitLensTab(t.id)}
+                >
+                  {isZh ? t.labelZh : t.labelEn}
+                </Button>
+              ))}
+            </div>
+            {portraitLensTab === 'academic' && (
+            <>
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
+              <div className="rounded-xl border border-slate-200 p-4 bg-gradient-to-r from-slate-50 to-white">
+                <div className="flex items-center gap-3">
+                  <div className="h-14 w-14 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 font-semibold">
+                    {(selectedStudent.nameZh || selectedStudent.name).slice(0, 1)}
                   </div>
-                </div>
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                  <div className="border border-slate-200 rounded-xl p-3">
-                    <h4 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '学习能力雷达（0-10）' : 'Learning Radar (0-10)'}</h4>
-                    {abilityFields.length === 0 ? (
-                      <p className="text-xs text-slate-500">{isZh ? '暂未配置能力维度。' : 'No ability dimensions yet.'}</p>
-                    ) : (
-                      <RadarChart
-                        dimensions={abilityFields.map((f) => f.label)}
-                        scores={abilityFields.map((f) => abilityValues[f.fieldKey] ?? 0)}
-                        maxScore={10}
-                      />
-                    )}
-                  </div>
-                  <div className="border border-slate-200 rounded-xl p-3 text-sm text-slate-600">
-                    <h4 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '说明' : 'Note'}</h4>
-                    <p>{isZh ? '画像分值由班主任或学校管理员维护；你可在此查看最新记录。' : 'Scores are maintained by your teachers and admins; this page shows the latest records.'}</p>
+                  <div>
+                    <div className="text-lg font-semibold text-slate-800">{selectedStudent.nameZh || selectedStudent.name}</div>
+                    <div className="text-sm text-slate-500">
+                      {selectedStudent.nameEn || '—'} · {selectedStudent.studentNumber || '—'} · {selectedStudent.status || 'active'}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <div id="term-report-panel" className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+            <div id="term-report-panel" className="border border-slate-200 rounded-xl p-4 space-y-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <h3 className="text-base font-semibold text-slate-800">{isZh ? '学业报告（按学期）' : 'Academic report (by term)'}</h3>
                 {reportLoading && <span className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</span>}
@@ -735,9 +699,21 @@ export default function StudentPortrait({
                         return (
                           <>
                       <div className="text-sm font-semibold text-slate-800">{s.subjectName}</div>
+                      {subjectConfig?.enableLearningQuality !== false && s.learningQualityGrade ? (
+                        <div className="text-xs text-slate-500 mt-1">
+                          {isZh ? '学习品质' : 'Learning quality'}: <span className="font-medium text-slate-800">{s.learningQualityGrade}</span>
+                        </div>
+                      ) : null}
                       {subjectConfig?.enableScore !== false && (
                         <div className="text-xs text-slate-500 mt-1">
-                          {isZh ? '期中等第' : 'Midterm grade'}: {s.midtermGrade ?? toReportGrade(s.midtermScore) ?? '—'} · {isZh ? '期末等第' : 'Final grade'}: {s.finalGrade ?? toReportGrade(s.finalScore) ?? '—'}
+                          {isZh ? '期中等第' : 'Midterm grade'}:{' '}
+                          {s.midtermGrade ??
+                            reportLetterGradeFromScore(s.midtermScore, reportTemplate?.scoreGradeMinScores) ??
+                            '—'}{' '}
+                          · {isZh ? '期末等第' : 'Final grade'}:{' '}
+                          {s.finalGrade ??
+                            reportLetterGradeFromScore(s.finalScore, reportTemplate?.scoreGradeMinScores) ??
+                            '—'}
                         </div>
                       )}
                       {subjectConfig?.enableTeacherComment !== false && s.teacherComment && (
@@ -767,10 +743,34 @@ export default function StudentPortrait({
                 </div>
               )}
             </div>
+            </div>
+            </>
+            )}
+            {portraitLensTab === 'interests' && (
+              <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center text-sm text-slate-600">
+                {isZh
+                  ? '「兴趣特长」框架开发中，将用于记录与展示学生的长期兴趣与特长发展。'
+                  : 'Interests & strengths: coming soon — a space for long-term interest and talent development.'}
+              </div>
+            )}
+            {portraitLensTab === 'generalLearning' && (
+              <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center text-sm text-slate-600">
+                {isZh
+                  ? '「通用学习能力」框架开发中，将用于学习策略、习惯等维度的长期追踪。'
+                  : 'General learning skills: coming soon — strategies, habits, and longitudinal tracking.'}
+              </div>
+            )}
+            {portraitLensTab === 'socialEmotional' && (
+              <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center text-sm text-slate-600">
+                {isZh
+                  ? '「社会情感能力」框架开发中，将用于协作、自我管理等方面的长期观察。'
+                  : 'Social-emotional learning: coming soon — collaboration, self-management, and related dimensions.'}
+              </div>
+            )}
           </section>
         )}
 
-        {!loading && !isStudentSelf && tab === 'overview' && (
+        {!loading && canViewSchoolDashboard && tab === 'overview' && (
           <section className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="bg-white rounded-xl border border-slate-200 p-4">
@@ -814,8 +814,8 @@ export default function StudentPortrait({
 
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
               {isZh
-                ? '教学建议：优先关注“在读状态非 active”的学生；结合能力维度雷达图，识别低于班级均值的维度并设置针对性学习支持。'
-                : 'Teaching tip: prioritize students not in active status; combine radar dimensions to identify below-average skills and plan targeted support.'}
+                ? '教学建议：优先关注“在读状态非 active”的学生；结合「学业报告」与后续画像维度（通用学习能力、社会情感等），识别需要长期支持的方向。'
+                : 'Teaching tip: prioritize students not in active status; combine term reports and future portrait lenses (learning skills, SEL) for long-term support planning.'}
             </div>
           </section>
         )}
@@ -854,9 +854,13 @@ export default function StudentPortrait({
               </div>
               {tab === 'my-students' && (
                 <div className="text-xs text-slate-500">
-                  {canEditProfile
-                    ? (isZh ? '当前角色可编辑画像（基础档案仍由管理员维护）' : 'You can edit profile only (core record remains admin-managed).')
-                    : (isZh ? '当前角色只读查看画像' : 'Read-only profile view for current role.')}
+                  {canHintEditTermReport
+                    ? (isZh
+                        ? '在「学业报告」中可按权限填写班主任评语与学科评价（评价模板已发布）。'
+                        : 'Under Academic report you may enter homeroom notes and subject evaluations when the template is published.')
+                    : (isZh
+                        ? '学期报告为只读，或评价模板尚未发布。'
+                        : 'Term report is read-only, or the evaluation template is not published yet.')}
                 </div>
               )}
             </div>
@@ -891,98 +895,19 @@ export default function StudentPortrait({
                   <div className="text-sm text-slate-500">{isZh ? '请选择左侧学生查看电子档案' : 'Select a student to open the profile card.'}</div>
                 ) : (
                   <div className="space-y-4">
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 inline-flex gap-1">
-                      <Button
-                        variant={detailTab === 'radar' ? 'default' : 'ghost'}
-                        size="sm"
-                        onClick={() => setDetailTab('radar')}
-                      >
-                        {isZh ? '能力雷达图' : 'Ability radar'}
-                      </Button>
-                      <Button
-                        variant={detailTab === 'report' ? 'default' : 'ghost'}
-                        size="sm"
-                        onClick={() => setDetailTab('report')}
-                      >
-                        {isZh ? '学业报告' : 'Academic report'}
-                      </Button>
+                    <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex flex-wrap gap-1">
+                      {PORTRAIT_LENS_TABS.map((t) => (
+                        <Button
+                          key={t.id}
+                          variant={portraitLensTab === t.id ? 'default' : 'ghost'}
+                          size="sm"
+                          onClick={() => setPortraitLensTab(t.id)}
+                        >
+                          {isZh ? t.labelZh : t.labelEn}
+                        </Button>
+                      ))}
                     </div>
-                    {detailTab === 'radar' && (
-                      <>
-                    <div className="rounded-xl border border-slate-200 p-4 bg-gradient-to-r from-slate-50 to-white">
-                      <div className="flex items-center gap-3">
-                        <div className="h-14 w-14 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 font-semibold">
-                          {(selectedStudent.nameZh || selectedStudent.name).slice(0, 1)}
-                        </div>
-                        <div>
-                          <div className="text-lg font-semibold text-slate-800">{selectedStudent.nameZh || selectedStudent.name}</div>
-                          <div className="text-sm text-slate-500">
-                            {selectedStudent.nameEn || '—'} · {selectedStudent.studentNumber || '—'} · {selectedStudent.status || 'active'}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                      <div className="border border-slate-200 rounded-xl p-3">
-                        <h4 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '学习能力雷达（0-10）' : 'Learning Radar (0-10)'}</h4>
-                        {abilityFields.length === 0 ? (
-                          <p className="text-xs text-slate-500">{isZh ? '暂未配置能力维度，请在后台新增能力字段。' : 'No ability dimensions yet. Add score fields in admin.'}</p>
-                        ) : (
-                          <>
-                            <RadarChart
-                              dimensions={abilityFields.map((f) => f.label)}
-                              scores={abilityFields.map((f) => abilityValues[f.fieldKey] ?? 0)}
-                              maxScore={10}
-                            />
-                            <div className="space-y-2 mt-2">
-                              {abilityFields.map((f) => (
-                                <div key={f.id} className="flex items-center justify-between gap-2">
-                                  <label className="text-xs text-slate-600">{f.label}</label>
-                                  <input
-                                    type="number"
-                                    min={f.scoreMin ?? 0}
-                                    max={f.scoreMax ?? 10}
-                                    step={0.5}
-                                    disabled={!canEditProfile}
-                                    value={abilityValues[f.fieldKey] ?? 0}
-                                    onChange={(e) => {
-                                      const n = Number(e.target.value);
-                                      setStudentValues((prev) => ({
-                                        ...prev,
-                                        [abilityModule!.id]: {
-                                          ...(prev[abilityModule!.id] ?? {}),
-                                          [f.fieldKey]: Number.isNaN(n) ? 0 : n,
-                                        },
-                                      }));
-                                    }}
-                                    className="w-20 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-60"
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                            {canEditProfile && (
-                              <div className="mt-3">
-                                <Button size="sm" onClick={saveAbility} disabled={saving}>
-                                  {saving ? (isZh ? '保存中…' : 'Saving…') : (isZh ? '保存画像' : 'Save profile')}
-                                </Button>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                      <div className="border border-slate-200 rounded-xl p-3">
-                        <h4 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '教学建议（学习中心）' : 'Learning-focused teaching cues'}</h4>
-                        <ul className="space-y-2 text-sm text-slate-700">
-                          <li>{isZh ? '先看学生最弱 1-2 个能力维度，设计下周的差异化任务。' : 'Prioritize the weakest 1-2 dimensions for next-week differentiation.'}</li>
-                          <li>{isZh ? '将能力分数与课堂表现证据配对记录，避免仅凭印象判断。' : 'Pair scores with classroom evidence to avoid impression-only judgments.'}</li>
-                          <li>{isZh ? '和学生共同设定一个短周期目标（2-4 周），并滚动更新画像。' : 'Set a short-cycle (2-4 week) goal with the student and update profile iteratively.'}</li>
-                        </ul>
-                      </div>
-                    </div>
-                      </>
-                    )}
-                    {detailTab === 'report' && (
+                    {portraitLensTab === 'academic' && (
                     <div id="term-report-panel" className="border border-slate-200 rounded-xl p-3 space-y-3">
                       <div className="flex items-center justify-between flex-wrap gap-2">
                         <h4 className="text-sm font-semibold text-slate-800">{isZh ? '学业报告（本学期快照）' : 'Academic report snapshot'}</h4>
@@ -1021,6 +946,27 @@ export default function StudentPortrait({
                         </select>
                       </div>
 
+                      {reportDetail &&
+                        reportDetail.subjectReports.some((s) => (s.dimensions ?? []).length > 0) && (
+                          <div className="rounded-lg border border-slate-200 bg-slate-50/90 p-3 space-y-2">
+                            <div className="text-xs font-semibold text-slate-800">
+                              {isZh ? '课程目标达成 · 等第说明' : 'Target attainment — grading rubric'}
+                            </div>
+                            <div className="space-y-1.5 text-[11px] text-slate-700 leading-snug">
+                              {(['A', 'B', 'C', 'D'] as const).map((lv) => {
+                                const text = (academicYearRubric ?? fullUnifiedLevelTextFromPreset(null))[lv];
+                                return (
+                                  <p key={lv} className="break-words">
+                                    <span className="font-semibold text-slate-800">{lv}</span>
+                                    <span className="text-slate-500"> · </span>
+                                    {text}
+                                  </p>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
                       {reportDetail && showHomeroomComment && (
                         <div className="rounded-lg border border-slate-200 p-3">
                           <div className="text-xs text-slate-500 mb-1">
@@ -1053,96 +999,154 @@ export default function StudentPortrait({
                       ) : (
                         <div className="space-y-3">
                           {reportDetail.subjectReports.map((s) => (
-                            <div key={s.subjectKey} className="rounded-lg border border-slate-200 p-3 space-y-2">
+                            <div key={s.subjectKey} className="rounded-lg border border-slate-200 p-3 space-y-3">
                               {(() => {
                                 const subjectConfig = templateSubjectMap.get(s.subjectKey);
                                 return (
                                   <>
                               <div className="text-sm font-medium text-slate-800">{s.subjectName || (isZh ? '未命名学科' : 'Untitled subject')}</div>
-                              {subjectConfig?.enableScore !== false && (
-                              <div className="grid grid-cols-2 gap-2">
-                                <div>
-                                  <label className="block text-xs text-slate-500 mb-1">{isZh ? '学科成绩' : 'Score'}</label>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={100}
-                                    step={0.5}
-                                    value={s.finalScore ?? ''}
-                                    onChange={(e) => {
-                                      const v = e.target.value.trim();
-                                      upsertSubjectDraft(s.subjectKey, (d) => ({ ...d, finalScore: v ? Number(v) : null, midtermScore: null }));
-                                    }}
-                                    className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
-                                  />
+                              {(s.dimensions.length > 0 ||
+                                subjectConfig?.enableLearningQuality !== false ||
+                                subjectConfig?.enableScore !== false) && (
+                                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+                                  <div className="text-xs font-medium text-slate-600 mb-2">
+                                    {isZh ? '评价维度' : 'Evaluation dimensions'}
+                                  </div>
+                                  <div className="overflow-x-auto rounded-lg border border-slate-200">
+                                    <table className="w-full min-w-[280px] border-collapse text-xs">
+                                      <tbody>
+                                        {s.dimensions.map((dim, idx) => (
+                                          <tr key={dim.id} className="bg-white">
+                                            <td className="border border-slate-200 px-2 py-1.5 align-middle text-sm text-slate-800">
+                                              {dim.dimensionLabel}
+                                            </td>
+                                            <td className="border border-slate-200 p-1 align-middle w-[7.5rem]">
+                                              <select
+                                                value={dim.rating ?? 'A'}
+                                                onChange={(e) =>
+                                                  upsertSubjectDraft(s.subjectKey, (d) => {
+                                                    const next = [...d.dimensions];
+                                                    next[idx] = { ...next[idx], rating: e.target.value as TargetLevel };
+                                                    return { ...d, dimensions: next };
+                                                  })
+                                                }
+                                                className="w-full rounded border border-slate-300 bg-white px-1.5 py-1 text-xs"
+                                                disabled={!canEditSubjectTermReport(s.subjectKey) || reportSaving}
+                                                aria-label={isZh ? `${dim.dimensionLabel} 等第` : `${dim.dimensionLabel} level`}
+                                              >
+                                                <option value="A">A</option>
+                                                <option value="B">B</option>
+                                                <option value="C">C</option>
+                                                <option value="D">D</option>
+                                              </select>
+                                            </td>
+                                          </tr>
+                                        ))}
+                                        {subjectConfig?.enableLearningQuality !== false ? (
+                                          <tr
+                                            className={`bg-slate-50/95 ${s.dimensions.length > 0 ? 'border-t-2 border-slate-300' : ''}`}
+                                          >
+                                            <td className="border border-slate-200 px-2 py-2 align-middle text-slate-800 text-[11px] sm:text-xs font-medium leading-snug">
+                                              {isZh ? '学习品质：兴趣、习惯与态度' : 'Learning quality: interest, habits, attitude'}
+                                            </td>
+                                            <td className="border border-slate-200 p-1.5 align-middle w-[7.5rem] bg-slate-50/95">
+                                              <select
+                                                value={s.learningQualityGrade ?? ''}
+                                                onChange={(e) => {
+                                                  const v = e.target.value.trim() as TargetLevel | '';
+                                                  upsertSubjectDraft(s.subjectKey, (d) => ({
+                                                    ...d,
+                                                    learningQualityGrade: v === 'A' || v === 'B' || v === 'C' || v === 'D' ? v : null,
+                                                  }));
+                                                }}
+                                                className="w-full rounded border border-slate-300 bg-white px-1.5 py-1 text-xs"
+                                                disabled={!canEditSubjectTermReport(s.subjectKey) || reportSaving}
+                                                aria-label={
+                                                  isZh
+                                                    ? '学习品质：兴趣、习惯与态度 等第'
+                                                    : 'Learning quality (interest, habits, attitude) level'
+                                                }
+                                              >
+                                                <option value="">{isZh ? '—' : '—'}</option>
+                                                <option value="A">A</option>
+                                                <option value="B">B</option>
+                                                <option value="C">C</option>
+                                                <option value="D">D</option>
+                                              </select>
+                                            </td>
+                                          </tr>
+                                        ) : null}
+                                        {subjectConfig?.enableScore !== false ? (
+                                          <tr
+                                            className={`bg-slate-100/80 ${
+                                              subjectConfig?.enableLearningQuality !== false
+                                                ? 'border-t border-slate-300'
+                                                : s.dimensions.length > 0
+                                                  ? 'border-t-2 border-slate-300'
+                                                  : ''
+                                            }`}
+                                          >
+                                            <td className="border border-slate-200 px-2 py-2 align-middle text-slate-800 text-xs font-medium">
+                                              {isZh ? '测评成绩' : 'Assessment score'}
+                                            </td>
+                                            <td className="border border-slate-200 p-1.5 align-middle min-w-[10rem] bg-slate-100/80">
+                                              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-1.5">
+                                                <input
+                                                  type="number"
+                                                  min={0}
+                                                  max={100}
+                                                  step={0.5}
+                                                  value={s.finalScore ?? ''}
+                                                  onChange={(e) => {
+                                                    const v = e.target.value.trim();
+                                                    upsertSubjectDraft(s.subjectKey, (d) => ({
+                                                      ...d,
+                                                      finalScore: v ? Number(v) : null,
+                                                      midtermScore: null,
+                                                    }));
+                                                  }}
+                                                  disabled={!canEditSubjectTermReport(s.subjectKey) || reportSaving}
+                                                  className="h-8 w-full min-w-0 flex-1 rounded border border-slate-300 px-2 text-xs bg-white"
+                                                  placeholder={isZh ? '分数' : 'Score'}
+                                                />
+                                                <input
+                                                  value={
+                                                    s.finalGrade ??
+                                                    reportLetterGradeFromScore(
+                                                      s.finalScore,
+                                                      reportTemplate?.scoreGradeMinScores,
+                                                    ) ??
+                                                    ''
+                                                  }
+                                                  readOnly
+                                                  className="h-8 w-full min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 text-xs text-slate-600 sm:max-w-[4.5rem]"
+                                                  placeholder={isZh ? '等第' : 'Grade'}
+                                                />
+                                              </div>
+                                            </td>
+                                          </tr>
+                                        ) : null}
+                                      </tbody>
+                                    </table>
+                                  </div>
                                 </div>
-                                <div>
-                                  <label className="block text-xs text-slate-500 mb-1">{isZh ? '自动等第' : 'Auto grade'}</label>
-                                  <input
-                                    value={s.finalGrade ?? toReportGrade(s.finalScore) ?? ''}
-                                    readOnly
-                                    className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-600"
-                                  />
-                                </div>
-                              </div>
                               )}
                               {subjectConfig?.enableTeacherComment !== false && (
-                              <div>
-                                <label className="block text-xs text-slate-500 mb-1">{isZh ? '学科教师评语（可选）' : 'Teacher comment (optional)'}</label>
-                                <textarea
-                                  value={s.teacherComment ?? ''}
-                                  onChange={(e) => upsertSubjectDraft(s.subjectKey, (d) => ({ ...d, teacherComment: e.target.value }))}
-                                  className="w-full min-h-[72px] rounded border border-slate-300 px-2 py-1.5 text-sm"
-                                />
-                              </div>
-                              )}
-
-                              <div className="rounded border border-slate-100 p-2 space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <div className="text-xs font-medium text-slate-600">{isZh ? '课程目标达成' : 'Target attainment'}</div>
+                                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2 shadow-sm">
+                                  <label className="block text-xs text-slate-500">{isZh ? '学科教师评语（可选）' : 'Teacher comment (optional)'}</label>
+                                  <textarea
+                                    value={s.teacherComment ?? ''}
+                                    onChange={(e) => upsertSubjectDraft(s.subjectKey, (d) => ({ ...d, teacherComment: e.target.value }))}
+                                    disabled={!canEditSubjectTermReport(s.subjectKey) || reportSaving}
+                                    className="w-full min-h-[72px] rounded border border-slate-300 px-2 py-1.5 text-sm bg-white"
+                                  />
                                 </div>
-                                {s.dimensions.map((dim, idx) => (
-                                  <div key={dim.id} className="rounded border border-slate-200 p-2 space-y-2">
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                      <input
-                                        value={dim.dimensionLabel}
-                                        readOnly
-                                        className="rounded border border-slate-200 px-2 py-1 text-sm bg-slate-50 text-slate-700"
-                                      />
-                                      <select
-                                        value={dim.rating ?? 'A'}
-                                        onChange={(e) =>
-                                          upsertSubjectDraft(s.subjectKey, (d) => {
-                                            const next = [...d.dimensions];
-                                            next[idx] = { ...next[idx], rating: e.target.value as TargetLevel };
-                                            return { ...d, dimensions: next };
-                                          })
-                                        }
-                                        className="rounded border border-slate-300 px-2 py-1 text-sm bg-white"
-                                        disabled={!canTeacherEditReport || reportSaving}
-                                      >
-                                        <option value="A">A</option>
-                                        <option value="B">B</option>
-                                        <option value="C">C</option>
-                                        <option value="D">D</option>
-                                      </select>
-                                    </div>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                      {(['A', 'B', 'C', 'D'] as TargetLevel[]).map((lv) => (
-                                        <div key={lv} className="rounded border border-slate-100 bg-slate-50 px-2 py-1 text-xs text-slate-700 whitespace-pre-wrap">
-                                          <span className="font-semibold text-slate-600 mr-1">{lv}</span>
-                                          <span>{dim.levelDescriptions[lv] || (isZh ? '未设置说明' : 'No description')}</span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
+                              )}
                               <div className="flex justify-end">
                                 <Button
                                   size="sm"
                                   onClick={() => void saveSubjectReport(s)}
-                                  disabled={reportSaving || !s.subjectName.trim() || !canTeacherEditReport}
+                                  disabled={reportSaving || !s.subjectName.trim() || !canEditSubjectTermReport(s.subjectKey)}
                                 >
                                   {reportSaving ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存学科报告' : 'Save subject report'}
                                 </Button>
@@ -1155,6 +1159,27 @@ export default function StudentPortrait({
                         </div>
                       )}
                     </div>
+                    )}
+                    {portraitLensTab === 'interests' && (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center text-sm text-slate-600">
+                        {isZh
+                          ? '「兴趣特长」框架开发中，将用于记录与展示学生的长期兴趣与特长发展。'
+                          : 'Interests & strengths: coming soon — a space for long-term interest and talent development.'}
+                      </div>
+                    )}
+                    {portraitLensTab === 'generalLearning' && (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center text-sm text-slate-600">
+                        {isZh
+                          ? '「通用学习能力」框架开发中，将用于学习策略、习惯等维度的长期追踪。'
+                          : 'General learning skills: coming soon — strategies, habits, and longitudinal tracking.'}
+                      </div>
+                    )}
+                    {portraitLensTab === 'socialEmotional' && (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center text-sm text-slate-600">
+                        {isZh
+                          ? '「社会情感能力」框架开发中，将用于协作、自我管理等方面的长期观察。'
+                          : 'Social-emotional learning: coming soon — collaboration, self-management, and related dimensions.'}
+                      </div>
                     )}
                   </div>
                 )}

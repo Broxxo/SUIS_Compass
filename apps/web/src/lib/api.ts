@@ -11,14 +11,18 @@ import type {
   StudentTermReport,
   ReportTemplate,
   EvaluationTemplateSummary,
+  ReportYearDimensionPreset,
   ReportTemplateProgress,
   StaffingAssignment,
+  OrgDepartment,
   ReportTemplateStatus,
   HomeroomCommentMode,
   EvaluationModuleType,
   ScoreVisibility,
   TargetLevel,
+  ReportExamConfigScope,
   Term,
+  ReportGrade,
 } from '../types/classManagement';
 import { getCurrentUserId, getToken } from './authUtils';
 
@@ -333,6 +337,9 @@ export const api = {
       createdAt?: string;
       password?: string | null;
       department?: string | null;
+      primarySubject?: string | null;
+      nameZh?: string | null;
+      nameEn?: string | null;
       studentId?: string | null;
       studentNameZh?: string | null;
       studentNameEn?: string | null;
@@ -351,6 +358,9 @@ export const api = {
       createdAt?: string;
       password?: string | null;
       department?: string | null;
+      primarySubject?: string | null;
+      nameZh?: string | null;
+      nameEn?: string | null;
       studentId?: string | null;
       studentNameZh?: string | null;
       studentNameEn?: string | null;
@@ -373,7 +383,25 @@ export const api = {
     return response.json();
   },
 
-  async createUser(input: { username: string; displayName?: string; role: User['role']; password: string; department?: string | null }): Promise<User & { createdAt?: string; password?: string | null; department?: string | null }> {
+  async createUser(input: {
+    username: string;
+    displayName?: string;
+    nameZh?: string | null;
+    nameEn?: string | null;
+    role: User['role'];
+    password: string;
+    department?: string | null;
+    primarySubject?: string | null;
+  }): Promise<
+    User & {
+      createdAt?: string;
+      password?: string | null;
+      department?: string | null;
+      primarySubject?: string | null;
+      nameZh?: string | null;
+      nameEn?: string | null;
+    }
+  > {
     const response = await fetch(apiUrl('/api/admin/users'), {
       method: 'POST',
       headers: getHeaders(),
@@ -391,7 +419,14 @@ export const api = {
       throw new Error(msg || 'Failed to create user');
     }
     const data = await response.json();
-    return data.user as User & { createdAt?: string; password?: string | null; department?: string | null };
+    return data.user as User & {
+      createdAt?: string;
+      password?: string | null;
+      department?: string | null;
+      primarySubject?: string | null;
+      nameZh?: string | null;
+      nameEn?: string | null;
+    };
   },
 
   async deleteUser(userId: string, confirmUsername: string): Promise<void> {
@@ -406,16 +441,44 @@ export const api = {
     }
   },
 
-  async updateUserDepartment(userId: string, department: string | null): Promise<void> {
+  async patchUserStaffFields(
+    userId: string,
+    fields: {
+      department?: string | null;
+      primarySubject?: string | null;
+      nameZh?: string | null;
+      nameEn?: string | null;
+    },
+  ): Promise<void> {
+    const body: Record<string, unknown> = {};
+    if (Object.prototype.hasOwnProperty.call(fields, 'department')) {
+      body.department = fields.department;
+    }
+    if (Object.prototype.hasOwnProperty.call(fields, 'primarySubject')) {
+      body.primarySubject = fields.primarySubject;
+    }
+    if (Object.prototype.hasOwnProperty.call(fields, 'nameZh')) {
+      body.nameZh = fields.nameZh;
+    }
+    if (Object.prototype.hasOwnProperty.call(fields, 'nameEn')) {
+      body.nameEn = fields.nameEn;
+    }
+    if (Object.keys(body).length === 0) {
+      throw new Error('department, primarySubject, nameZh, or nameEn is required');
+    }
     const response = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(userId)}`), {
       method: 'PATCH',
       headers: getHeaders(),
-      body: JSON.stringify({ department }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw new Error((data as { error?: string }).error || 'Failed to update department');
+      throw new Error((data as { error?: string }).error || 'Failed to update user');
     }
+  },
+
+  async updateUserDepartment(userId: string, department: string | null): Promise<void> {
+    return this.patchUserStaffFields(userId, { department });
   },
 
   async updateUserRole(userId: string, role: 'admin' | 'teacher'): Promise<void> {
@@ -534,6 +597,19 @@ export const api = {
     if (!response.ok) throw new Error('Failed to fetch classes');
     const data = await response.json();
     return (data.classes ?? data) as ClassItem[];
+  },
+
+  async getMySubjectAssignments(academicYearId: string): Promise<Array<{ classId: string; subjectKey: string }>> {
+    const response = await fetch(
+      apiUrl(`/api/classes/me/subject-assignments?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to fetch subject assignments');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch subject assignments');
+    return (data.assignments ?? []) as Array<{ classId: string; subjectKey: string }>;
   },
 
   async createClass(item: ClassItem): Promise<ClassItem> {
@@ -796,9 +872,20 @@ export const api = {
     return data.report as StudentTermReport;
   },
 
-  async getReportTemplatesForTerm(academicYearId: string, term: Term): Promise<ReportTemplate[]> {
+  async getReportTemplatesForTerm(
+    academicYearId: string,
+    term: Term,
+    opts?: { schoolSegmentId?: string | null }
+  ): Promise<ReportTemplate[]> {
+    const q = new URLSearchParams();
+    if (opts?.schoolSegmentId && String(opts.schoolSegmentId).trim()) {
+      q.set('schoolSegmentId', String(opts.schoolSegmentId).trim());
+    }
+    const qs = q.toString();
     const response = await fetch(
-      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}`),
+      apiUrl(
+        `/api/classes/reports/templates/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}${qs ? `?${qs}` : ''}`
+      ),
       { headers: getHeaders() }
     );
     if (!response.ok) throw new Error('Failed to fetch report template');
@@ -827,6 +914,7 @@ export const api = {
       midtermScore: number | null;
       finalScore: number | null;
       teacherComment?: string | null;
+      learningQualityGrade?: TargetLevel | null;
       dimensions: Array<{
         dimensionKey: string;
         dimensionLabel: string;
@@ -884,7 +972,13 @@ export const api = {
     return (data.templates ?? []) as EvaluationTemplateSummary[];
   },
 
-  async createAdminReportTemplate(input: { academicYearId: string; term: Term; title?: string | null; sourceTemplateId?: string | null }): Promise<ReportTemplate> {
+  async createAdminReportTemplate(input: {
+    academicYearId: string;
+    term: Term;
+    title?: string | null;
+    sourceTemplateId?: string | null;
+    schoolSegmentId?: string | null;
+  }): Promise<ReportTemplate> {
     const response = await fetch(apiUrl('/api/admin/report-templates'), {
       method: 'POST',
       headers: getHeaders(),
@@ -905,17 +999,116 @@ export const api = {
     return data.template as ReportTemplate;
   },
 
+  async getAdminReportYearDimensionPreset(academicYearId: string): Promise<ReportYearDimensionPreset | null> {
+    const response = await fetch(
+      apiUrl(`/api/admin/report-dimension-presets/${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch report year dimension preset');
+    const data = await readJsonOrThrow(response, 'Failed to fetch report year dimension preset');
+    return (data.preset ?? null) as ReportYearDimensionPreset | null;
+  },
+
+  async getAdminReportScoreGradeBands(input: {
+    academicYearId: string;
+    term: Term;
+    schoolSegmentId: string;
+  }): Promise<{ academicYearId: string; term: Term; schoolSegmentId: string; minScores: Record<ReportGrade, number> }> {
+    const q = new URLSearchParams();
+    q.set('academicYearId', input.academicYearId.trim());
+    q.set('term', input.term);
+    q.set('schoolSegmentId', input.schoolSegmentId.trim());
+    const response = await fetch(apiUrl(`/api/admin/report-score-grade-bands?${q.toString()}`), { headers: getHeaders() });
+    if (!response.ok) throw new Error('Failed to fetch score grade bands');
+    const data = await readJsonOrThrow(response, 'Failed to fetch score grade bands');
+    return data as { academicYearId: string; term: Term; schoolSegmentId: string; minScores: Record<ReportGrade, number> };
+  },
+
+  async putAdminReportScoreGradeBands(input: {
+    academicYearId: string;
+    term: Term;
+    schoolSegmentId: string;
+    minScores: Partial<Record<ReportGrade, number>>;
+  }): Promise<{ minScores: Record<ReportGrade, number> }> {
+    const response = await fetch(apiUrl('/api/admin/report-score-grade-bands'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save score grade bands');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to save score grade bands');
+    return data as { minScores: Record<ReportGrade, number> };
+  },
+
+  async upsertAdminReportYearDimensionPreset(input: {
+    academicYearId: string;
+    homeroomCommentMode: HomeroomCommentMode;
+    /** 不传则服务端保留已有「参与学业报告」配置 */
+    stageInclusion?: Record<string, string[]>;
+    /** key = `${term}::${schoolSegmentId}` */
+    examConfigs?: Record<string, ReportExamConfigScope>;
+    /** 不传则服务端保留已有全学科共用等第说明 */
+    unifiedLevelDescriptions?: Partial<Record<TargetLevel, string>>;
+    subjects: Array<{
+      courseId?: string;
+      subjectKey?: string;
+      subjectNameZh: string;
+      subjectNameEn: string;
+      enableScore?: boolean;
+      enableTeacherComment?: boolean;
+      enableTarget?: boolean;
+      gradeDimensions?: Array<{
+        gradeId: string;
+        dimensions: Array<{
+          dimensionLabelZh: string;
+          dimensionLabelEn: string;
+          levelDescriptions: Partial<Record<TargetLevel, string>>;
+        }>;
+      }>;
+      dimensions: Array<{
+        dimensionLabelZh: string;
+        dimensionLabelEn: string;
+        levelDescriptions: Partial<Record<TargetLevel, string>>;
+      }>;
+    }>;
+  }): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/admin/report-dimension-presets/${encodeURIComponent(input.academicYearId)}`),
+      {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          homeroomCommentMode: input.homeroomCommentMode,
+          subjects: input.subjects,
+          ...(input.stageInclusion !== undefined ? { stageInclusion: input.stageInclusion } : {}),
+          ...(input.examConfigs !== undefined ? { examConfigs: input.examConfigs } : {}),
+          ...(input.unifiedLevelDescriptions !== undefined ? { unifiedLevelDescriptions: input.unifiedLevelDescriptions } : {}),
+        }),
+      }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save report year dimension preset');
+    }
+  },
+
   async upsertAdminReportTemplate(input: {
     templateId: string;
     title?: string | null;
     status: ReportTemplateStatus;
     homeroomCommentMode: HomeroomCommentMode;
     subjects: Array<{
+      /** 与岗位安排 subject_key / 课程一致；未传时由服务端按英文名规范化 */
+      subjectKey?: string;
       subjectNameZh: string;
       subjectNameEn: string;
       moduleType?: EvaluationModuleType;
       enableScore?: boolean;
       enableTeacherComment?: boolean;
+      enableLearningQuality?: boolean;
       scoreVisibility?: ScoreVisibility;
       dimensions: Array<{
         dimensionLabelZh: string;
@@ -1018,6 +1211,7 @@ export const api = {
     subjectKey: string;
     subjectName: string;
     teacherId: string;
+    teacherSlot?: 0 | 1;
   }): Promise<void> {
     const response = await fetch(apiUrl('/api/admin/staffing/assignments'), {
       method: 'PUT',
@@ -1034,17 +1228,76 @@ export const api = {
     academicYearId: string;
     classId: string;
     subjectKey: string;
+    /** 指定时只删该教师位；省略则删除该班该学科全部岗位行 */
+    teacherSlot?: 0 | 1;
   }): Promise<void> {
-    const response = await fetch(
-      apiUrl(`/api/admin/staffing/assignments/${encodeURIComponent(input.academicYearId)}/${encodeURIComponent(input.classId)}/${encodeURIComponent(input.subjectKey)}`),
-      {
-        method: 'DELETE',
-        headers: getHeaders(),
-      }
-    );
+    const base = `/api/admin/staffing/assignments/${encodeURIComponent(input.academicYearId)}/${encodeURIComponent(input.classId)}/${encodeURIComponent(input.subjectKey)}`;
+    const q =
+      input.teacherSlot === 0 || input.teacherSlot === 1
+        ? `?slot=${encodeURIComponent(String(input.teacherSlot))}`
+        : '';
+    const response = await fetch(apiUrl(`${base}${q}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error((data as { error?: string }).error || 'Failed to remove staffing assignment');
+    }
+  },
+
+  async getAdminOrgDepartments(): Promise<OrgDepartment[]> {
+    const response = await fetch(apiUrl('/api/admin/org-departments'), { headers: getHeaders() });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch org departments');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch org departments');
+    return (data.departments ?? []) as OrgDepartment[];
+  },
+
+  async createAdminOrgDepartment(input: { name: string; parentId?: string | null }): Promise<OrgDepartment> {
+    const response = await fetch(apiUrl('/api/admin/org-departments'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({
+        name: input.name,
+        parentId: input.parentId ?? null,
+      }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to create department');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to create department');
+    return (data as { department: OrgDepartment }).department;
+  },
+
+  async updateAdminOrgDepartment(
+    id: string,
+    input: Partial<{ name: string; parentId: string | null; sortOrder: number }>,
+  ): Promise<OrgDepartment> {
+    const response = await fetch(apiUrl(`/api/admin/org-departments/${encodeURIComponent(id)}`), {
+      method: 'PATCH',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to update department');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to update department');
+    return (data as { department: OrgDepartment }).department;
+  },
+
+  async deleteAdminOrgDepartment(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/org-departments/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete department');
     }
   },
 

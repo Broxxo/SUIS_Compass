@@ -1,4 +1,4 @@
--- 用户表（保留 password 用于迁移期，password_hash 用于新认证）
+-- 用户表（password_hash 为认证；测试环境以本文件为库结构唯一来源，见 npm run db:init）
 CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(50) PRIMARY KEY,
   username VARCHAR(50) UNIQUE NOT NULL,
@@ -6,11 +6,15 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(255),
   role VARCHAR(20) NOT NULL,
   display_name VARCHAR(100) NOT NULL,
+  name_zh VARCHAR(100),
+  name_en VARCHAR(100),
+  department VARCHAR(100),
+  primary_subject VARCHAR(120),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 若表已存在则只加列（迁移脚本可单独跑）
+-- 已有库缺列时补齐（全新 CREATE 已含上述列）
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'password_hash') THEN
@@ -19,12 +23,24 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'department') THEN
     ALTER TABLE users ADD COLUMN department VARCHAR(100);
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'primary_subject') THEN
+    ALTER TABLE users ADD COLUMN primary_subject VARCHAR(120);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'name_zh') THEN
+    ALTER TABLE users ADD COLUMN name_zh VARCHAR(100);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'name_en') THEN
+    ALTER TABLE users ADD COLUMN name_en VARCHAR(100);
+  END IF;
 END $$;
+
+-- 旧数据：将原 display_name 回填到 name_zh（测试库可整库 init 重建）
+UPDATE users SET name_zh = display_name WHERE name_zh IS NULL AND display_name IS NOT NULL AND TRIM(display_name) <> '';
 
 -- 预设用户：密码将在首次部署时由 seed 写入哈希（见 scripts/seed-users.ts 或 init 说明）
 -- 角色：system-admin 系统管理员 | admin 管理员 | teacher 教师
-INSERT INTO users (id, username, password, role, display_name) VALUES
-  ('admin-1', 'Admin', '4321', 'system-admin', '系统管理员')
+INSERT INTO users (id, username, password, role, display_name, name_zh) VALUES
+  ('admin-1', 'Admin', '4321', 'system-admin', '系统管理员', '系统管理员')
 ON CONFLICT (username) DO NOTHING;
 
 -- 课程表（全校共享；通过权限控制写入）
@@ -36,6 +52,7 @@ CREATE TABLE IF NOT EXISTS courses (
   subject_category_en VARCHAR(100),
   applicable_grades JSONB NOT NULL DEFAULT '[]'::jsonb,
   weekly_periods_by_grade JSONB NOT NULL DEFAULT '{}'::jsonb,
+  co_teaching BOOLEAN NOT NULL DEFAULT FALSE,
   textbook_version VARCHAR(100),
   color VARCHAR(20) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -52,6 +69,8 @@ BEGIN
     ALTER TABLE courses DROP COLUMN IF EXISTS weekly_periods;
   END IF;
 END $$;
+
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS co_teaching BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- 学期数据表（全校共享；每课程-年级-学期唯一）
 CREATE TABLE IF NOT EXISTS semester_data (
@@ -157,6 +176,24 @@ CREATE TABLE IF NOT EXISTS class_teacher_assignments (
 );
 CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_class_active ON class_teacher_assignments(class_id) WHERE unassigned_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_teacher_active ON class_teacher_assignments(teacher_id) WHERE unassigned_at IS NULL;
+
+-- 将 classes.teacher_id 同步为班主任岗位（幂等；测试环境可整库 init 重建）
+INSERT INTO class_teacher_assignments (id, class_id, teacher_id, role, assigned_at)
+SELECT
+  'cta-' || c.id || '-' || c.teacher_id,
+  c.id,
+  c.teacher_id,
+  'homeroom',
+  COALESCE(c.created_at, CURRENT_TIMESTAMP)
+FROM classes c
+WHERE c.teacher_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM class_teacher_assignments a
+    WHERE a.class_id = c.id
+      AND a.teacher_id = c.teacher_id
+      AND a.unassigned_at IS NULL
+  );
 
 -- 班级-学科教师岗位安排（按学年版本化）
 CREATE TABLE IF NOT EXISTS class_subject_teacher_assignments (
@@ -349,6 +386,7 @@ CREATE TABLE IF NOT EXISTS student_term_subject_reports (
   final_score NUMERIC(5,2),
   final_grade VARCHAR(10),
   teacher_comment TEXT,
+  learning_quality_grade VARCHAR(2),
   teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
@@ -356,6 +394,8 @@ CREATE TABLE IF NOT EXISTS student_term_subject_reports (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(report_id, subject_key)
 );
+ALTER TABLE student_term_subject_reports
+  ADD COLUMN IF NOT EXISTS learning_quality_grade VARCHAR(2);
 CREATE INDEX IF NOT EXISTS idx_student_term_subject_reports_report ON student_term_subject_reports(report_id);
 
 CREATE TABLE IF NOT EXISTS student_term_target_dimensions (
@@ -429,6 +469,19 @@ ALTER TABLE student_report_templates
   ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;
 ALTER TABLE student_report_templates
   ADD COLUMN IF NOT EXISTS released_at TIMESTAMP;
+ALTER TABLE student_report_templates
+  ADD COLUMN IF NOT EXISTS school_segment_id VARCHAR(120) NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS student_report_score_grade_bands (
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+  school_segment_id VARCHAR(120) NOT NULL DEFAULT '',
+  min_scores JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (academic_year_id, term, school_segment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_report_score_grade_bands_year_init
+  ON student_report_score_grade_bands(academic_year_id);
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -455,6 +508,7 @@ CREATE TABLE IF NOT EXISTS student_report_template_subjects (
   subject_name_en VARCHAR(120) NOT NULL DEFAULT '',
   module_type VARCHAR(30) NOT NULL DEFAULT 'subject_score',
   enable_score BOOLEAN NOT NULL DEFAULT TRUE,
+  enable_learning_quality BOOLEAN NOT NULL DEFAULT TRUE,
   enable_teacher_comment BOOLEAN NOT NULL DEFAULT TRUE,
   score_visibility VARCHAR(40) NOT NULL DEFAULT 'teacher_homeroom_admin',
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -472,6 +526,8 @@ ALTER TABLE student_report_template_subjects
   ADD COLUMN IF NOT EXISTS enable_score BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE student_report_template_subjects
   ADD COLUMN IF NOT EXISTS enable_teacher_comment BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS enable_learning_quality BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE student_report_template_subjects
   ADD COLUMN IF NOT EXISTS score_visibility VARCHAR(40) NOT NULL DEFAULT 'teacher_homeroom_admin';
 CREATE INDEX IF NOT EXISTS idx_student_report_template_subjects_template
@@ -554,3 +610,14 @@ CREATE TABLE IF NOT EXISTS class_point_events (
 );
 CREATE INDEX IF NOT EXISTS idx_class_point_events_class_id ON class_point_events(class_id);
 CREATE INDEX IF NOT EXISTS idx_class_point_events_class_scheme ON class_point_events(class_id, scheme_id);
+
+-- 全校组织架构部门（树形嵌套；仅 system-admin 可改，admin 只读）
+CREATE TABLE IF NOT EXISTS org_departments (
+  id VARCHAR(50) PRIMARY KEY,
+  name VARCHAR(160) NOT NULL,
+  parent_id VARCHAR(50) REFERENCES org_departments(id) ON DELETE CASCADE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_org_departments_parent ON org_departments(parent_id);

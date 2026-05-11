@@ -524,6 +524,7 @@ export default function CurriculumRoadmap({
     weeklyPeriodsByGrade: Record<string, number>,
     textbookVersion: string,
     color: Course['color'],
+    coTeaching: boolean,
   ) => {
     const newCourse: Course = {
       id: `course-${Date.now()}`,
@@ -533,6 +534,7 @@ export default function CurriculumRoadmap({
       weeklyPeriodsByGrade,
       textbookVersion: textbookVersion || '人教版',
       color: color,
+      coTeaching: Boolean(coTeaching),
     };
     setCourses([...courses, newCourse]);
     setIsAddCourseDialogOpen(false);
@@ -547,6 +549,7 @@ export default function CurriculumRoadmap({
       weeklyPeriodsByGrade?: Record<string, number>;
       textbookVersion?: string;
       color?: CourseColor;
+      coTeaching?: boolean;
     },
   ) => {
     setCourses(courses.map(course =>
@@ -594,6 +597,7 @@ export default function CurriculumRoadmap({
       weeklyPeriodsByGrade: Record<string, number>;
       textbookVersion?: string;
       color: CourseColor;
+      coTeaching: boolean;
     },
   ) => {
     handleUpdateCourse(courseId, updates);

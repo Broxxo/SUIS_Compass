@@ -22,6 +22,7 @@ interface EditCourseDialogProps {
       weeklyPeriodsByGrade: Record<string, number>;
       textbookVersion?: string;
       color: CourseColor;
+      coTeaching: boolean;
     },
   ) => void;
   gradeItems: GradeConfigItem[];
@@ -41,6 +42,7 @@ export default function EditCourseDialog({
   const [weeklyPeriodsByGrade, setWeeklyPeriodsByGrade] = useState<Record<string, number>>({});
   const [textbookVersion, setTextbookVersion] = useState('人教版');
   const [selectedColor, setSelectedColor] = useState<CourseColor>('light-blue');
+  const [coTeaching, setCoTeaching] = useState(false);
 
   useEffect(() => {
     if (course) {
@@ -56,6 +58,7 @@ export default function EditCourseDialog({
       setWeeklyPeriodsByGrade({ ...(course.weeklyPeriodsByGrade || {}) });
       setTextbookVersion(course.textbookVersion || '人教版');
       setSelectedColor(course.color);
+      setCoTeaching(Boolean(course.coTeaching));
     }
   }, [course]);
 
@@ -81,6 +84,7 @@ export default function EditCourseDialog({
         weeklyPeriodsByGrade,
         textbookVersion: textbookVersion.trim() || '人教版',
         color: selectedColor,
+        coTeaching,
       });
       onOpenChange(false);
     }
@@ -159,6 +163,32 @@ export default function EditCourseDialog({
                 }}
               />
               <p className="text-xs text-gray-500 mt-1">{t('hint.gradeRange')}</p>
+            </div>
+            <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/80 px-3 py-2.5">
+              <input
+                id="edit-course-co-teaching"
+                type="checkbox"
+                checked={coTeaching}
+                onChange={(e) => setCoTeaching(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+              />
+              <label htmlFor="edit-course-co-teaching" className="text-sm text-slate-800 leading-snug cursor-pointer">
+                {language === 'zh' ? (
+                  <>
+                    <span className="font-medium">合作教学</span>
+                    <span className="block text-xs text-slate-600 mt-0.5">
+                      勾选后，岗位安排中该课程需填写两位教师；周课时统计时两人各计该课程的全额周课时。
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="font-medium">Co-teaching</span>
+                    <span className="block text-xs text-slate-600 mt-0.5">
+                      When enabled, staffing shows two teacher slots; weekly load counts the full weekly periods for each teacher.
+                    </span>
+                  </>
+                )}
+              </label>
             </div>
             <div>
               <label className="text-sm font-medium text-gray-700 mb-2 block">

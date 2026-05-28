@@ -47,7 +47,9 @@ export const STORAGE_KEYS = {
   SEMESTER_PREFIX: 'semester-data-',
   CATEGORY_ORDER: 'curriculum-roadmap-category-order',
   KEY_CONCEPTS: 'curriculum-roadmap-key-concepts',
-  GRADE_CONFIG: 'curriculum-roadmap-grade-config',
+  /** @deprecated 旧 key，读取时自动迁移 */
+  GRADE_CONFIG_LEGACY: 'curriculum-roadmap-grade-config',
+  SCHOOL_GRADE_STRUCTURE: 'suis-school-grade-structure',
   // 班级管理（1.3）
   ACADEMIC_YEARS: 'class-mgmt-academic-years',
   CURRENT_ACADEMIC_YEAR_ID: 'class-mgmt-current-year-id',

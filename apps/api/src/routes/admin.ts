@@ -2,8 +2,30 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import pool from '../config/database.js';
-import { mergeReportScoreGradeMinScores, REPORT_SCORE_LETTER_GRADES, type ReportScoreLetterGrade } from '@repo/shared';
+import {
+  mergeReportScoreGradeMinScores,
+  REPORT_SCORE_LETTER_GRADES,
+  STAFFING_HOMEROOM_SUBJECT_KEY,
+  extractEvaluationGradeInclusion,
+  extractExamGradeInclusion,
+  type ReportScoreLetterGrade,
+} from '@repo/shared';
 import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
+import { sanitizeExamConfigs } from '../lib/reportExamConfigSanitize.js';
+import { ensureClassTeacherAssignmentsTable } from '../lib/ensureClassTeacherAssignmentsTable.js';
+import {
+  effectiveTemplateSubjectEnableScore,
+  gradeCatalogIdForClassLevel,
+  isTemplateSubjectRequiredForGrade,
+  loadGradeConfigItemsForReport,
+  loadReportYearInclusionContext,
+  loadSegmentGradeIds,
+} from '../lib/reportYearInclusionContext.js';
+import {
+  applyHomeroomFromStaffingToClassTables,
+  backfillHomeroomStaffingForAcademicYear,
+} from '../lib/homeroomStaffingSync.js';
+import { createRunOnce } from '../lib/runOnce.js';
 
 const router = express.Router();
 
@@ -19,9 +41,9 @@ type ModuleType = 'subject_score' | 'subject_comment' | 'non_score_comment';
 type ScoreVisibility = 'teacher_homeroom_admin';
 type TargetLevel = 'A' | 'B' | 'C' | 'D';
 
-let ensuredUsersStudentIdColumn = false;
-let ensuredUsersPrimarySubjectColumn = false;
-let ensuredUsersNameZhEn = false;
+const ensureUsersStudentIdOnce = createRunOnce();
+const ensureUsersPrimarySubjectOnce = createRunOnce();
+const ensureUsersNameZhEnOnce = createRunOnce();
 let ensuredReportTemplateTables = false;
 let ensuredOrgDepartmentsTable = false;
 
@@ -219,133 +241,19 @@ function extractUnifiedLevelDescriptions(raw: unknown): Partial<Record<TargetLev
   return sanitizeUnifiedLevelDescriptions(ul);
 }
 
-function sanitizeExamPercentBands(raw: unknown): Partial<Record<ReportScoreLetterGrade, number>> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const rec = raw as Record<string, unknown>;
-  const out: Partial<Record<ReportScoreLetterGrade, number>> = {};
-  for (const g of REPORT_SCORE_LETTER_GRADES) {
-    const v = Number(rec[g]);
-    if (!Number.isFinite(v)) continue;
-    out[g] = Math.max(0, Math.min(100, Math.round(v * 100) / 100));
-  }
-  return out;
-}
-
-function sanitizeExamConfigs(raw: unknown): Record<string, {
-  subjectInclusion: string[];
-  subjects: Array<{
-    courseId: string;
-    subjectKey: string;
-    subjectNameZh: string;
-    subjectNameEn: string;
-    gradeConfigs: Array<{
-      gradeId: string;
-      percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
-      dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
-    }>;
-  }>;
-}> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const source = (raw as { examConfigs?: unknown }).examConfigs;
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
-  const out: Record<string, {
-    subjectInclusion: string[];
-    subjects: Array<{
-      courseId: string;
-      subjectKey: string;
-      subjectNameZh: string;
-      subjectNameEn: string;
-      gradeConfigs: Array<{
-        gradeId: string;
-        percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
-        dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
-      }>;
-    }>;
-  }> = {};
-  for (const [rawKey, rawScope] of Object.entries(source as Record<string, unknown>)) {
-    const key = String(rawKey ?? '').trim();
-    if (!key) continue;
-    const scope = rawScope && typeof rawScope === 'object' && !Array.isArray(rawScope)
-      ? (rawScope as Record<string, unknown>)
-      : {};
-    const subjectInclusion = Array.isArray(scope.subjectInclusion)
-      ? scope.subjectInclusion.map((x) => String(x).trim()).filter(Boolean)
-      : [];
-    const usedCourses = new Set<string>();
-    const subjectsRaw = Array.isArray(scope.subjects) ? scope.subjects : [];
-    const subjects: Array<{
-      courseId: string;
-      subjectKey: string;
-      subjectNameZh: string;
-      subjectNameEn: string;
-      gradeConfigs: Array<{
-        gradeId: string;
-        percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
-        dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
-      }>;
-    }> = [];
-    for (const row of subjectsRaw) {
-      const rec = row as Record<string, unknown>;
-      const courseId = String(rec.courseId ?? '').trim();
-      if (!courseId || usedCourses.has(courseId)) continue;
-      usedCourses.add(courseId);
-      const subjectKey = String(rec.subjectKey ?? '').trim();
-      const subjectNameZh = String(rec.subjectNameZh ?? '').trim();
-      const subjectNameEn = String(rec.subjectNameEn ?? '').trim();
-      const gradeConfigsRaw = Array.isArray(rec.gradeConfigs) ? rec.gradeConfigs : [];
-      const usedGrades = new Set<string>();
-      const gradeConfigs: Array<{
-        gradeId: string;
-        percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
-        dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
-      }> = [];
-      for (const g of gradeConfigsRaw) {
-        const gRec = g as Record<string, unknown>;
-        const gradeId = String(gRec.gradeId ?? '').trim();
-        if (!gradeId || usedGrades.has(gradeId)) continue;
-        usedGrades.add(gradeId);
-        const dimsRaw = Array.isArray(gRec.dimensionScores) ? gRec.dimensionScores : [];
-        const dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }> = [];
-        for (const dim of dimsRaw) {
-          const d = dim as Record<string, unknown>;
-          const dimensionLabelZh = String(d.dimensionLabelZh ?? '').trim();
-          const dimensionLabelEn = String(d.dimensionLabelEn ?? '').trim();
-          const score = Number(d.score);
-          if (!dimensionLabelZh || !dimensionLabelEn || !Number.isFinite(score) || score < 0) continue;
-          dimensionScores.push({
-            dimensionLabelZh,
-            dimensionLabelEn,
-            score: Math.round(score * 100) / 100,
-          });
-        }
-        gradeConfigs.push({
-          gradeId,
-          percentBands: sanitizeExamPercentBands(gRec.percentBands),
-          dimensionScores,
-        });
-      }
-      subjects.push({
-        courseId,
-        subjectKey,
-        subjectNameZh,
-        subjectNameEn,
-        gradeConfigs,
-      });
-    }
-    out[key] = { subjectInclusion, subjects };
-  }
-  return out;
-}
-
 function parsePresetPayload(payload: unknown): {
   subjects: ReturnType<typeof sanitizePresetSubjects>;
   stageInclusion: Record<string, string[]>;
+  evaluationGradeInclusion: ReturnType<typeof extractEvaluationGradeInclusion>;
+  examGradeInclusion: ReturnType<typeof extractExamGradeInclusion>;
   examConfigs: ReturnType<typeof sanitizeExamConfigs>;
   unifiedLevelDescriptions: Partial<Record<TargetLevel, string>>;
 } {
   return {
     subjects: sanitizePresetSubjects(extractPresetSubjectsArray(payload)),
     stageInclusion: extractStageInclusion(payload),
+    evaluationGradeInclusion: extractEvaluationGradeInclusion(payload),
+    examGradeInclusion: extractExamGradeInclusion(payload),
     examConfigs: sanitizeExamConfigs(payload),
     unifiedLevelDescriptions: extractUnifiedLevelDescriptions(payload),
   };
@@ -374,7 +282,7 @@ function normalizePageOffset(raw: unknown): number {
   return intNum;
 }
 async function ensureUsersStudentIdColumn(): Promise<void> {
-  if (ensuredUsersStudentIdColumn) return;
+  await ensureUsersStudentIdOnce.run(async () => {
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50)');
   await pool.query(
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_student_id_unique ON users(student_id) WHERE student_id IS NOT NULL',
@@ -387,20 +295,20 @@ async function ensureUsersStudentIdColumn(): Promise<void> {
   } catch {
     /* constraint may already exist */
   }
-  ensuredUsersStudentIdColumn = true;
+  });
 }
 
 async function ensureUsersPrimarySubjectColumn(): Promise<void> {
-  if (ensuredUsersPrimarySubjectColumn) return;
+  await ensureUsersPrimarySubjectOnce.run(async () => {
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS primary_subject VARCHAR(120)');
-  ensuredUsersPrimarySubjectColumn = true;
+  });
 }
 
 async function ensureUsersNameZhEn(): Promise<void> {
-  if (ensuredUsersNameZhEn) return;
+  await ensureUsersNameZhEnOnce.run(async () => {
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name_zh VARCHAR(100)');
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name_en VARCHAR(100)');
-  ensuredUsersNameZhEn = true;
+  });
 }
 
 function resolveUserDisplayLabel(row: {
@@ -1531,6 +1439,8 @@ router.get('/report-dimension-presets/:academicYearId', async (req: AuthedReques
       homeroomCommentMode: row.homeroom_comment_mode ?? 'optional',
       subjects: parsed.subjects,
       stageInclusion: parsed.stageInclusion,
+      evaluationGradeInclusion: parsed.evaluationGradeInclusion,
+      examGradeInclusion: parsed.examGradeInclusion,
       examConfigs: parsed.examConfigs,
       unifiedLevelDescriptions: parsed.unifiedLevelDescriptions,
       updatedAt: row.updated_at?.toISOString() ?? null,
@@ -1559,6 +1469,8 @@ router.put('/report-dimension-presets/:academicYearId', async (req: AuthedReques
       : {
           subjects: [] as ReturnType<typeof sanitizePresetSubjects>,
           stageInclusion: {} as Record<string, string[]>,
+          evaluationGradeInclusion: {} as ReturnType<typeof extractEvaluationGradeInclusion>,
+          examGradeInclusion: {} as ReturnType<typeof extractExamGradeInclusion>,
           examConfigs: {} as ReturnType<typeof sanitizeExamConfigs>,
           unifiedLevelDescriptions: {} as Partial<Record<TargetLevel, string>>,
         };
@@ -1568,6 +1480,14 @@ router.put('/report-dimension-presets/:academicYearId', async (req: AuthedReques
       req.body?.stageInclusion !== undefined && req.body?.stageInclusion !== null
         ? extractStageInclusion({ stageInclusion: req.body.stageInclusion })
         : existing.stageInclusion;
+    const evaluationGradeInclusion =
+      req.body?.evaluationGradeInclusion !== undefined && req.body?.evaluationGradeInclusion !== null
+        ? extractEvaluationGradeInclusion({ evaluationGradeInclusion: req.body.evaluationGradeInclusion })
+        : existing.evaluationGradeInclusion;
+    const examGradeInclusion =
+      req.body?.examGradeInclusion !== undefined && req.body?.examGradeInclusion !== null
+        ? extractExamGradeInclusion({ examGradeInclusion: req.body.examGradeInclusion })
+        : existing.examGradeInclusion;
     const examConfigs =
       req.body?.examConfigs !== undefined && req.body?.examConfigs !== null
         ? sanitizeExamConfigs({ examConfigs: req.body.examConfigs })
@@ -1576,7 +1496,14 @@ router.put('/report-dimension-presets/:academicYearId', async (req: AuthedReques
       req.body?.unifiedLevelDescriptions !== undefined && req.body?.unifiedLevelDescriptions !== null
         ? sanitizeUnifiedLevelDescriptions(req.body.unifiedLevelDescriptions)
         : existing.unifiedLevelDescriptions;
-    const payload = JSON.stringify({ subjects: subjectsToStore, stageInclusion, examConfigs, unifiedLevelDescriptions });
+    const payload = JSON.stringify({
+      subjects: subjectsToStore,
+      stageInclusion,
+      evaluationGradeInclusion,
+      examGradeInclusion,
+      examConfigs,
+      unifiedLevelDescriptions,
+    });
     await pool.query(
       `INSERT INTO student_report_year_dimension_presets
         (academic_year_id, homeroom_comment_mode, payload, updated_by, updated_at)
@@ -1595,6 +1522,8 @@ router.put('/report-dimension-presets/:academicYearId', async (req: AuthedReques
         homeroomCommentMode,
         subjects: subjectsToStore,
         stageInclusion,
+        evaluationGradeInclusion,
+        examGradeInclusion,
         examConfigs,
         unifiedLevelDescriptions,
       },
@@ -2056,10 +1985,18 @@ router.post('/report-templates/:templateId/release', async (req: AuthedRequest, 
 router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, res: Response) => {
   try {
     await ensureReportTemplateTables();
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
     const templateId = String(req.params.templateId ?? '').trim();
     if (!templateId) return res.status(400).json({ error: 'templateId required' });
     const template = await loadTemplateDetail(templateId);
     if (!template) return res.status(404).json({ error: 'Template not found' });
+
+    const homeroomModuleActive = template.homeroomCommentMode !== 'disabled';
+    const segmentId = String(template.schoolSegmentId ?? '').trim();
+    const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+    const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+    const gradeCatalogItems = await loadGradeConfigItemsForReport();
 
     const rosterRows = (await pool.query(
       `SELECT c.id AS class_id, c.grade, c.name AS class_name,
@@ -2108,7 +2045,8 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
     const subjectRows = (await pool.query(
       `SELECT sr.report_id, sr.subject_key,
               CASE WHEN sr.midterm_score IS NOT NULL OR sr.final_score IS NOT NULL THEN TRUE ELSE FALSE END AS has_score,
-              CASE WHEN COALESCE(NULLIF(TRIM(sr.teacher_comment), ''), NULL) IS NULL THEN FALSE ELSE TRUE END AS has_comment
+              CASE WHEN COALESCE(NULLIF(TRIM(sr.teacher_comment), ''), NULL) IS NULL THEN FALSE ELSE TRUE END AS has_comment,
+              CASE WHEN sr.learning_quality_grade IN ('A','B','C','D') THEN TRUE ELSE FALSE END AS has_learning_quality
        FROM student_term_subject_reports sr
        JOIN student_term_reports r ON r.id = sr.report_id
        WHERE r.template_id = $1 AND r.academic_year_id = $2 AND r.term = $3`,
@@ -2118,6 +2056,7 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
       subject_key: string;
       has_score: boolean;
       has_comment: boolean;
+      has_learning_quality: boolean;
     }>;
 
     const ratingRows = (await pool.query(
@@ -2138,11 +2077,12 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
     for (const row of reportRows) {
       reportByStudent.set(row.student_id, { reportId: row.id, hasHomeroom: row.has_homeroom });
     }
-    const subjectByReportAndKey = new Map<string, { hasScore: boolean; hasComment: boolean }>();
+    const subjectByReportAndKey = new Map<string, { hasScore: boolean; hasComment: boolean; hasLearningQuality: boolean }>();
     for (const row of subjectRows) {
       subjectByReportAndKey.set(`${row.report_id}::${row.subject_key}`, {
         hasScore: row.has_score,
         hasComment: row.has_comment,
+        hasLearningQuality: row.has_learning_quality,
       });
     }
     const ratingKeysByReportAndSubject = new Map<string, Set<string>>();
@@ -2151,6 +2091,40 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
       const set = ratingKeysByReportAndSubject.get(key) ?? new Set<string>();
       if (row.dimension_key) set.add(row.dimension_key);
       ratingKeysByReportAndSubject.set(key, set);
+    }
+
+    const homeroomTeacherRows = (await pool.query(
+      `SELECT c.id AS class_id,
+              COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
+       FROM classes c
+       JOIN class_teacher_assignments a ON a.class_id = c.id AND a.unassigned_at IS NULL AND a.role = 'homeroom'
+       JOIN users u ON u.id = a.teacher_id
+       WHERE c.academic_year_id = $1`,
+      [template.academicYearId]
+    )).rows as Array<{ class_id: string; teacher_name: string }>;
+
+    const staffingTeacherRows = (await pool.query(
+      `SELECT a.class_id, a.subject_key,
+              COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
+       FROM class_subject_teacher_assignments a
+       JOIN classes c ON c.id = a.class_id
+       JOIN users u ON u.id = a.teacher_id
+       WHERE a.academic_year_id = $1`,
+      [template.academicYearId]
+    )).rows as Array<{ class_id: string; subject_key: string; teacher_name: string }>;
+
+    const homeroomNamesByClass = new Map<string, string[]>();
+    for (const row of homeroomTeacherRows) {
+      const arr = homeroomNamesByClass.get(row.class_id) ?? [];
+      if (!arr.includes(row.teacher_name)) arr.push(row.teacher_name);
+      homeroomNamesByClass.set(row.class_id, arr);
+    }
+    const staffingNamesByClassSubject = new Map<string, string[]>();
+    for (const row of staffingTeacherRows) {
+      const key = `${row.class_id}::${row.subject_key}`;
+      const arr = staffingNamesByClassSubject.get(key) ?? [];
+      if (!arr.includes(row.teacher_name)) arr.push(row.teacher_name);
+      staffingNamesByClassSubject.set(key, arr);
     }
 
     const classMap = new Map<string, {
@@ -2182,43 +2156,69 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
     const classes = Array.from(classMap.values())
       .sort((a, b) => (a.grade - b.grade) || a.className.localeCompare(b.className))
       .map((cls) => {
+        const gradeCatalogId = gradeCatalogIdForClassLevel(gradeCatalogItems, cls.grade);
+        const requiredSubjects = template.subjects.filter((subject) =>
+          isTemplateSubjectRequiredForGrade(
+            subject.subjectKey,
+            segmentId,
+            gradeCatalogId,
+            segmentGradeIds,
+            inclusionCtx,
+          ),
+        );
+
         const pendingStudentNames: string[] = [];
         let completedStudents = 0;
+        let homeroomFilledStudents = 0;
+        const subjectFailedByKey = new Map<string, Set<string>>();
+
+        const checkSubjectData = (reportId: string, subject: (typeof template.subjects)[number]) => {
+          const sk = `${reportId}::${subject.subjectKey}`;
+          const subjectData = subjectByReportAndKey.get(sk);
+          if (!subjectData) return false;
+          const effectiveEnableScore = effectiveTemplateSubjectEnableScore(
+            template.term,
+            segmentId,
+            subject.subjectKey,
+            gradeCatalogId,
+            segmentGradeIds,
+            subject.enableScore,
+            inclusionCtx,
+          );
+          if (effectiveEnableScore && !subjectData.hasScore) return false;
+          if (subject.enableLearningQuality && !subjectData.hasLearningQuality) return false;
+          const requiredDimensionKeys = subject.dimensions.map((d) => d.dimensionKey).filter((d) => !!d);
+          if (requiredDimensionKeys.length > 0) {
+            const ratedKeys = ratingKeysByReportAndSubject.get(sk) ?? new Set<string>();
+            if (requiredDimensionKeys.some((dk) => !ratedKeys.has(dk))) return false;
+          }
+          return true;
+        };
+
         for (const stu of cls.students) {
           const reportMeta = reportByStudent.get(stu.studentId);
-          let completed = !!reportMeta;
-          if (completed && template.homeroomCommentMode === 'required') {
-            completed = reportMeta?.hasHomeroom === true;
-          }
-          if (completed && reportMeta) {
-            for (const subject of template.subjects) {
-              const subjectKey = `${reportMeta.reportId}::${subject.subjectKey}`;
-              const subjectData = subjectByReportAndKey.get(subjectKey);
-              if (!subjectData) {
-                completed = false;
-                break;
-              }
-              if (subject.enableScore && !subjectData.hasScore) {
-                completed = false;
-                break;
-              }
-              if (subject.enableTeacherComment && !subjectData.hasComment) {
-                completed = false;
-                break;
-              }
-              const requiredDimensionKeys = subject.dimensions.map((d) => d.dimensionKey).filter((d) => !!d);
-              if (requiredDimensionKeys.length > 0) {
-                const ratedKeys = ratingKeysByReportAndSubject.get(subjectKey) ?? new Set<string>();
-                if (requiredDimensionKeys.some((dk) => !ratedKeys.has(dk))) {
-                  completed = false;
-                  break;
-                }
+          if (homeroomModuleActive && reportMeta?.hasHomeroom === true) homeroomFilledStudents += 1;
+
+          let subjectOk = false;
+          if (reportMeta) {
+            subjectOk = true;
+            for (const subject of requiredSubjects) {
+              if (!checkSubjectData(reportMeta.reportId, subject)) {
+                subjectOk = false;
+                const set = subjectFailedByKey.get(subject.subjectKey) ?? new Set();
+                set.add(stu.studentId);
+                subjectFailedByKey.set(subject.subjectKey, set);
               }
             }
           }
-          if (completed) completedStudents += 1;
+
+          const fullyComplete =
+            subjectOk && (!homeroomModuleActive || reportMeta?.hasHomeroom === true);
+
+          if (fullyComplete) completedStudents += 1;
           else pendingStudentNames.push(stu.studentName);
         }
+
         const totalStudents = cls.students.length;
         const pendingStudents = totalStudents - completedStudents;
         const completionRate = totalStudents > 0
@@ -2228,6 +2228,30 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
         const reminderMessage = pendingStudents > 0
           ? `【学业报告提醒】${template.title ?? '本次评价报告'} - ${cls.className} 还有 ${pendingStudents} 位学生未完成填写，请尽快在系统中补齐。${pendingPreview ? ` 待完成：${pendingPreview}${pendingStudentNames.length > 8 ? '等' : ''}。` : ''}`
           : `【学业报告提醒】${template.title ?? '本次评价报告'} - ${cls.className} 已全部完成，辛苦老师。`;
+
+        const homeroomPending = homeroomModuleActive && homeroomFilledStudents < totalStudents;
+        const homeroomTeacherNames = homeroomNamesByClass.get(cls.classId) ?? [];
+
+        const subjectGaps = requiredSubjects
+          .map((subject) => {
+            const set = subjectFailedByKey.get(subject.subjectKey);
+            const pendingStudentCount = set?.size ?? 0;
+            if (pendingStudentCount === 0) return null;
+            const label =
+              (subject.subjectNameZh || '').trim() ||
+              (subject.subjectNameEn || '').trim() ||
+              subject.subjectName ||
+              subject.subjectKey;
+            const names = staffingNamesByClassSubject.get(`${cls.classId}::${subject.subjectKey}`) ?? [];
+            return {
+              subjectKey: subject.subjectKey,
+              subjectLabel: label,
+              teacherNames: names.join('、'),
+              pendingStudentCount,
+            };
+          })
+          .filter((x): x is NonNullable<typeof x> => x != null);
+
         return {
           classId: cls.classId,
           className: cls.className,
@@ -2239,11 +2263,18 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
           pendingStudentNames,
           teachers: cls.teachers,
           reminderMessage,
+          homeroomTeacherNames,
+          homeroomPending,
+          subjectGaps,
         };
       });
 
-    const totalStudents = classes.reduce((sum, cls) => sum + cls.totalStudents, 0);
-    const completedStudents = classes.reduce((sum, cls) => sum + cls.completedStudents, 0);
+    const classesSorted = [...classes].sort(
+      (a, b) => a.completionRate - b.completionRate || a.grade - b.grade || a.className.localeCompare(b.className),
+    );
+
+    const totalStudents = classesSorted.reduce((sum, cls) => sum + cls.totalStudents, 0);
+    const completedStudents = classesSorted.reduce((sum, cls) => sum + cls.completedStudents, 0);
     const pendingStudents = Math.max(totalStudents - completedStudents, 0);
     const completionRate = totalStudents > 0 ? Number(((completedStudents / totalStudents) * 100).toFixed(1)) : 0;
 
@@ -2258,7 +2289,7 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
         completedStudents,
         pendingStudents,
         completionRate,
-        classes,
+        classes: classesSorted,
       },
     });
   } catch (error) {
@@ -2270,10 +2301,12 @@ router.get('/report-templates/:templateId/progress', async (req: AuthedRequest, 
 router.get('/staffing/assignments', async (req: AuthedRequest, res: Response) => {
   try {
     await ensureStaffingTables();
+    await ensureClassTeacherAssignmentsTable(pool);
     const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
     if (!academicYearId) {
       return res.status(400).json({ error: 'academicYearId is required' });
     }
+    await backfillHomeroomStaffingForAcademicYear(pool, academicYearId);
     const rows = (await pool.query(
       `SELECT a.id, a.academic_year_id, a.class_id, a.subject_key, a.subject_name, a.teacher_id,
               COALESCE(a.teacher_slot, 0)::int AS teacher_slot, a.updated_at,
@@ -2346,6 +2379,13 @@ router.put('/staffing/assignments', async (req: AuthedRequest, res: Response) =>
        RETURNING id`,
       [id, academicYearId, classId, subjectKey, subjectName, teacherId, teacherSlot, req.userId ?? null]
     );
+    if (subjectKey === STAFFING_HOMEROOM_SUBJECT_KEY) {
+      if (teacherSlot !== 0) {
+        return res.status(400).json({ error: 'Homeroom staffing uses teacher slot 0 only' });
+      }
+      await ensureClassTeacherAssignmentsTable(pool);
+      await applyHomeroomFromStaffingToClassTables(pool, classId, teacherId);
+    }
     return res.json({ success: true, id: result.rows[0]?.id ?? id });
   } catch (error) {
     console.error('Upsert staffing assignment error:', error);
@@ -2376,6 +2416,10 @@ router.delete('/staffing/assignments/:academicYearId/:classId/:subjectKey', asyn
          WHERE academic_year_id = $1 AND class_id = $2 AND subject_key = $3`,
         [academicYearId, classId, subjectKey],
       );
+    }
+    if (subjectKey === STAFFING_HOMEROOM_SUBJECT_KEY) {
+      await ensureClassTeacherAssignmentsTable(pool);
+      await applyHomeroomFromStaffingToClassTables(pool, classId, null);
     }
     return res.json({ success: true });
   } catch (error) {

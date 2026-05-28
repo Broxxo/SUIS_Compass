@@ -1,5 +1,6 @@
 import express, { Request } from 'express';
 import pool from '../config/database.js';
+import { loadSchoolGradeStructure, saveSchoolGradeStructure } from '../lib/schoolGradeStructure.js';
 
 const router = express.Router();
 
@@ -18,85 +19,6 @@ async function getSchoolCategoryOrderHolderId(fallbackUserId: string): Promise<s
   );
   if (ad.rows[0]) return (ad.rows[0] as { id: string }).id;
   return fallbackUserId;
-}
-
-type GradeConfigItem = { id: string; label: string; level: number };
-type GradeConfigSegment = { id: string; label: string; gradeIds: string[] };
-type GradeConfig = { items: GradeConfigItem[]; segments?: GradeConfigSegment[] };
-
-function buildDefaultGradeConfig(): GradeConfig {
-  return {
-    items: Array.from({ length: 9 }, (_, i) => {
-      const level = i + 1;
-      return { id: `g${level}`, label: `G${level}`, level };
-    }),
-  };
-}
-
-function normalizeSegments(
-  rawSegments: unknown,
-  itemById: Map<string, GradeConfigItem>,
-): GradeConfigSegment[] | undefined {
-  if (!Array.isArray(rawSegments) || rawSegments.length === 0) return undefined;
-  const usedGradeIds = new Set<string>();
-  const out: GradeConfigSegment[] = [];
-  for (const seg of rawSegments) {
-    if (!seg || typeof seg !== 'object') continue;
-    const rec = seg as Record<string, unknown>;
-    const id = String(rec.id ?? '').trim();
-    const label = String(rec.label ?? '').trim();
-    if (!id || !label) continue;
-    const rawIds = Array.isArray(rec.gradeIds) ? rec.gradeIds : [];
-    const gradeIds: string[] = [];
-    for (const g of rawIds) {
-      const gid = String(g ?? '').trim();
-      if (!gid || !itemById.has(gid) || usedGradeIds.has(gid)) continue;
-      usedGradeIds.add(gid);
-      gradeIds.push(gid);
-    }
-    out.push({ id, label, gradeIds });
-  }
-  if (out.length === 0) return undefined;
-  const cleaned = out.filter((s) => s.gradeIds.length > 0);
-  if (cleaned.length === 0) return undefined;
-  const used = new Set(cleaned.flatMap((s) => s.gradeIds));
-  const allIds = new Set(itemById.keys());
-  for (const id of allIds) {
-    if (!used.has(id)) {
-      const last = cleaned[cleaned.length - 1];
-      last.gradeIds.push(id);
-      used.add(id);
-    }
-  }
-  return cleaned;
-}
-
-function normalizeGradeConfig(input: unknown): GradeConfig {
-  const defaults = buildDefaultGradeConfig();
-  if (!input || typeof input !== 'object' || !Array.isArray((input as { items?: unknown }).items)) {
-    return defaults;
-  }
-  const rawItems = (input as { items: unknown[] }).items;
-  const seen = new Set<string>();
-  const items: GradeConfigItem[] = [];
-  rawItems.forEach((it) => {
-    if (!it || typeof it !== 'object') return;
-    const rec = it as Record<string, unknown>;
-    const id = String(rec.id ?? '').trim();
-    const label = String(rec.label ?? '').trim();
-    const level = Number(rec.level);
-    if (!id || !label) return;
-    if (!Number.isFinite(level) || level < 1 || level > 20) return;
-    if (seen.has(id)) return;
-    seen.add(id);
-    items.push({ id, label, level: Math.round(level) });
-  });
-  if (items.length === 0) return defaults;
-  items.sort((a, b) => a.level - b.level);
-  const itemById = new Map(items.map((it) => [it.id, it]));
-  const rawSeg = (input as { segments?: unknown }).segments;
-  const segments = normalizeSegments(rawSeg, itemById);
-  return segments ? { items, segments } : { items };
 }
 
 router.get('/key-concepts', async (req, res) => {
@@ -207,18 +129,45 @@ router.put('/category-order', async (req, res) => {
   }
 });
 
-/** 全校共享：年级配置（唯一） */
-router.get('/grade-config', async (req, res) => {
+/** 全校共享：学段与年级结构（school_settings.grade_structure） */
+router.get('/school-grade-structure', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    res.json(await loadSchoolGradeStructure());
+  } catch (error) {
+    console.error('Get school grade structure error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/school-grade-structure', async (req, res) => {
   try {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const holderId = await getSchoolCategoryOrderHolderId(uid);
-    const result = await pool.query(`SELECT grade_config FROM user_settings WHERE user_id = $1`, [holderId]);
-    if (result.rows.length === 0) return res.json(buildDefaultGradeConfig());
-    const raw = (result.rows[0] as Record<string, unknown>).grade_config;
-    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    res.json(normalizeGradeConfig(parsed));
+    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
+    const role = roleResult.rows[0]?.role as string | undefined;
+    if (role !== 'system-admin' && role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
+    }
+
+    const body = req.body as { gradeStructure?: unknown; gradeConfig?: unknown };
+    const raw = body.gradeStructure ?? body.gradeConfig;
+    const normalized = await saveSchoolGradeStructure(raw, uid);
+    res.json({ success: true, gradeStructure: normalized, gradeConfig: normalized });
+  } catch (error) {
+    console.error('Save school grade structure error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** @deprecated 使用 /school-grade-structure；保留兼容旧客户端 */
+router.get('/grade-config', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    res.json(await loadSchoolGradeStructure());
   } catch (error) {
     console.error('Get grade config error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -236,17 +185,10 @@ router.put('/grade-config', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
     }
 
-    const normalized = normalizeGradeConfig((req.body as { gradeConfig?: unknown })?.gradeConfig);
-    const holderId = await getSchoolCategoryOrderHolderId(uid);
-
-    await pool.query(
-      `INSERT INTO user_settings (user_id, grade_config, updated_at)
-       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
-       ON CONFLICT (user_id)
-       DO UPDATE SET grade_config = EXCLUDED.grade_config, updated_at = CURRENT_TIMESTAMP`,
-      [holderId, JSON.stringify(normalized)],
+    const normalized = await saveSchoolGradeStructure(
+      (req.body as { gradeConfig?: unknown })?.gradeConfig,
+      uid,
     );
-
     res.json({ success: true, gradeConfig: normalized });
   } catch (error) {
     console.error('Save grade config error:', error);

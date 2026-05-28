@@ -123,6 +123,8 @@ export interface StudentTermSubjectReport {
   finalGrade: ReportGrade | null;
   /** 学习品质等第（A–D），与模板 enableLearningQuality 一致时填写 */
   learningQualityGrade?: TargetLevel | null;
+  /** 考试学科每个目标维度的分项分数（0-100）；总分由前端/后端按分项自动汇总 */
+  examDimensionScores?: Record<string, number | null> | null;
   teacherComment: string | null;
   teacherId: string | null;
   dimensions: StudentTermTargetDimension[];
@@ -265,6 +267,10 @@ export interface ReportYearDimensionPreset {
   subjects: ReportYearDimensionPresetSubject[];
   /** 学段 id → 纳入学业报告的课程 id 列表；缺省某学段时由前端按该学段年级上已保存的目标维度推断，推断为空则该学段暂无纳入课程（需勾选并保存「当前学科设置」） */
   stageInclusion?: Record<string, string[]>;
+  /** 学段 id → 课程 id → 参加评价（目标维度+评语）的年级 id；缺省且课程在 stageInclusion 中时视为该学段全部年级 */
+  evaluationGradeInclusion?: Record<string, Record<string, string[]>>;
+  /** `${term}::${schoolSegmentId}` → 课程 id → 参加考试的年级 id；缺省且课程在考试学科列表中时由旧 subjectInclusion 推断 */
+  examGradeInclusion?: Record<string, Record<string, string[]>>;
   /** key = `${term}::${schoolSegmentId}` 的考试配置 */
   examConfigs?: Record<string, ReportExamConfigScope>;
   /** 全学年共用的 A–D 等第说明（学科维度不再单独存 ABCD 描述） */
@@ -275,6 +281,14 @@ export interface ReportYearDimensionPreset {
 export interface ReportTemplateProgressTeacher {
   teacherId: string;
   teacherName: string;
+}
+
+export interface ReportTemplateProgressSubjectGap {
+  subjectKey: string;
+  subjectLabel: string;
+  /** 岗位安排中的任课教师，便于催办 */
+  teacherNames: string;
+  pendingStudentCount: number;
 }
 
 export interface ReportTemplateProgressClassItem {
@@ -288,6 +302,12 @@ export interface ReportTemplateProgressClassItem {
   pendingStudentNames: string[];
   teachers: ReportTemplateProgressTeacher[];
   reminderMessage: string;
+  /** 班主任姓名（来自班级班主任岗位） */
+  homeroomTeacherNames?: string[];
+  /** 班主任综合评价是否仍有学生未填 */
+  homeroomPending?: boolean;
+  /** 仍有学生未满足要求的学科及任课教师 */
+  subjectGaps?: ReportTemplateProgressSubjectGap[];
 }
 
 export interface ReportTemplateProgress {
@@ -301,6 +321,64 @@ export interface ReportTemplateProgress {
   pendingStudents: number;
   completionRate: number;
   classes: ReportTemplateProgressClassItem[];
+}
+
+export interface TeacherReportTemplateProgressTrack {
+  totalStudents: number;
+  completedStudents: number;
+  pendingStudents: number;
+  completionRate: number;
+}
+
+export interface TeacherReportTemplateClassProgress {
+  classId: string;
+  className: string;
+  grade: number;
+  totalStudents: number;
+  completedStudents: number;
+  pendingStudents: number;
+  completionRate: number;
+  pendingStudentNames: string[];
+  requiredSubjectKeys: string[];
+  requiresHomeroomComment: boolean;
+  /** 班主任且模板未禁用班主任评语时，学业报告下拉中展示「班主任综合评价」 */
+  homeroomEvaluationAvailable?: boolean;
+  /** 本班所负责学科维度下，已满足学科填报要求的学生数 */
+  subjectCompletedStudents?: number;
+  /** 本班在班主任综合评价开启时，已填写班主任评语的学生数 */
+  homeroomCompletedStudents?: number;
+}
+
+export interface TeacherReportTemplateProgress {
+  templateId: string;
+  title: string | null;
+  status: ReportTemplateStatus;
+  academicYearId: string;
+  term: Term;
+  totalStudents: number;
+  completedStudents: number;
+  pendingStudents: number;
+  completionRate: number;
+  /** 有学科任务时：各学科填报进度（仅统计分配了学科的教师侧） */
+  subjectProgress?: TeacherReportTemplateProgressTrack | null;
+  /** 有班主任任务时：班主任综合评价填写进度 */
+  homeroomProgress?: TeacherReportTemplateProgressTrack | null;
+  classes: TeacherReportTemplateClassProgress[];
+  /** 管理员按教师查看时返回 */
+  viewingTeacherId?: string | null;
+  viewingTeacherName?: string | null;
+}
+
+export interface ReportClassWeaknessRow {
+  weakPoint: string;
+  errorAnalysis: string;
+  nextPlan: string;
+}
+
+export interface ReportClassSubjectInsights {
+  weaknessRows: ReportClassWeaknessRow[];
+  teachingReflection: string | null;
+  updatedAt: string | null;
 }
 
 export interface StaffingAssignment {

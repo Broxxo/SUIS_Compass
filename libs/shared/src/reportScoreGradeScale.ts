@@ -67,3 +67,22 @@ export function reportLetterGradeFromScore(
   }
   return null;
 }
+
+/** 将细粒度学业等第（A+/A- 等）折成与目标维度一致的四档 A–D */
+export function reportScoreLetterGradeToTargetLevel(
+  grade: ReportScoreLetterGrade | null,
+): 'A' | 'B' | 'C' | 'D' | null {
+  if (!grade) return null;
+  if (grade.startsWith('A')) return 'A';
+  if (grade.startsWith('B')) return 'B';
+  if (grade.startsWith('C')) return 'C';
+  return 'D';
+}
+
+/** 按得分率（0–100）与百分比档得到四档目标等第 */
+export function reportPercentToTargetLevel(
+  percent: number | null | undefined,
+  mins: Partial<Record<string, number>> | null | undefined,
+): 'A' | 'B' | 'C' | 'D' | null {
+  return reportScoreLetterGradeToTargetLevel(reportLetterGradeFromScore(percent, mins));
+}

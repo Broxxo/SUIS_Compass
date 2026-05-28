@@ -1,0 +1,4 @@
+artifacts/
+output/
+*.log
+.env.local

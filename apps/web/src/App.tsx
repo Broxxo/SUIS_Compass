@@ -16,6 +16,7 @@ type HubView =
   | 'curriculum-roadmap'
   | 'student-portrait'
   | 'teacher-portrait'
+  | 'academic-reports'
   | 'class-assistant'
   | 'class-management'
   | 'admin';
@@ -156,6 +157,10 @@ function AppContent() {
 
   if (view === 'teacher-portrait') {
     return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="my-students" />;
+  }
+
+  if (view === 'academic-reports') {
+    return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="academic-reports" />;
   }
 
   // 其他入口暂未实现

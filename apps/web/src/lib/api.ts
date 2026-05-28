@@ -13,6 +13,8 @@ import type {
   EvaluationTemplateSummary,
   ReportYearDimensionPreset,
   ReportTemplateProgress,
+  ReportClassSubjectInsights,
+  TeacherReportTemplateProgress,
   StaffingAssignment,
   OrgDepartment,
   ReportTemplateStatus,
@@ -300,31 +302,41 @@ export const api = {
     }
   },
 
-  async getGradeConfig(): Promise<GradeConfig> {
-    const response = await fetch(apiUrl('/api/settings/grade-config'), {
+  async getSchoolGradeStructure(): Promise<GradeConfig> {
+    const response = await fetch(apiUrl('/api/settings/school-grade-structure'), {
       headers: getHeaders(),
     });
     if (!response.ok) {
       if (response.status === 401) throw new Error('Unauthorized');
       const errorText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Failed to fetch grade config: ${response.status} - ${errorText}`);
+      throw new Error(`Failed to fetch school grade structure: ${response.status} - ${errorText}`);
     }
     const data = await response.json();
     return data as GradeConfig;
   },
 
-  async putGradeConfig(gradeConfig: GradeConfig): Promise<GradeConfig> {
-    const response = await fetch(apiUrl('/api/settings/grade-config'), {
+  async putSchoolGradeStructure(gradeStructure: GradeConfig): Promise<GradeConfig> {
+    const response = await fetch(apiUrl('/api/settings/school-grade-structure'), {
       method: 'PUT',
       headers: getHeaders(),
-      body: JSON.stringify({ gradeConfig }),
+      body: JSON.stringify({ gradeStructure }),
     });
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Failed to save grade config' }));
-      throw new Error(error.error || 'Failed to save grade config');
+      const error = await response.json().catch(() => ({ error: 'Failed to save school grade structure' }));
+      throw new Error(error.error || 'Failed to save school grade structure');
     }
     const data = await response.json();
-    return (data?.gradeConfig ?? gradeConfig) as GradeConfig;
+    return (data?.gradeStructure ?? data?.gradeConfig ?? gradeStructure) as GradeConfig;
+  },
+
+  /** @deprecated 使用 getSchoolGradeStructure */
+  async getGradeConfig(): Promise<GradeConfig> {
+    return this.getSchoolGradeStructure();
+  },
+
+  /** @deprecated 使用 putSchoolGradeStructure */
+  async putGradeConfig(gradeConfig: GradeConfig): Promise<GradeConfig> {
+    return this.putSchoolGradeStructure(gradeConfig);
   },
 
   /**
@@ -839,6 +851,7 @@ export const api = {
     templateTitle: string | null;
     homeroomComment: string | null;
     updatedAt: string | null;
+    releasedAt: string | null;
   }>> {
     const q = academicYearId ? `?academicYearId=${encodeURIComponent(academicYearId)}` : '';
     const response = await fetch(
@@ -857,6 +870,7 @@ export const api = {
       templateTitle: string | null;
       homeroomComment: string | null;
       updatedAt: string | null;
+      releasedAt: string | null;
     }>;
   },
 
@@ -903,6 +917,106 @@ export const api = {
     return data.template as ReportTemplate;
   },
 
+  /** 教师端：读取学年考试维度满分与百分比等第档（与管理员「目标维度分值」同源） */
+  async getTeacherReportYearDimensionExamPreset(
+    academicYearId: string
+  ): Promise<{
+    academicYearId: string;
+    examConfigs: Record<string, ReportExamConfigScope>;
+    stageInclusion?: Record<string, string[]>;
+    evaluationGradeInclusion?: Record<string, Record<string, string[]>>;
+    examGradeInclusion?: Record<string, Record<string, string[]>>;
+    subjectKeyToCourseId?: Record<string, string>;
+    updatedAt: string | null;
+  } | null> {
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/year-dimension-presets/${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) throw new Error('Failed to fetch year dimension exam preset');
+    const data = await readJsonOrThrow(response, 'Failed to fetch year dimension exam preset');
+    return (data.preset ?? null) as {
+      academicYearId: string;
+      examConfigs: Record<string, ReportExamConfigScope>;
+      updatedAt: string | null;
+    } | null;
+  },
+
+  async getReportTemplateAssignedTeachers(
+    templateId: string,
+  ): Promise<Array<{ id: string; name: string }>> {
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}/assigned-teachers`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch assigned teachers');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch assigned teachers');
+    return (data.teachers ?? []) as Array<{ id: string; name: string }>;
+  },
+
+  async getMyReportTemplateProgress(
+    templateId: string,
+    options?: { teacherId?: string },
+  ): Promise<TeacherReportTemplateProgress> {
+    const q = options?.teacherId?.trim()
+      ? `?teacherId=${encodeURIComponent(options.teacherId.trim())}`
+      : '';
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}/my-progress${q}`),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch my report progress');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch my report progress');
+    return data.progress as TeacherReportTemplateProgress;
+  },
+
+  async getReportClassSubjectInsights(
+    templateId: string,
+    classId: string,
+    subjectKey: string
+  ): Promise<ReportClassSubjectInsights> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/templates/${encodeURIComponent(templateId)}/classes/${encodeURIComponent(classId)}/subjects/${encodeURIComponent(subjectKey)}/class-insights`
+      ),
+      { headers: getHeaders() }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch class insights');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch class insights');
+    return data.insights as ReportClassSubjectInsights;
+  },
+
+  async upsertReportClassSubjectInsights(
+    templateId: string,
+    classId: string,
+    subjectKey: string,
+    payload: { weaknessRows: Array<{ weakPoint: string; errorAnalysis: string; nextPlan: string }>; teachingReflection: string | null }
+  ): Promise<void> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/templates/${encodeURIComponent(templateId)}/classes/${encodeURIComponent(classId)}/subjects/${encodeURIComponent(subjectKey)}/class-insights`
+      ),
+      {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save class insights');
+    }
+  },
+
   async upsertStudentTermSubjectReport(
     studentId: string,
     academicYearId: string,
@@ -913,6 +1027,7 @@ export const api = {
       subjectName: string;
       midtermScore: number | null;
       finalScore: number | null;
+      examDimensionScores?: Record<string, number | null> | null;
       teacherComment?: string | null;
       learningQualityGrade?: TargetLevel | null;
       dimensions: Array<{
@@ -1048,6 +1163,8 @@ export const api = {
     homeroomCommentMode: HomeroomCommentMode;
     /** 不传则服务端保留已有「参与学业报告」配置 */
     stageInclusion?: Record<string, string[]>;
+    evaluationGradeInclusion?: Record<string, Record<string, string[]>>;
+    examGradeInclusion?: Record<string, Record<string, string[]>>;
     /** key = `${term}::${schoolSegmentId}` */
     examConfigs?: Record<string, ReportExamConfigScope>;
     /** 不传则服务端保留已有全学科共用等第说明 */
@@ -1084,6 +1201,10 @@ export const api = {
           homeroomCommentMode: input.homeroomCommentMode,
           subjects: input.subjects,
           ...(input.stageInclusion !== undefined ? { stageInclusion: input.stageInclusion } : {}),
+          ...(input.evaluationGradeInclusion !== undefined
+            ? { evaluationGradeInclusion: input.evaluationGradeInclusion }
+            : {}),
+          ...(input.examGradeInclusion !== undefined ? { examGradeInclusion: input.examGradeInclusion } : {}),
           ...(input.examConfigs !== undefined ? { examConfigs: input.examConfigs } : {}),
           ...(input.unifiedLevelDescriptions !== undefined ? { unifiedLevelDescriptions: input.unifiedLevelDescriptions } : {}),
         }),

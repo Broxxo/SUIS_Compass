@@ -117,6 +117,14 @@ BEGIN
   END IF;
 END $$;
 
+-- 全校基础设置：学段与年级结构（自 user_settings.grade_config 迁移）
+CREATE TABLE IF NOT EXISTS school_settings (
+  id VARCHAR(32) PRIMARY KEY DEFAULT 'default',
+  grade_structure JSONB,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_courses_user_id ON courses(user_id);
 CREATE INDEX IF NOT EXISTS idx_semester_data_course_id ON semester_data(course_id);
 CREATE INDEX IF NOT EXISTS idx_semester_data_lookup ON semester_data(course_id, grade, semester);

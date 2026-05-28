@@ -16,7 +16,10 @@
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:init": "npm run db:init -w @repo/api",
-    "prepare:local": "npm run db:up && npm run db:init"
+    "prepare:local": "npm run db:up && npm run db:init",
+    "seed:g456:test-students": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-g456-virtual-students.ts",
+    "seed:report:midterm-primary-test": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-midterm-primary-test-report.ts",
+    "load:report": "cd apps/api && npx tsx ../../tools/load-tests/scripts/run-report-load-test.ts"
   },
   "workspaces": [
     "libs/*",

@@ -1,11 +1,26 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import pool from '../config/database.js';
 import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
+import { ensureClassTeacherAssignmentsTable } from '../lib/ensureClassTeacherAssignmentsTable.js';
+import { upsertHomeroomStaffingFromClassTables } from '../lib/homeroomStaffingSync.js';
+import { sanitizeExamConfigs } from '../lib/reportExamConfigSanitize.js';
+import {
+  effectiveTemplateSubjectEnableScore,
+  ensureReportYearDimensionPresetTable,
+  gradeCatalogIdForClassLevel,
+  loadGradeConfigItemsForReport,
+  loadReportYearInclusionContext,
+  loadSegmentGradeIds,
+} from '../lib/reportYearInclusionContext.js';
 import {
   mergeReportScoreGradeMinScores,
   reportLetterGradeFromScore,
+  reportScoreLetterGradeToTargetLevel,
+  STAFFING_HOMEROOM_SUBJECT_KEY,
+  isEvaluationGradeIncluded,
   type ReportScoreLetterGrade,
 } from '@repo/shared';
+import { createRunOnce } from '../lib/runOnce.js';
 
 type ReqWithUserId = Request & { userId?: string };
 type Term = 'Semester 1' | 'Semester 2';
@@ -22,34 +37,10 @@ function toReportGrade(score: number | null | undefined, mins: Partial<Record<st
   return reportLetterGradeFromScore(score, mins);
 }
 
-let ensuredClassTeacherAssignments = false;
-let ensuredPortraitTables = false;
-async function ensureClassTeacherAssignmentsTable(): Promise<void> {
-  if (ensuredClassTeacherAssignments) return;
-  // Local dev DB may not have run the latest migration yet; keep endpoints functional.
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS class_teacher_assignments (
-      id VARCHAR(80) PRIMARY KEY,
-      class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
-      teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      role VARCHAR(30) NOT NULL DEFAULT 'co-teacher',
-      assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      unassigned_at TIMESTAMP
-    );
-  `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_class_active
-      ON class_teacher_assignments(class_id) WHERE unassigned_at IS NULL;
-  `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_class_teacher_assignments_teacher_active
-      ON class_teacher_assignments(teacher_id) WHERE unassigned_at IS NULL;
-  `);
-  ensuredClassTeacherAssignments = true;
-}
+const portraitTablesOnce = createRunOnce();
 
 async function ensureStudentPortraitTables(): Promise<void> {
-  if (ensuredPortraitTables) return;
+  await portraitTablesOnce.run(async () => {
   await pool.query(`
     ALTER TABLE students
       ADD COLUMN IF NOT EXISTS name_zh VARCHAR(100),
@@ -179,6 +170,9 @@ async function ensureStudentPortraitTables(): Promise<void> {
   `);
   await pool.query(
     `ALTER TABLE student_term_subject_reports ADD COLUMN IF NOT EXISTS learning_quality_grade VARCHAR(2)`,
+  );
+  await pool.query(
+    `ALTER TABLE student_term_subject_reports ADD COLUMN IF NOT EXISTS exam_dimension_scores JSONB`,
   );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS student_term_target_dimensions (
@@ -363,6 +357,27 @@ async function ensureStudentPortraitTables(): Promise<void> {
       ON student_report_score_grade_bands(academic_year_id)
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS student_report_subject_class_insights (
+      id VARCHAR(80) PRIMARY KEY,
+      template_id VARCHAR(100) NOT NULL REFERENCES student_report_templates(id) ON DELETE CASCADE,
+      academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+      term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+      class_id VARCHAR(50) NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+      subject_key VARCHAR(255) NOT NULL,
+      weakness_rows JSONB NOT NULL DEFAULT '[]'::jsonb,
+      teaching_reflection TEXT,
+      created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+      updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(template_id, class_id, subject_key)
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_student_report_subject_class_insights_lookup
+      ON student_report_subject_class_insights(template_id, class_id, subject_key)
+  `);
+  await pool.query(`
     DO $widen$
     BEGIN
       IF EXISTS (
@@ -406,7 +421,7 @@ async function ensureStudentPortraitTables(): Promise<void> {
     END $widen$
   `);
   await pool.query('ALTER TABLE students DROP COLUMN IF EXISTS grade');
-  ensuredPortraitTables = true;
+  });
 }
 
 async function getUserRole(req: ReqWithUserId): Promise<string | null> {
@@ -555,6 +570,13 @@ async function getOrCreateTermReport(
   templateId: string | null,
   operatorId: string | null
 ): Promise<string> {
+  // 同一学生+学年+学期+模板：多科教师并发写入时只创建一条 term report（事务级 advisory lock）
+  await client.query(
+    `SELECT pg_advisory_xact_lock(
+      hashtextextended($1 || '|' || $2 || '|' || $3 || '|' || COALESCE($4, ''), 0)
+    )`,
+    [studentId, academicYearId, term, templateId],
+  );
   const existing = await client.query(
     `SELECT id FROM student_term_reports
      WHERE student_id = $1 AND academic_year_id = $2 AND term = $3 AND COALESCE(template_id, '') = COALESCE($4, '')
@@ -565,13 +587,29 @@ async function getOrCreateTermReport(
     return existing.rows[0].id as string;
   }
   const id = createId('str');
-  await client.query(
-    `INSERT INTO student_term_reports (
-      id, student_id, academic_year_id, term, template_id, created_by, updated_by
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [id, studentId, academicYearId, term, templateId, operatorId, operatorId]
-  );
-  return id;
+  try {
+    await client.query(
+      `INSERT INTO student_term_reports (
+        id, student_id, academic_year_id, term, template_id, created_by, updated_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [id, studentId, academicYearId, term, templateId, operatorId, operatorId],
+    );
+    return id;
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code;
+    if (code === '23505') {
+      const again = await client.query(
+        `SELECT id FROM student_term_reports
+         WHERE student_id = $1 AND academic_year_id = $2 AND term = $3 AND COALESCE(template_id, '') = COALESCE($4, '')
+         LIMIT 1`,
+        [studentId, academicYearId, term, templateId],
+      );
+      if ((again.rowCount ?? 0) > 0) {
+        return again.rows[0].id as string;
+      }
+    }
+    throw e;
+  }
 }
 
 async function loadScoreMinScoresForBand(
@@ -587,6 +625,52 @@ async function loadScoreMinScoresForBand(
   );
   const raw = r.rows[0]?.min_scores;
   return mergeReportScoreGradeMinScores(raw as Partial<Record<string, number>> | null);
+}
+
+type ExamGradeCfgRow = {
+  gradeId: string;
+  percentBands: Partial<Record<ReportGrade, number>>;
+  dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
+};
+
+function pickExamGradeConfig(gradeConfigs: ExamGradeCfgRow[], gradeCatalogId: string | null): ExamGradeCfgRow | null {
+  if (gradeConfigs.length === 0) return null;
+  if (gradeCatalogId) {
+    const hit = gradeConfigs.find((g) => g.gradeId === gradeCatalogId);
+    if (hit) return hit;
+  }
+  return gradeConfigs[0] ?? null;
+}
+
+function matchDimensionMaxByKey(
+  templateDims: Array<{ dimensionKey: string; dimensionLabelZh: string; dimensionLabelEn: string }>,
+  examDims: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>,
+): Map<string, number> {
+  const byLabel = new Map<string, number>();
+  for (const e of examDims) {
+    byLabel.set(`${e.dimensionLabelZh.trim()}\t${e.dimensionLabelEn.trim()}`, e.score);
+  }
+  const out = new Map<string, number>();
+  for (let i = 0; i < templateDims.length; i += 1) {
+    const d = templateDims[i];
+    const key = String(d.dimensionKey ?? '').trim();
+    if (!key) continue;
+    const zh = String(d.dimensionLabelZh ?? '').trim();
+    const en = String(d.dimensionLabelEn ?? '').trim();
+    let max = zh && en ? byLabel.get(`${zh}\t${en}`) : undefined;
+    if (max == null) max = examDims[i]?.score;
+    if (max != null && Number.isFinite(max) && max > 0) out.set(key, max);
+  }
+  return out;
+}
+
+async function loadSanitizedExamConfigsForYear(academicYearId: string): Promise<ReturnType<typeof sanitizeExamConfigs>> {
+  await ensureReportYearDimensionPresetTable();
+  const row = (await pool.query(`SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`, [
+    academicYearId,
+  ])).rows[0] as { payload: unknown } | undefined;
+  if (!row) return {};
+  return sanitizeExamConfigs(row.payload);
 }
 
 async function getTemplateById(templateId: string) {
@@ -902,7 +986,7 @@ router.delete('/academic-years/:yearId', requireSystemAdmin(async (req: ReqWithU
 // ---------- 班级 ----------
 router.get('/', async (req: ReqWithUserId, res: Response) => {
   try {
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const academicYearId = req.query.academicYearId as string | undefined;
     const role = await getUserRole(req);
     const params: string[] = [];
@@ -990,8 +1074,8 @@ router.get('/me/subject-assignments', async (req: ReqWithUserId, res: Response) 
     const rows = (await pool.query(
       `SELECT DISTINCT class_id, subject_key
        FROM class_subject_teacher_assignments
-       WHERE academic_year_id = $1 AND teacher_id = $2`,
-      [academicYearId, req.userId],
+       WHERE academic_year_id = $1 AND teacher_id = $2 AND subject_key <> $3`,
+      [academicYearId, req.userId, STAFFING_HOMEROOM_SUBJECT_KEY],
     )).rows as Array<{ class_id: string; subject_key: string }>;
     res.json({
       assignments: rows.map((r) => ({ classId: r.class_id, subjectKey: r.subject_key })),
@@ -1004,7 +1088,7 @@ router.get('/me/subject-assignments', async (req: ReqWithUserId, res: Response) 
 
 router.post('/', requireAdmin(async (req: ReqWithUserId, res: Response) => {
   try {
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const { id, academicYearId, grade, name, teacherId } = req.body || {};
     if (!id || !academicYearId || grade == null || !name || !teacherId) {
       res.status(400).json({ error: 'id, academicYearId, grade, name, teacherId required' });
@@ -1025,6 +1109,8 @@ router.post('/', requireAdmin(async (req: ReqWithUserId, res: Response) => {
        ON CONFLICT (id) DO NOTHING`,
       [createId('cta'), id, teacherId, 'homeroom']
     );
+    await ensureStaffingTables();
+    await upsertHomeroomStaffingFromClassTables(pool, id);
     res.status(201).json({ id, academicYearId, grade: Number(grade), name, teacherId });
   } catch (e) {
     console.error('post class', e);
@@ -1035,15 +1121,15 @@ router.post('/', requireAdmin(async (req: ReqWithUserId, res: Response) => {
 // ---------- 班级-教师关联 ----------
 router.get('/:classId/teachers', async (req: ReqWithUserId, res: Response) => {
   try {
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const { classId } = req.params;
     if (!classId) { res.status(400).json({ error: 'classId required' }); return; }
     const result = await pool.query(
       `SELECT a.teacher_id, a.role, u.display_name
        FROM class_teacher_assignments a
        JOIN users u ON u.id = a.teacher_id
-       WHERE a.class_id = $1 AND a.unassigned_at IS NULL
-       ORDER BY CASE WHEN a.role = 'homeroom' THEN 0 ELSE 1 END, u.display_name ASC`,
+       WHERE a.class_id = $1 AND a.unassigned_at IS NULL AND a.role = 'homeroom'
+       ORDER BY u.display_name ASC`,
       [classId]
     );
     const teachers = result.rows.map((r) => ({
@@ -1060,13 +1146,20 @@ router.get('/:classId/teachers', async (req: ReqWithUserId, res: Response) => {
 
 router.post('/:classId/teachers', requireAdmin(async (req: ReqWithUserId, res: Response) => {
   try {
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const { classId } = req.params;
     const { teacherId, role } = req.body || {};
     if (!classId || !teacherId) { res.status(400).json({ error: 'classId, teacherId required' }); return; }
-    const normalizedRole = (role as string | undefined) ?? 'co-teacher';
-    if (normalizedRole !== 'homeroom' && normalizedRole !== 'co-teacher') {
-      res.status(400).json({ error: 'role must be homeroom or co-teacher' });
+    const normalizedRole = (role as string | undefined) ?? 'homeroom';
+    if (normalizedRole === 'co-teacher') {
+      res.status(400).json({
+        error:
+          'Co-teachers are assigned under Admin → Staffing (岗位安排) only. Use class management for homeroom teacher only.',
+      });
+      return;
+    }
+    if (normalizedRole !== 'homeroom') {
+      res.status(400).json({ error: 'role must be homeroom' });
       return;
     }
     const okTeacher = await assertTeacherUser(String(teacherId));
@@ -1095,6 +1188,8 @@ router.post('/:classId/teachers', requireAdmin(async (req: ReqWithUserId, res: R
        VALUES ($1, $2, $3, $4)`,
       [id, classId, teacherId, normalizedRole]
     );
+    await ensureStaffingTables();
+    await upsertHomeroomStaffingFromClassTables(pool, classId);
     res.status(201).json({ id, classId, teacherId, role: normalizedRole });
   } catch (e) {
     console.error('post class teacher assignment', e);
@@ -1104,7 +1199,7 @@ router.post('/:classId/teachers', requireAdmin(async (req: ReqWithUserId, res: R
 
 router.delete('/:classId/teachers/:teacherId', requireAdmin(async (req: ReqWithUserId, res: Response) => {
   try {
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const { classId, teacherId } = req.params;
     if (!classId || !teacherId) { res.status(400).json({ error: 'classId, teacherId required' }); return; }
     const activeAssignment = (await pool.query(
@@ -1119,37 +1214,19 @@ router.delete('/:classId/teachers/:teacherId', requireAdmin(async (req: ReqWithU
       return;
     }
     if (activeAssignment.role === 'homeroom') {
-      const replacement = await pool.query(
-        `SELECT teacher_id
-         FROM class_teacher_assignments
-         WHERE class_id = $1
-           AND teacher_id <> $2
-           AND unassigned_at IS NULL
-         ORDER BY CASE WHEN role = 'homeroom' THEN 0 ELSE 1 END, assigned_at ASC
-         LIMIT 1`,
-        [classId, teacherId]
-      );
-      if ((replacement.rowCount ?? 0) === 0) {
-        res.status(400).json({ error: 'Each class must keep one primary responsible teacher' });
-        return;
-      }
-      const replacementTeacherId = replacement.rows[0].teacher_id as string;
       await pool.query(
         `UPDATE class_teacher_assignments
          SET unassigned_at = CURRENT_TIMESTAMP
-         WHERE class_id = $1 AND role = 'homeroom' AND unassigned_at IS NULL`,
-        [classId]
+         WHERE class_id = $1 AND teacher_id = $2 AND unassigned_at IS NULL`,
+        [classId, teacherId],
       );
       await pool.query(
-        `INSERT INTO class_teacher_assignments (id, class_id, teacher_id, role)
-         VALUES ($1, $2, $3, 'homeroom')`,
-        [createId('cta'), classId, replacementTeacherId]
+        `UPDATE classes SET teacher_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND teacher_id = $2`,
+        [classId, teacherId],
       );
-      await pool.query(
-        'UPDATE classes SET teacher_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-        [replacementTeacherId, classId]
-      );
-      res.json({ success: true, reassignedTo: replacementTeacherId });
+      await ensureStaffingTables();
+      await upsertHomeroomStaffingFromClassTables(pool, classId);
+      res.json({ success: true });
       return;
     }
     await pool.query(
@@ -1207,16 +1284,28 @@ router.get('/students', async (req: ReqWithUserId, res: Response) => {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
+      await ensureStaffingTables();
       params.push(req.userId);
       sql += `
-        WHERE EXISTS (
-          SELECT 1
-          FROM student_enrollments e
-          JOIN class_teacher_assignments a
-            ON a.class_id = e.class_id
-           AND a.unassigned_at IS NULL
-          WHERE e.student_id = students.id
-            AND a.teacher_id = $1
+        WHERE (
+          EXISTS (
+            SELECT 1
+            FROM student_enrollments e
+            JOIN class_teacher_assignments a
+              ON a.class_id = e.class_id
+             AND a.unassigned_at IS NULL
+            WHERE e.student_id = students.id
+              AND a.teacher_id = $1
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM student_enrollments e
+            JOIN class_subject_teacher_assignments s
+              ON s.class_id = e.class_id
+             AND s.academic_year_id = e.academic_year_id
+            WHERE e.student_id = students.id
+              AND s.teacher_id = $1
+          )
         )
       `;
     }
@@ -1380,7 +1469,7 @@ router.delete('/students/:studentId', requireSystemAdmin(async (req: ReqWithUser
 // ---------- 学籍 ----------
 router.get('/enrollments', async (req: ReqWithUserId, res: Response) => {
   try {
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const role = await getUserRole(req);
     const academicYearId = req.query.academicYearId as string | undefined;
     const params: unknown[] = [];
@@ -1395,12 +1484,22 @@ router.get('/enrollments', async (req: ReqWithUserId, res: Response) => {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
+      await ensureStaffingTables();
       params.push(req.userId);
-      where.push(`EXISTS (
-        SELECT 1 FROM class_teacher_assignments a
-        WHERE a.class_id = student_enrollments.class_id
-          AND a.teacher_id = $${params.length}
-          AND a.unassigned_at IS NULL
+      const tid = params.length;
+      where.push(`(
+        EXISTS (
+          SELECT 1 FROM class_teacher_assignments a
+          WHERE a.class_id = student_enrollments.class_id
+            AND a.teacher_id = $${tid}
+            AND a.unassigned_at IS NULL
+        )
+        OR EXISTS (
+          SELECT 1 FROM class_subject_teacher_assignments s
+          WHERE s.class_id = student_enrollments.class_id
+            AND s.academic_year_id = student_enrollments.academic_year_id
+            AND s.teacher_id = $${tid}
+        )
       )`);
     }
     if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
@@ -1671,6 +1770,554 @@ router.put('/profile/students/:studentId/modules/:moduleId/values', requireStude
 }));
 
 // ---------- 学业报告（评价设计中心） ----------
+// 必须先注册更具体的路径，否则 `/reports/templates/:id/my-progress` 会被 `/:academicYearId/:term`
+// 误匹配为 academicYearId=id、term=my-progress，从而返回 “term must be Semester 1 or Semester 2”。
+
+/**
+ * 教师/管理员读取学年考试维度配置（满分与各档百分比），用于学业报告工作台换算等第。
+ */
+router.get('/reports/year-dimension-presets/:academicYearId', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const role = await getUserRole(req);
+    if (role !== 'teacher' && role !== 'admin' && role !== 'system-admin') {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const academicYearId = String(req.params.academicYearId ?? '').trim();
+    if (!academicYearId) {
+      res.status(400).json({ error: 'academicYearId required' });
+      return;
+    }
+    await ensureReportYearDimensionPresetTable();
+    const row = (await pool.query(
+      `SELECT academic_year_id, payload, updated_at
+       FROM student_report_year_dimension_presets
+       WHERE academic_year_id = $1
+       LIMIT 1`,
+      [academicYearId],
+    )).rows[0] as
+      | {
+        academic_year_id: string;
+        payload: unknown;
+        updated_at: Date | null;
+      }
+      | undefined;
+    if (!row) {
+      res.json({ preset: null });
+      return;
+    }
+    const inclusionCtx = await loadReportYearInclusionContext(academicYearId);
+    const examConfigs = inclusionCtx.examConfigs;
+    const subjectKeyToCourseId: Record<string, string> = {};
+    for (const [sk, cid] of inclusionCtx.subjectKeyToCourseId.entries()) {
+      subjectKeyToCourseId[sk] = cid;
+    }
+    res.json({
+      preset: {
+        academicYearId: row.academic_year_id,
+        examConfigs,
+        stageInclusion: inclusionCtx.stageInclusion,
+        evaluationGradeInclusion: inclusionCtx.evaluationGradeInclusion,
+        examGradeInclusion: inclusionCtx.examGradeInclusion,
+        subjectKeyToCourseId,
+        updatedAt: row.updated_at?.toISOString() ?? null,
+      },
+    });
+  } catch (error) {
+    console.error('Get year dimension preset (classes) error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * 教师侧学业报告入口进度（按“我负责的班级”聚合）：
+ * - 学科评语暂视为选填，不纳入完成度阻塞项
+ * - 班主任综合评价：模板未禁用且教师为该班班主任时，工作台展示该入口；**进度上视为每位学生均需填写**（与模板 optional/required 无关，保存接口仍按模板校验）
+ * - 「整体完成」= 该班所负责学科全部达标且（若开启班主任模块）班主任评语已填
+ */
+/** 管理员查看指定教师的学业报告岗位范围（班级 + 学科） */
+async function loadTeacherReportScopeForTemplate(
+  academicYearId: string,
+  teacherId: string,
+  templateSubjectKeys: string[],
+): Promise<{ classIds: string[]; homeroomClassIds: Set<string>; subjectByClass: Map<string, Set<string>> }> {
+  const teacherHomeroomClassIds = new Set<string>();
+  const teacherSubjectByClass = new Map<string, Set<string>>();
+  const homeroomRows = (await pool.query(
+    `SELECT c.id AS class_id
+     FROM classes c
+     JOIN class_teacher_assignments a
+       ON a.class_id = c.id
+      AND a.teacher_id = $1
+      AND a.role = 'homeroom'
+      AND a.unassigned_at IS NULL
+     WHERE c.academic_year_id = $2`,
+    [teacherId, academicYearId],
+  )).rows as Array<{ class_id: string }>;
+  for (const row of homeroomRows) teacherHomeroomClassIds.add(row.class_id);
+
+  if (templateSubjectKeys.length > 0) {
+    const subjectRows = (await pool.query(
+      `SELECT class_id, subject_key
+       FROM class_subject_teacher_assignments
+       WHERE academic_year_id = $1
+         AND teacher_id = $2
+         AND subject_key = ANY($3::varchar[])`,
+      [academicYearId, teacherId, templateSubjectKeys],
+    )).rows as Array<{ class_id: string; subject_key: string }>;
+    for (const row of subjectRows) {
+      const set = teacherSubjectByClass.get(row.class_id) ?? new Set<string>();
+      set.add(row.subject_key);
+      teacherSubjectByClass.set(row.class_id, set);
+    }
+  }
+
+  const classIds = Array.from(
+    new Set([...Array.from(teacherHomeroomClassIds), ...Array.from(teacherSubjectByClass.keys())]),
+  );
+  return { classIds, homeroomClassIds: teacherHomeroomClassIds, subjectByClass: teacherSubjectByClass };
+}
+
+router.get('/reports/templates/:templateId/assigned-teachers', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    if (!templateId) {
+      res.status(400).json({ error: 'templateId required' });
+      return;
+    }
+    const role = await getUserRole(req);
+    if (role !== 'admin' && role !== 'system-admin') {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const template = await getTemplateById(templateId);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+    const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
+    const rows = (
+      await pool.query(
+        `SELECT DISTINCT u.id,
+                COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.display_name), ''), u.username) AS name
+         FROM users u
+         WHERE u.role = 'teacher'
+           AND u.id IN (
+             SELECT a.teacher_id
+             FROM class_subject_teacher_assignments a
+             WHERE a.academic_year_id = $1
+               AND a.subject_key = ANY($2::varchar[])
+             UNION
+             SELECT a.teacher_id
+             FROM class_teacher_assignments a
+             JOIN classes c ON c.id = a.class_id
+             WHERE c.academic_year_id = $1
+               AND a.role = 'homeroom'
+               AND a.unassigned_at IS NULL
+           )
+         ORDER BY name ASC`,
+        [template.academicYearId, templateSubjectKeys],
+      )
+    ).rows as Array<{ id: string; name: string }>;
+    res.json({ teachers: rows });
+  } catch (e) {
+    console.error('assigned-teachers', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureStudentPortraitTables();
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    if (!templateId) {
+      res.status(400).json({ error: 'templateId required' });
+      return;
+    }
+    const template = await getTemplateById(templateId);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+    const role = await getUserRole(req);
+    const userId = String(req.userId ?? '').trim();
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (role !== 'teacher' && role !== 'admin' && role !== 'system-admin') {
+      res.status(403).json({ error: 'Forbidden: no access to report progress' });
+      return;
+    }
+
+    const isAdminRole = role === 'system-admin' || role === 'admin';
+    const viewAsTeacherId = String(req.query.teacherId ?? '').trim();
+    let scopeTeacherId: string | null = role === 'teacher' ? userId : null;
+    let viewingTeacherName: string | null = null;
+
+    if (isAdminRole) {
+      if (!viewAsTeacherId) {
+        scopeTeacherId = null;
+      } else {
+        const teacherRow = (
+          await pool.query(
+            `SELECT id,
+                    COALESCE(NULLIF(TRIM(name_zh), ''), NULLIF(TRIM(display_name), ''), username) AS name
+             FROM users
+             WHERE id = $1 AND role = 'teacher'
+             LIMIT 1`,
+            [viewAsTeacherId],
+          )
+        ).rows[0] as { id: string; name: string } | undefined;
+        if (!teacherRow) {
+          res.status(400).json({ error: 'teacherId must reference a teacher user' });
+          return;
+        }
+        scopeTeacherId = teacherRow.id;
+        viewingTeacherName = String(teacherRow.name ?? '').trim() || teacherRow.id;
+      }
+    }
+
+    let classIds: string[] = [];
+    const teacherHomeroomClassIds = new Set<string>();
+    const teacherSubjectByClass = new Map<string, Set<string>>();
+    const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
+
+    if (scopeTeacherId) {
+      const scope = await loadTeacherReportScopeForTemplate(
+        template.academicYearId,
+        scopeTeacherId,
+        templateSubjectKeys,
+      );
+      classIds = scope.classIds;
+      for (const cid of scope.homeroomClassIds) teacherHomeroomClassIds.add(cid);
+      for (const [cid, keys] of scope.subjectByClass) teacherSubjectByClass.set(cid, keys);
+    }
+
+    if (classIds.length === 0) {
+      res.json({
+        progress: {
+          templateId: template.id,
+          title: template.title ?? null,
+          status: template.status,
+          academicYearId: template.academicYearId,
+          term: template.term,
+          totalStudents: 0,
+          completedStudents: 0,
+          pendingStudents: 0,
+          completionRate: 0,
+          classes: [],
+          viewingTeacherId: scopeTeacherId,
+          viewingTeacherName,
+        },
+      });
+      return;
+    }
+
+    const rosterRows = (await pool.query(
+      `SELECT c.id AS class_id, c.grade, c.name AS class_name,
+              s.id AS student_id, COALESCE(NULLIF(s.name_zh, ''), NULLIF(s.name_en, ''), s.name) AS student_name
+       FROM classes c
+       JOIN student_enrollments se ON se.class_id = c.id AND se.academic_year_id = c.academic_year_id
+       JOIN students s ON s.id = se.student_id
+       WHERE c.academic_year_id = $1
+         AND c.id = ANY($2::varchar[])
+       ORDER BY c.grade ASC, c.name ASC, student_name ASC`,
+      [template.academicYearId, classIds],
+    )).rows as Array<{
+      class_id: string;
+      grade: number;
+      class_name: string;
+      student_id: string;
+      student_name: string;
+    }>;
+
+    const reportRows = (await pool.query(
+      `SELECT r.id, r.student_id, r.homeroom_comment
+       FROM student_term_reports r
+       WHERE r.template_id = $1
+         AND r.academic_year_id = $2
+         AND r.term = $3`,
+      [templateId, template.academicYearId, template.term],
+    )).rows as Array<{
+      id: string;
+      student_id: string;
+      homeroom_comment: string | null;
+    }>;
+
+    const subjectRows = (await pool.query(
+      `SELECT sr.report_id, sr.subject_key,
+              CASE WHEN sr.midterm_score IS NOT NULL OR sr.final_score IS NOT NULL THEN TRUE ELSE FALSE END AS has_score,
+              CASE WHEN COALESCE(NULLIF(TRIM(sr.teacher_comment), ''), NULL) IS NULL THEN FALSE ELSE TRUE END AS has_comment,
+              CASE WHEN sr.learning_quality_grade IN ('A','B','C','D') THEN TRUE ELSE FALSE END AS has_learning_quality
+       FROM student_term_subject_reports sr
+       JOIN student_term_reports r ON r.id = sr.report_id
+       WHERE r.template_id = $1
+         AND r.academic_year_id = $2
+         AND r.term = $3`,
+      [templateId, template.academicYearId, template.term],
+    )).rows as Array<{
+      report_id: string;
+      subject_key: string;
+      has_score: boolean;
+      has_comment: boolean;
+      has_learning_quality: boolean;
+    }>;
+
+    const ratingRows = (await pool.query(
+      `SELECT sr.report_id, sr.subject_key, td.dimension_key
+       FROM student_term_subject_reports sr
+       JOIN student_term_reports r ON r.id = sr.report_id
+       JOIN student_term_target_dimensions td ON td.subject_report_id = sr.id
+       JOIN student_term_target_ratings tr ON tr.subject_report_id = sr.id AND tr.dimension_id = td.id
+       WHERE r.template_id = $1
+         AND r.academic_year_id = $2
+         AND r.term = $3`,
+      [templateId, template.academicYearId, template.term],
+    )).rows as Array<{
+      report_id: string;
+      subject_key: string;
+      dimension_key: string;
+    }>;
+
+    const reportByStudent = new Map<string, { reportId: string; hasHomeroom: boolean }>();
+    for (const row of reportRows) {
+      const hasHomeroom = !!String(row.homeroom_comment ?? '').trim();
+      reportByStudent.set(row.student_id, { reportId: row.id, hasHomeroom });
+    }
+
+    const subjectByReportAndKey = new Map<string, { hasScore: boolean; hasComment: boolean; hasLearningQuality: boolean }>();
+    for (const row of subjectRows) {
+      subjectByReportAndKey.set(`${row.report_id}::${row.subject_key}`, {
+        hasScore: row.has_score,
+        hasComment: row.has_comment,
+        hasLearningQuality: row.has_learning_quality,
+      });
+    }
+
+    const ratingKeysByReportAndSubject = new Map<string, Set<string>>();
+    for (const row of ratingRows) {
+      const key = `${row.report_id}::${row.subject_key}`;
+      const set = ratingKeysByReportAndSubject.get(key) ?? new Set<string>();
+      if (row.dimension_key) set.add(row.dimension_key);
+      ratingKeysByReportAndSubject.set(key, set);
+    }
+
+    const insightRows = (await pool.query(
+      `SELECT class_id, subject_key,
+              CASE WHEN COALESCE(NULLIF(TRIM(teaching_reflection), ''), NULL) IS NULL THEN FALSE ELSE TRUE END AS has_reflection
+       FROM student_report_subject_class_insights
+       WHERE template_id = $1`,
+      [templateId],
+    )).rows as Array<{ class_id: string; subject_key: string; has_reflection: boolean }>;
+    const teachingReflectionByClassSubject = new Map<string, boolean>();
+    for (const row of insightRows) {
+      teachingReflectionByClassSubject.set(`${row.class_id}::${row.subject_key}`, row.has_reflection);
+    }
+
+    const templateSubjectByKey = new Map(template.subjects.map((s) => [s.subjectKey, s] as const));
+    const segmentId = String(template.schoolSegmentId ?? '').trim();
+    const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+    const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+    const gradeCatalogItems = await loadGradeConfigItemsForReport();
+    const classMap = new Map<string, {
+      classId: string;
+      className: string;
+      grade: number;
+      students: Array<{ studentId: string; studentName: string }>;
+    }>();
+    for (const row of rosterRows) {
+      const cls = classMap.get(row.class_id) ?? {
+        classId: row.class_id,
+        className: row.class_name,
+        grade: row.grade,
+        students: [],
+      };
+      cls.students.push({ studentId: row.student_id, studentName: row.student_name || row.student_id });
+      classMap.set(row.class_id, cls);
+    }
+
+    const classes = Array.from(classMap.values())
+      .sort((a, b) => (a.grade - b.grade) || a.className.localeCompare(b.className))
+      .map((cls) => {
+        const gradeCatalogId = gradeCatalogIdForClassLevel(gradeCatalogItems, cls.grade);
+        const requiredSubjectKeys = Array.from(teacherSubjectByClass.get(cls.classId) ?? new Set<string>()).filter(
+          (subjectKey) => {
+            if (!templateSubjectByKey.has(subjectKey)) return false;
+            if (!segmentId || !gradeCatalogId) return true;
+            const courseId = inclusionCtx.subjectKeyToCourseId.get(subjectKey);
+            if (!courseId) return true;
+            return isEvaluationGradeIncluded(
+              segmentId,
+              courseId,
+              gradeCatalogId,
+              segmentGradeIds,
+              inclusionCtx.stageInclusion,
+              inclusionCtx.evaluationGradeInclusion,
+            );
+          },
+        );
+        const isHomeroomForClass = teacherHomeroomClassIds.has(cls.classId);
+        /** 纳入完成度阻塞：仅模板要求且该班班主任为当前教师 */
+        const requiresHomeroomComment = isHomeroomForClass && template.homeroomCommentMode === 'required';
+        /** 学业报告工作台是否展示「班主任综合评价」入口：班主任 + 模板未关闭该模块 */
+        const homeroomEvaluationAvailable =
+          isHomeroomForClass && template.homeroomCommentMode !== 'disabled';
+        const pendingStudentNames: string[] = [];
+        let completedStudents = 0;
+        let subjectCompletedStudents = 0;
+        let homeroomCompletedStudents = 0;
+
+        for (const stu of cls.students) {
+          const reportMeta = reportByStudent.get(stu.studentId);
+
+          let subjectOk = false;
+          if (reportMeta) {
+            subjectOk = true;
+            for (const subjectKey of requiredSubjectKeys) {
+              const tplSubject = templateSubjectByKey.get(subjectKey);
+              if (!tplSubject) continue;
+              const courseId = inclusionCtx.subjectKeyToCourseId.get(subjectKey);
+              const effectiveEnableScore = effectiveTemplateSubjectEnableScore(
+                template.term,
+                segmentId,
+                subjectKey,
+                gradeCatalogId,
+                segmentGradeIds,
+                tplSubject.enableScore,
+                inclusionCtx,
+              );
+              const key = `${reportMeta.reportId}::${subjectKey}`;
+              const subjectData = subjectByReportAndKey.get(key);
+              if (!subjectData) {
+                subjectOk = false;
+                break;
+              }
+              if (effectiveEnableScore && !subjectData.hasScore) {
+                subjectOk = false;
+                break;
+              }
+              if (tplSubject.enableLearningQuality && !subjectData.hasLearningQuality) {
+                subjectOk = false;
+                break;
+              }
+              const requiredDimensionKeys = tplSubject.dimensions.map((d) => d.dimensionKey).filter((d) => !!d);
+              if (requiredDimensionKeys.length > 0) {
+                const ratedKeys = ratingKeysByReportAndSubject.get(key) ?? new Set<string>();
+                if (requiredDimensionKeys.some((dk) => !ratedKeys.has(dk))) {
+                  subjectOk = false;
+                  break;
+                }
+              }
+            }
+          }
+
+          if (subjectOk) subjectCompletedStudents += 1;
+
+          if (homeroomEvaluationAvailable && reportMeta?.hasHomeroom === true) {
+            homeroomCompletedStudents += 1;
+          }
+
+          /** 班主任综合评价开启时，每位学生均需填写班主任评语后才算完成 */
+          const fullyComplete =
+            subjectOk && (!homeroomEvaluationAvailable || reportMeta?.hasHomeroom === true);
+
+          if (fullyComplete) completedStudents += 1;
+          else pendingStudentNames.push(stu.studentName);
+        }
+
+        const totalStudents = cls.students.length;
+        const pendingStudents = Math.max(totalStudents - completedStudents, 0);
+        const completionRate = totalStudents > 0
+          ? Number(((completedStudents / totalStudents) * 100).toFixed(1))
+          : 0;
+        return {
+          classId: cls.classId,
+          className: cls.className,
+          grade: cls.grade,
+          totalStudents,
+          completedStudents,
+          pendingStudents,
+          completionRate,
+          pendingStudentNames,
+          requiredSubjectKeys,
+          requiresHomeroomComment,
+          homeroomEvaluationAvailable,
+          subjectCompletedStudents,
+          homeroomCompletedStudents,
+        };
+      })
+      .filter((cls) => cls.totalStudents > 0);
+
+    const totalStudents = classes.reduce((sum, cls) => sum + cls.totalStudents, 0);
+    const completedStudents = classes.reduce((sum, cls) => sum + cls.completedStudents, 0);
+    const pendingStudents = Math.max(totalStudents - completedStudents, 0);
+    const completionRate = totalStudents > 0 ? Number(((completedStudents / totalStudents) * 100).toFixed(1)) : 0;
+
+    let subjectTrackTotal = 0;
+    let subjectTrackDone = 0;
+    let homeroomTrackTotal = 0;
+    let homeroomTrackDone = 0;
+    for (const cls of classes) {
+      if (cls.requiredSubjectKeys.length > 0) {
+        subjectTrackTotal += cls.totalStudents;
+        const insightsOk = cls.requiredSubjectKeys.every(
+          (sk) => teachingReflectionByClassSubject.get(`${cls.classId}::${sk}`) === true,
+        );
+        subjectTrackDone += insightsOk ? cls.subjectCompletedStudents : 0;
+      }
+      if (cls.homeroomEvaluationAvailable) {
+        homeroomTrackTotal += cls.totalStudents;
+        homeroomTrackDone += cls.homeroomCompletedStudents;
+      }
+    }
+    const subjectProgress =
+      subjectTrackTotal > 0
+        ? {
+            totalStudents: subjectTrackTotal,
+            completedStudents: subjectTrackDone,
+            pendingStudents: Math.max(0, subjectTrackTotal - subjectTrackDone),
+            completionRate: Number(((subjectTrackDone / subjectTrackTotal) * 100).toFixed(1)),
+          }
+        : null;
+    const homeroomProgress =
+      homeroomTrackTotal > 0
+        ? {
+            totalStudents: homeroomTrackTotal,
+            completedStudents: homeroomTrackDone,
+            pendingStudents: Math.max(0, homeroomTrackTotal - homeroomTrackDone),
+            completionRate: Number(((homeroomTrackDone / homeroomTrackTotal) * 100).toFixed(1)),
+          }
+        : null;
+
+    res.json({
+      progress: {
+        templateId: template.id,
+        title: template.title ?? null,
+        status: template.status,
+        academicYearId: template.academicYearId,
+        term: template.term,
+        totalStudents,
+        completedStudents,
+        pendingStudents,
+        completionRate,
+        subjectProgress,
+        homeroomProgress,
+        classes,
+        viewingTeacherId: scopeTeacherId,
+        viewingTeacherName,
+      },
+    });
+  } catch (e) {
+    console.error('get my report template progress', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/reports/templates/:academicYearId/:term', async (req: ReqWithUserId, res: Response) => {
   try {
     await ensureStudentPortraitTables();
@@ -1721,6 +2368,152 @@ router.get('/reports/templates/:templateId', async (req: ReqWithUserId, res: Res
   }
 });
 
+router.get('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey/class-insights', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureStudentPortraitTables();
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    const classId = String(req.params.classId ?? '').trim();
+    const subjectKey = String(req.params.subjectKey ?? '').trim();
+    if (!templateId || !classId || !subjectKey) {
+      res.status(400).json({ error: 'templateId, classId, subjectKey required' });
+      return;
+    }
+    const role = await getUserRole(req);
+    if (role === 'student' || !req.userId) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const template = await getTemplateById(templateId);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+    const classRow = (await pool.query(
+      `SELECT id
+       FROM classes
+       WHERE id = $1 AND academic_year_id = $2
+       LIMIT 1`,
+      [classId, template.academicYearId],
+    )).rows[0] as { id: string } | undefined;
+    if (!classRow) {
+      res.status(404).json({ error: 'Class not found in selected academic year' });
+      return;
+    }
+    const isAdminRole = role === 'system-admin' || role === 'admin';
+    if (!isAdminRole && role === 'teacher') {
+      const canTeach = await teacherTeachesSubjectInClass(req.userId, template.academicYearId, classId, subjectKey);
+      if (!canTeach) {
+        res.status(403).json({ error: 'Forbidden: not assigned to teach this subject for this class' });
+        return;
+      }
+    }
+    const row = (await pool.query(
+      `SELECT weakness_rows, teaching_reflection, updated_at
+       FROM student_report_subject_class_insights
+       WHERE template_id = $1 AND class_id = $2 AND subject_key = $3
+       LIMIT 1`,
+      [templateId, classId, subjectKey],
+    )).rows[0] as {
+      weakness_rows: unknown;
+      teaching_reflection: string | null;
+      updated_at: Date | null;
+    } | undefined;
+    const weakPoints = Array.isArray(row?.weakness_rows)
+      ? (row?.weakness_rows as Array<{ weakPoint?: string; errorAnalysis?: string; nextPlan?: string }>)
+      : [];
+    res.json({
+      insights: {
+        weaknessRows: weakPoints.map((w) => ({
+          weakPoint: String(w?.weakPoint ?? '').trim(),
+          errorAnalysis: String(w?.errorAnalysis ?? '').trim(),
+          nextPlan: String(w?.nextPlan ?? '').trim(),
+        })),
+        teachingReflection: row?.teaching_reflection ?? null,
+        updatedAt: row?.updated_at?.toISOString() ?? null,
+      },
+    });
+  } catch (e) {
+    console.error('get class insights', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey/class-insights', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureStudentPortraitTables();
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    const classId = String(req.params.classId ?? '').trim();
+    const subjectKey = String(req.params.subjectKey ?? '').trim();
+    if (!templateId || !classId || !subjectKey) {
+      res.status(400).json({ error: 'templateId, classId, subjectKey required' });
+      return;
+    }
+    const role = await getUserRole(req);
+    if (role === 'student' || !req.userId) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const template = await getTemplateById(templateId);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+    const isAdminRole = role === 'system-admin' || role === 'admin';
+    if (!isAdminRole && template.status !== 'published') {
+      res.status(403).json({ error: 'Report template is not published for teacher editing' });
+      return;
+    }
+    if (!isAdminRole && role === 'teacher') {
+      const canTeach = await teacherTeachesSubjectInClass(req.userId, template.academicYearId, classId, subjectKey);
+      if (!canTeach) {
+        res.status(403).json({ error: 'Forbidden: not assigned to teach this subject for this class' });
+        return;
+      }
+    }
+    const weaknessRowsRaw = Array.isArray(req.body?.weaknessRows) ? req.body.weaknessRows as Array<unknown> : [];
+    const weaknessRows = weaknessRowsRaw
+      .map((row) => row as Record<string, unknown>)
+      .map((row) => ({
+        weakPoint: String(row.weakPoint ?? '').trim(),
+        errorAnalysis: String(row.errorAnalysis ?? '').trim(),
+        nextPlan: String(row.nextPlan ?? '').trim(),
+      }))
+      .filter((row) => row.weakPoint || row.errorAnalysis || row.nextPlan);
+    const teachingReflection = String(req.body?.teachingReflection ?? '').trim() || null;
+    await pool.query(
+      `INSERT INTO student_report_subject_class_insights
+        (id, template_id, academic_year_id, term, class_id, subject_key, weakness_rows, teaching_reflection, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+       ON CONFLICT (template_id, class_id, subject_key)
+       DO UPDATE SET
+         weakness_rows = EXCLUDED.weakness_rows,
+         teaching_reflection = EXCLUDED.teaching_reflection,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        createId('srci'),
+        templateId,
+        template.academicYearId,
+        template.term,
+        classId,
+        subjectKey,
+        JSON.stringify(weaknessRows),
+        teachingReflection,
+        req.userId,
+        req.userId,
+      ],
+    );
+    res.json({ success: true });
+  } catch (e) {
+    console.error('put class insights', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/reports/students/:studentId', async (req: ReqWithUserId, res: Response) => {
   try {
     await ensureStudentPortraitTables();
@@ -1733,7 +2526,7 @@ router.get('/reports/students/:studentId', async (req: ReqWithUserId, res: Respo
     }
     const params: unknown[] = [studentId];
     const viewerRole = await getUserRole(req);
-    const hideUnreleased = viewerRole === 'student';
+    const hideUnreleased = viewerRole === 'student' || viewerRole === 'teacher';
     let sql = `
       SELECT r.id, r.student_id, r.academic_year_id, r.term, r.template_id, t.title AS template_title,
              r.homeroom_comment, r.updated_at, t.released_at,
@@ -1762,6 +2555,7 @@ router.get('/reports/students/:studentId', async (req: ReqWithUserId, res: Respo
       templateTitle: (r.template_title as string | null) ?? null,
       homeroomComment: (r.homeroom_comment as string | null) ?? null,
       updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
+      releasedAt: (r.released_at as Date | null)?.toISOString() ?? null,
     }));
     res.json({ reports });
   } catch (e) {
@@ -1797,7 +2591,7 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     }
     let filterTeacherSubjectsToStaffing = viewerRole === 'teacher' && !!req.userId;
     if (filterTeacherSubjectsToStaffing) {
-      await ensureClassTeacherAssignmentsTable();
+      await ensureClassTeacherAssignmentsTable(pool);
       const hm = await pool.query(
         `SELECT 1
          FROM student_enrollments e
@@ -1867,7 +2661,7 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
 
     const subjectRowsRaw = (await pool.query(
       `SELECT id, subject_key, subject_name, midterm_score, midterm_grade, final_score, final_grade,
-              learning_quality_grade, teacher_comment, teacher_id, created_at, updated_at
+              learning_quality_grade, exam_dimension_scores, teacher_comment, teacher_id, created_at, updated_at
        FROM student_term_subject_reports
        WHERE report_id = $1
        ORDER BY subject_name ASC`,
@@ -1881,6 +2675,7 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       final_score: string | null;
       final_grade: string | null;
       learning_quality_grade: string | null;
+      exam_dimension_scores: unknown;
       teacher_comment: string | null;
       teacher_id: string | null;
       created_at: Date | null;
@@ -2000,6 +2795,10 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         finalScore: hideScores ? null : (s.final_score == null ? null : Number(s.final_score)),
         finalGrade: (s.final_grade as ReportGrade | null) ?? null,
         learningQualityGrade,
+        examDimensionScores:
+          s.exam_dimension_scores && typeof s.exam_dimension_scores === 'object'
+            ? (s.exam_dimension_scores as Record<string, number | null>)
+            : null,
         teacherComment: s.teacher_comment ?? null,
         teacherId: s.teacher_id ?? null,
         dimensions: dimensionsBySubject.get(s.id) ?? [],
@@ -2125,6 +2924,10 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     }
     const midtermScoreInput = req.body?.midtermScore;
     const finalScoreInput = req.body?.finalScore;
+    const examDimensionScoresInput =
+      req.body?.examDimensionScores && typeof req.body.examDimensionScores === 'object'
+        ? (req.body.examDimensionScores as Record<string, unknown>)
+        : null;
     const teacherComment = (req.body?.teacherComment ?? null) as string | null;
     const learningQualityInput = (req.body as { learningQualityGrade?: unknown })?.learningQualityGrade;
     const dimensions = Array.isArray(req.body?.dimensions) ? (req.body.dimensions as Array<{
@@ -2140,38 +2943,134 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       return;
     }
 
+    const enrollmentClassId = await enrollmentClassForStudentYear(studentId, academicYearId);
+    const gradeItems = await loadGradeConfigItemsForReport();
+    let classNumericGrade: number | null = null;
+    if (enrollmentClassId) {
+      const cg = await pool.query(`SELECT grade FROM classes WHERE id = $1 LIMIT 1`, [enrollmentClassId]);
+      const g = Number((cg.rows[0] as { grade?: unknown } | undefined)?.grade);
+      classNumericGrade = Number.isFinite(g) ? g : null;
+    }
+    const gradeCatalogId =
+      classNumericGrade != null ? gradeCatalogIdForClassLevel(gradeItems, classNumericGrade) : null;
+    const segmentId = String(template.schoolSegmentId ?? '').trim();
+    const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+    const inclusionCtx = await loadReportYearInclusionContext(academicYearId);
+    const effectiveEnableScore = effectiveTemplateSubjectEnableScore(
+      normalizedTerm,
+      segmentId,
+      String(subjectKey).trim(),
+      gradeCatalogId,
+      segmentGradeIds,
+      templateSubject.enableScore,
+      inclusionCtx,
+    );
     if (!isAdminRole && role === 'teacher') {
-      const classId = await enrollmentClassForStudentYear(studentId, academicYearId);
-      if (!classId) {
+      if (!enrollmentClassId) {
         res.status(400).json({ error: 'Student has no class enrollment for this academic year' });
         return;
       }
-      const canTeach = await teacherTeachesSubjectInClass(req.userId, academicYearId, classId, String(subjectKey).trim());
+      const canTeach = await teacherTeachesSubjectInClass(
+        req.userId,
+        academicYearId,
+        enrollmentClassId,
+        String(subjectKey).trim(),
+      );
       if (!canTeach) {
         res.status(403).json({ error: 'Forbidden: not assigned to teach this subject for this class' });
         return;
       }
     }
 
+    const hasExamDimInput =
+      Boolean(
+        effectiveEnableScore &&
+          examDimensionScoresInput &&
+          templateSubject.dimensions.length > 0,
+      );
+
     const parseScore = (v: unknown): number | null => {
       if (v === '' || v == null) return null;
       const n = Number(v);
       return Number.isFinite(n) ? n : Number.NaN;
     };
-    const midtermScore = templateSubject.enableScore ? parseScore(midtermScoreInput) : null;
-    const finalScore = templateSubject.enableScore ? parseScore(finalScoreInput) : null;
+    const midtermScore = effectiveEnableScore ? parseScore(midtermScoreInput) : null;
+    let finalScore = effectiveEnableScore && !hasExamDimInput ? parseScore(finalScoreInput) : null;
     let learningQualityGrade: string | null = null;
     if (templateSubject.enableLearningQuality !== false) {
       const v = String(learningQualityInput ?? '').trim();
       if (v === 'A' || v === 'B' || v === 'C' || v === 'D') learningQualityGrade = v;
     }
-    if (Number.isNaN(midtermScore) || Number.isNaN(finalScore)) {
+    if (Number.isNaN(midtermScore)) {
       res.status(400).json({ error: 'Scores must be numbers' });
       return;
     }
-    if ((midtermScore != null && (midtermScore < 0 || midtermScore > 100)) || (finalScore != null && (finalScore < 0 || finalScore > 100))) {
+    if (!hasExamDimInput && effectiveEnableScore && Number.isNaN(finalScore)) {
+      res.status(400).json({ error: 'Scores must be numbers' });
+      return;
+    }
+    if (midtermScore != null && (midtermScore < 0 || midtermScore > 100)) {
       res.status(400).json({ error: 'Scores must be between 0 and 100' });
       return;
+    }
+    if (!hasExamDimInput && finalScore != null && (finalScore < 0 || finalScore > 100)) {
+      res.status(400).json({ error: 'Scores must be between 0 and 100' });
+      return;
+    }
+
+    let examDimensionScores: Record<string, number | null> | null = null;
+    let finalGradeForDb: ReportGrade | null = toReportGrade(finalScore, template.scoreGradeMinScores);
+    let resolvedMaxByKey = new Map<string, number>();
+    let resolvedLetterMins = template.scoreGradeMinScores;
+
+    if (hasExamDimInput) {
+      const examConfigsAll = await loadSanitizedExamConfigsForYear(academicYearId);
+      const examKey = `${normalizedTerm}::${String(template.schoolSegmentId ?? '').trim()}`;
+      const examScope = examConfigsAll[examKey];
+      const examSubject = examScope?.subjects?.find((s) => s.subjectKey === String(subjectKey).trim());
+      const examG = pickExamGradeConfig(examSubject?.gradeConfigs ?? [], gradeCatalogId);
+      const dimsForMatch = templateSubject.dimensions.map((d) => ({
+        dimensionKey: d.dimensionKey,
+        dimensionLabelZh: d.dimensionLabelZh,
+        dimensionLabelEn: d.dimensionLabelEn,
+      }));
+      const dimensionMaxByKey = matchDimensionMaxByKey(dimsForMatch, examG?.dimensionScores ?? []);
+      resolvedMaxByKey = dimensionMaxByKey;
+      const examHasBands =
+        examG &&
+        Object.values(examG.percentBands).some((v) => typeof v === 'number' && Number.isFinite(v));
+      const letterGradeMins = examHasBands
+        ? mergeReportScoreGradeMinScores(examG?.percentBands ?? {})
+        : template.scoreGradeMinScores;
+      resolvedLetterMins = letterGradeMins;
+
+      const scoresOut: Record<string, number | null> = {};
+      let allFilled = true;
+      let sum = 0;
+      let totalMax = 0;
+      for (const dim of templateSubject.dimensions) {
+        const key = String(dim.dimensionKey ?? '').trim();
+        if (!key) continue;
+        const maxPts = dimensionMaxByKey.get(key) ?? 100;
+        totalMax += maxPts;
+        const raw = examDimensionScoresInput![key];
+        if (raw === '' || raw == null) {
+          scoresOut[key] = null;
+          allFilled = false;
+          continue;
+        }
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0 || n > maxPts) {
+          res.status(400).json({ error: `Dimension ${key} score must be between 0 and ${maxPts}` });
+          return;
+        }
+        scoresOut[key] = n;
+        sum += n;
+      }
+      finalScore = allFilled ? Number(sum.toFixed(2)) : null;
+      const totalPct = finalScore != null && totalMax > 0 ? (finalScore / totalMax) * 100 : null;
+      finalGradeForDb = totalPct == null ? null : toReportGrade(totalPct, letterGradeMins);
+      examDimensionScores = scoresOut;
     }
 
     await client.query('BEGIN');
@@ -2192,8 +3091,8 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     await client.query(
       `INSERT INTO student_term_subject_reports (
         id, report_id, subject_key, subject_name, midterm_score, midterm_grade, final_score, final_grade,
-        learning_quality_grade, teacher_comment, teacher_id, created_by, updated_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        learning_quality_grade, exam_dimension_scores, teacher_comment, teacher_id, created_by, updated_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14)
       ON CONFLICT (report_id, subject_key)
       DO UPDATE SET
         subject_name = EXCLUDED.subject_name,
@@ -2202,6 +3101,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         final_score = EXCLUDED.final_score,
         final_grade = EXCLUDED.final_grade,
         learning_quality_grade = EXCLUDED.learning_quality_grade,
+        exam_dimension_scores = EXCLUDED.exam_dimension_scores,
         teacher_comment = EXCLUDED.teacher_comment,
         teacher_id = ${teacherIdMergeSql},
         updated_by = EXCLUDED.updated_by,
@@ -2214,8 +3114,9 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         midtermScore,
         toReportGrade(midtermScore, template.scoreGradeMinScores),
         finalScore,
-        toReportGrade(finalScore, template.scoreGradeMinScores),
+        finalGradeForDb,
         learningQualityGrade,
+        examDimensionScores ? JSON.stringify(examDimensionScores) : null,
         templateSubject.enableTeacherComment ? teacherComment : null,
         teacherIdForWrite,
         req.userId,
@@ -2260,7 +3161,20 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       const dim = templateSubject.dimensions[i];
       const key = String(dim.dimensionKey ?? '').trim();
       const label = String(dim.dimensionLabel ?? '').trim();
-      const rating = ratingByKey.get(key) ?? 'A';
+      const dimScore = examDimensionScores?.[key];
+      let autoRating: TargetLevel | null = null;
+      if (dimScore != null) {
+        if (resolvedMaxByKey.size > 0) {
+          const maxPts = resolvedMaxByKey.get(key) ?? 100;
+          const dimPct = maxPts > 0 ? (dimScore / maxPts) * 100 : null;
+          autoRating =
+            dimPct == null ? null : reportScoreLetterGradeToTargetLevel(toReportGrade(dimPct, resolvedLetterMins));
+        } else {
+          autoRating = reportScoreLetterGradeToTargetLevel(toReportGrade(dimScore, template.scoreGradeMinScores));
+        }
+      }
+      /** 请求体中的维度等第优先（与教师工作台「最后一次修改」一致）；未传时再用得分自动换算 */
+      const rating = ratingByKey.get(key) ?? autoRating ?? 'A';
       if (!key || !label) continue;
       const dimensionId = createId('strd');
       await client.query(
@@ -2298,7 +3212,8 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         midtermScore,
         midtermGrade: toReportGrade(midtermScore, template.scoreGradeMinScores),
         finalScore,
-        finalGrade: toReportGrade(finalScore, template.scoreGradeMinScores),
+        finalGrade: finalGradeForDb,
+        examDimensionScores,
       },
     });
   } catch (e) {
@@ -2315,7 +3230,7 @@ router.post('/academic-years/:sourceYearId/promote', requireAdmin(async (req: Re
   const client = await pool.connect();
   try {
     await ensureStudentPortraitTables();
-    await ensureClassTeacherAssignmentsTable();
+    await ensureClassTeacherAssignmentsTable(pool);
     const { sourceYearId } = req.params;
     const { targetYearId, setTargetAsCurrent } = req.body || {};
     if (!sourceYearId || !targetYearId) {

@@ -32,6 +32,7 @@ type HubView =
   | 'curriculum-roadmap'
   | 'student-portrait'
   | 'teacher-portrait'
+  | 'academic-reports'
   | 'class-assistant'
   | 'class-management';
 
@@ -48,6 +49,7 @@ type HubTileId =
   | 'curriculum-roadmap'
   | 'student-portrait'
   | 'teacher-portrait'
+  | 'academic-reports'
   | `placeholder-${number}`;
 
 type HubTile = {
@@ -396,7 +398,25 @@ export default function CompassHub({
           </span>
         ),
       },
-      { id: 'placeholder-3', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      {
+        id: 'academic-reports',
+        kind: 'app',
+        view: 'academic-reports',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #0d9488 0%, #0f766e 50%, #115e59 100%)',
+          boxShadow: '0 6px 16px -2px rgba(15, 118, 110, 0.35), inset 0 1px 0 rgba(255,255,255,0.22)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '学业' : 'Academic'}</span>
+            <span>{zh ? '报告' : 'Reports'}</span>
+          </span>
+        ),
+      },
 
       {
         id: 'student-portrait',

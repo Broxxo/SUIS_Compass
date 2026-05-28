@@ -9,9 +9,8 @@ import EditCourseDialog from './EditCourseDialog';
 import UnitView from './UnitView';
 import ConceptView from './ConceptView';
 import ConceptSettingsDialog from './ConceptSettingsDialog';
-import GradeSettingsDialog from './GradeSettingsDialog';
 import AppTopBar from './AppTopBar';
-import { Settings, Plus, Globe, Bot, BarChart2, Download, Upload, ListOrdered } from 'lucide-react';
+import { Settings, Plus, Globe, Bot, BarChart2, Download, Upload } from 'lucide-react';
 import { Button } from './ui/button';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -332,7 +331,6 @@ export default function CurriculumRoadmap({
   const prevPersistedCategoryOrderRef = useRef<string[]>([]);
   const [showTotalPeriods, setShowTotalPeriods] = useState(false);
   const [isConceptSettingsDialogOpen, setIsConceptSettingsDialogOpen] = useState(false);
-  const [isGradeSettingsDialogOpen, setIsGradeSettingsDialogOpen] = useState(false);
 
   // 用于触发学期数据刷新（更新格子颜色）
   const [semesterDataRefreshKey, setSemesterDataRefreshKey] = useState(0);
@@ -791,17 +789,6 @@ export default function CurriculumRoadmap({
                       <button
                         type="button"
                         className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                        onClick={() => {
-                          setIsSettingsMenuOpen(false);
-                          setIsGradeSettingsDialogOpen(true);
-                        }}
-                      >
-                        <ListOrdered className="h-4 w-4" />
-                        <span>{language === 'zh' ? '年级设置' : 'Grade settings'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
                         title={t('settings.exportCourseDataTitle')}
                         onClick={() => {
                           setIsSettingsMenuOpen(false);
@@ -917,17 +904,6 @@ export default function CurriculumRoadmap({
                     >
                       <Settings className="h-4 w-4" />
                       <span>{language === 'zh' ? '课程设置' : 'Course settings'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                      onClick={() => {
-                        setIsSettingsMenuOpen(false);
-                        setIsGradeSettingsDialogOpen(true);
-                      }}
-                    >
-                      <ListOrdered className="h-4 w-4" />
-                      <span>{language === 'zh' ? '年级设置' : 'Grade settings'}</span>
                     </button>
                     <button
                       type="button"
@@ -1200,14 +1176,6 @@ export default function CurriculumRoadmap({
       <ConceptSettingsDialog
         open={isConceptSettingsDialogOpen}
         onOpenChange={setIsConceptSettingsDialogOpen}
-      />
-
-      <GradeSettingsDialog
-        open={isGradeSettingsDialogOpen}
-        onOpenChange={setIsGradeSettingsDialogOpen}
-        language={language}
-        canEdit={canReorderCategories}
-        onSaved={(cfg) => setGradeConfig(normalizeGradeConfig(cfg))}
       />
 
       <input

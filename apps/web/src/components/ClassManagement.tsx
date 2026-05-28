@@ -19,6 +19,7 @@ import {
   loadClassesSync,
   loadStudents,
   loadStudentsSync,
+  loadEnrollments,
   loadEnrollmentsSync,
   createAcademicYear,
   deleteAcademicYear,
@@ -90,7 +91,6 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const [classTeachers, setClassTeachers] = useState<Record<string, { teacherId: string; role: string; displayName: string }[]>>({});
   const [assignTeacherClass, setAssignTeacherClass] = useState<ClassItem | null>(null);
   const [assignTeacherTeacherId, setAssignTeacherTeacherId] = useState('');
-  const [assignTeacherRole, setAssignTeacherRole] = useState<'homeroom' | 'co-teacher'>('co-teacher');
 
   /** 我的班级下教师仅看与自己关联的班级；管理员看全部 */
   const displayedClasses = useMemo(() => {
@@ -122,15 +122,18 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
       if (!getCurrentAcademicYearId()) setCurrentAcademicYearId(list[0].id);
       setCurrentYearId(list[0].id);
     }
-    if (cur || list[0]?.id) {
-      const yid = cur || list[0].id;
+    const yid = cur || list[0]?.id || null;
+    if (yid) {
       const cls = await loadClasses(yid);
       setClasses(cls);
       setCurrentYearId(yid);
-    } else setClasses([]);
+    } else {
+      setClasses([]);
+    }
     const st = await loadStudents();
     setStudents(st);
-    setEnrollments(loadEnrollmentsSync());
+    await loadEnrollments();
+    setEnrollments(loadEnrollmentsSync(yid ?? undefined));
   };
 
   useEffect(() => {
@@ -143,9 +146,23 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
 
   useEffect(() => {
     if (!currentYearId) return;
-    const cls = loadClassesSync(currentYearId);
-    setClasses(cls);
-    setEnrollments(loadEnrollmentsSync(currentYearId));
+    let cancelled = false;
+    void (async () => {
+      const cls = loadClassesSync(currentYearId);
+      if (USE_CLOUD_STORAGE) {
+        try {
+          await loadEnrollments();
+        } catch {
+          /* ignore; sync read may still have cache */
+        }
+      }
+      if (cancelled) return;
+      setClasses(cls);
+      setEnrollments(loadEnrollmentsSync(currentYearId));
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [currentYearId]);
 
   useEffect(() => {
@@ -471,7 +488,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
           </div>
           {!currentYearId && years.length === 0 && !loading && (
             <p className="text-sm text-slate-500 mt-2">
-              {isZh ? '请在后台「学年管理」中创建学年。' : 'Create academic years in Admin → Year management.'}
+              {isZh ? '请在后台「基础设置 → 学年管理」中创建学年。' : 'Create academic years in Admin → Foundation → Academic years.'}
             </p>
           )}
         </section>
@@ -593,31 +610,24 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="min-w-0">
                                     <div className="text-xs font-semibold text-amber-900">
-                                      {isZh ? '班级教师' : 'Teachers'}
+                                      {isZh ? '班主任' : 'Homeroom teacher'}
                                     </div>
                                     <div className="mt-2 flex flex-wrap gap-2">
-                                      {(classTeachers[expandedInGrade.id] ?? []).length === 0 ? (
-                                        <span className="text-xs text-amber-900/70">{isZh ? '暂无关联教师' : 'No teachers assigned'}</span>
+                                      {(classTeachers[expandedInGrade.id] ?? []).filter((t) => t.role === 'homeroom').length === 0 ? (
+                                        <span className="text-xs text-amber-900/70">{isZh ? '未指定班主任' : 'No homeroom teacher'}</span>
                                       ) : (
                                         [...(classTeachers[expandedInGrade.id] ?? [])]
-                                          .sort((a, b) => (a.role === 'homeroom' ? -1 : 1) - (b.role === 'homeroom' ? -1 : 1))
+                                          .filter((t) => t.role === 'homeroom')
                                           .map((t) => {
-                                            const isHomeroom = t.role === 'homeroom';
                                             return (
                                               <span
                                                 key={t.teacherId}
-                                                className={
-                                                  isHomeroom
-                                                    ? 'inline-flex items-center gap-1 rounded-full bg-amber-600 text-white px-2.5 py-1 text-xs font-semibold shadow-sm'
-                                                    : 'inline-flex items-center gap-1 rounded-full bg-white text-amber-900 px-2.5 py-1 text-xs font-medium border border-amber-200'
-                                                }
-                                                title={isHomeroom ? (isZh ? '班主任/负责人' : 'Homeroom') : (isZh ? '任课教师' : 'Co-teacher')}
+                                                className="inline-flex items-center gap-1 rounded-full bg-amber-600 text-white px-2.5 py-1 text-xs font-semibold shadow-sm"
+                                                title={isZh ? '班主任' : 'Homeroom'}
                                               >
-                                                {isHomeroom && (
-                                                  <span className="rounded-full bg-white/20 px-1 py-0.5 text-[10px]">
-                                                    {isZh ? '班主任' : 'HR'}
-                                                  </span>
-                                                )}
+                                                <span className="rounded-full bg-white/20 px-1 py-0.5 text-[10px]">
+                                                  {isZh ? '班主任' : 'HR'}
+                                                </span>
                                                 <span className="truncate max-w-[220px]">{t.displayName}</span>
                                               </span>
                                             );
@@ -633,10 +643,9 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                                       onClick={() => {
                                         setAssignTeacherClass(expandedInGrade);
                                         setAssignTeacherTeacherId('');
-                                        setAssignTeacherRole('co-teacher');
                                       }}
                                     >
-                                      {isZh ? '关联教师' : 'Assign'}
+                                      {isZh ? '班主任' : 'Homeroom'}
                                     </Button>
                                   )}
                                 </div>
@@ -978,18 +987,19 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
       <Dialog open={!!assignTeacherClass} onOpenChange={(open) => !open && setAssignTeacherClass(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{isZh ? '关联教师' : 'Assign teacher'}</DialogTitle>
+            <DialogTitle>{isZh ? '班主任' : 'Homeroom teacher'}</DialogTitle>
             <DialogDescription>
               {assignTeacherClass
-                ? (isZh ? `为「G${assignTeacherClass.grade} ${assignTeacherClass.name}」关联教师（关联后教师可在“我的班级”看到并使用课堂助手）`
-                  : `Assign teachers to "G${assignTeacherClass.grade} ${assignTeacherClass.name}"`)
+                ? (isZh
+                    ? `为「G${assignTeacherClass.grade} ${assignTeacherClass.name}」指定班主任；与后台「岗位安排」中的班主任列同步。学科任课教师请在岗位安排中设置。`
+                    : `Set homeroom for "G${assignTeacherClass.grade} ${assignTeacherClass.name}". Syncs with Admin → Staffing. Subject teachers are assigned only in Staffing.`)
                 : ''}
             </DialogDescription>
           </DialogHeader>
           {assignTeacherClass && (
             <div className="space-y-2">
               <div>
-                <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择教师' : 'Teacher'}</label>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择班主任' : 'Homeroom teacher'}</label>
                 <select
                   value={assignTeacherTeacherId}
                   onChange={(e) => setAssignTeacherTeacherId(e.target.value)}
@@ -1001,31 +1011,20 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="block text-xs text-slate-500 mb-1">{isZh ? '角色' : 'Role'}</label>
-                <select
-                  value={assignTeacherRole}
-                  onChange={(e) => setAssignTeacherRole(e.target.value as 'homeroom' | 'co-teacher')}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
-                >
-                  <option value="homeroom">{isZh ? '班主任/负责人' : 'Homeroom'}</option>
-                  <option value="co-teacher">{isZh ? '任课教师' : 'Co-teacher'}</option>
-                </select>
-              </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <div className="text-xs font-medium text-slate-700 mb-2">{isZh ? '当前已关联' : 'Currently assigned'}</div>
-                {(classTeachers[assignTeacherClass.id] ?? []).length === 0 ? (
-                  <div className="text-xs text-slate-500">{isZh ? '暂无关联教师。' : 'No teachers assigned.'}</div>
+                <div className="text-xs font-medium text-slate-700 mb-2">{isZh ? '当前班主任' : 'Current homeroom'}</div>
+                {(classTeachers[assignTeacherClass.id] ?? []).filter((t) => t.role === 'homeroom').length === 0 ? (
+                  <div className="text-xs text-slate-500">{isZh ? '尚未指定班主任。' : 'No homeroom teacher yet.'}</div>
                 ) : (
                   <ul className="space-y-1">
-                    {(classTeachers[assignTeacherClass.id] ?? []).map((t) => (
+                    {(classTeachers[assignTeacherClass.id] ?? [])
+                      .filter((t) => t.role === 'homeroom')
+                      .map((t) => (
                       <li key={t.teacherId} className="flex items-center justify-between gap-2 text-sm">
                         <span className="text-slate-700">
                           {t.displayName}
-                          <span className="ml-1 text-xs text-slate-500">
-                            ({t.role === 'homeroom' ? (isZh ? '负责人' : 'Homeroom') : (isZh ? '任课' : 'Co')})
-                          </span>
+                          <span className="ml-1 text-xs text-slate-500">({isZh ? '班主任' : 'Homeroom'})</span>
                         </span>
                         <Button
                           size="sm"
@@ -1078,14 +1077,14 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                 setError(null);
                 try {
                   if (USE_CLOUD_STORAGE) {
-                    await api.addClassTeacher(assignTeacherClass.id, { teacherId: assignTeacherTeacherId, role: assignTeacherRole });
+                    await api.addClassTeacher(assignTeacherClass.id, { teacherId: assignTeacherTeacherId, role: 'homeroom' });
                     const list = await api.getClassTeachers(assignTeacherClass.id);
                     setClassTeachers((prev) => ({ ...prev, [assignTeacherClass.id]: list }));
                   } else {
                     const teacher = teachers.find((t) => t.id === assignTeacherTeacherId);
                     assignTeacherToClassLocal(assignTeacherClass.id, {
                       teacherId: assignTeacherTeacherId,
-                      role: assignTeacherRole,
+                      role: 'homeroom',
                       displayName: teacher?.displayName || teacher?.username || null,
                     });
                     const list = loadClassTeachersLocalSync(assignTeacherClass.id).map((x) => ({
@@ -1097,7 +1096,6 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                   }
                   if (currentYearId) setClasses(loadClassesSync(currentYearId));
                   setAssignTeacherTeacherId('');
-                  setAssignTeacherRole('co-teacher');
                 } catch (e: unknown) {
                   const msg = (e as Error)?.message || 'Failed to assign teacher';
                   setError(

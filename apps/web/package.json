@@ -19,6 +19,8 @@
     "@repo/shared": "*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.562.0",
     "pdfjs-dist": "^4.10.38",
     "pinyin-pro": "^3.28.1",

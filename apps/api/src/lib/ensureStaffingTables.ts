@@ -1,10 +1,11 @@
 import pool from '../config/database.js';
+import { createRunOnce } from './runOnce.js';
 
-let ensuredStaffingTables = false;
+const ensureOnce = createRunOnce();
 
 /** 班级-学科教师岗位表（含 teacher_slot 迁移）；与 admin 岗位接口共用 */
 export async function ensureStaffingTables(): Promise<void> {
-  if (ensuredStaffingTables) return;
+  await ensureOnce.run(async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS class_subject_teacher_assignments (
       id VARCHAR(100) PRIMARY KEY,
@@ -61,5 +62,5 @@ export async function ensureStaffingTables(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_csta_teacher
       ON class_subject_teacher_assignments(teacher_id)
   `);
-  ensuredStaffingTables = true;
+  });
 }

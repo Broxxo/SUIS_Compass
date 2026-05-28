@@ -351,16 +351,28 @@ export async function saveCategoryOrder(order: string[]): Promise<void> {
   }
 }
 
+function migrateLocalSchoolGradeStructureKey(): void {
+  try {
+    const newKey = STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE;
+    if (localStorage.getItem(newKey)) return;
+    const legacy = localStorage.getItem(STORAGE_KEYS.GRADE_CONFIG_LEGACY);
+    if (legacy) localStorage.setItem(newKey, legacy);
+  } catch {
+    /* ignore migration errors */
+  }
+}
+
 /**
- * 学校年级配置（全校共享）
+ * 学校学段与年级结构（全校共享，存于 school_settings）
  */
 export function loadGradeConfigSync(): GradeConfig {
+  migrateLocalSchoolGradeStructureKey();
   try {
-    const stored = localStorage.getItem(STORAGE_KEYS.GRADE_CONFIG);
+    const stored = localStorage.getItem(STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE);
     if (!stored) return DEFAULT_GRADE_CONFIG;
     return normalizeGradeConfig(JSON.parse(stored));
   } catch (error) {
-    logError('Failed to load grade config', error);
+    logError('Failed to load school grade structure', error);
     return DEFAULT_GRADE_CONFIG;
   }
 }
@@ -368,11 +380,11 @@ export function loadGradeConfigSync(): GradeConfig {
 export async function loadGradeConfig(): Promise<GradeConfig> {
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
-      const fromCloud = normalizeGradeConfig(await api.getGradeConfig());
-      localStorage.setItem(STORAGE_KEYS.GRADE_CONFIG, JSON.stringify(fromCloud));
+      const fromCloud = normalizeGradeConfig(await api.getSchoolGradeStructure());
+      localStorage.setItem(STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE, JSON.stringify(fromCloud));
       return fromCloud;
     } catch (error) {
-      logError('Failed to load grade config from cloud, falling back to local', error);
+      logError('Failed to load school grade structure from cloud, falling back to local', error);
     }
   }
   return loadGradeConfigSync();
@@ -381,18 +393,18 @@ export async function loadGradeConfig(): Promise<GradeConfig> {
 export async function saveGradeConfig(config: GradeConfig): Promise<GradeConfig> {
   const normalized = normalizeGradeConfig(config);
   try {
-    localStorage.setItem(STORAGE_KEYS.GRADE_CONFIG, JSON.stringify(normalized));
+    localStorage.setItem(STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE, JSON.stringify(normalized));
   } catch (error) {
-    logError('Failed to save grade config to localStorage', error);
+    logError('Failed to save school grade structure to localStorage', error);
     throw error;
   }
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
-      const saved = normalizeGradeConfig(await api.putGradeConfig(normalized));
-      localStorage.setItem(STORAGE_KEYS.GRADE_CONFIG, JSON.stringify(saved));
+      const saved = normalizeGradeConfig(await api.putSchoolGradeStructure(normalized));
+      localStorage.setItem(STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE, JSON.stringify(saved));
       return saved;
     } catch (error) {
-      logError('Failed to save grade config to cloud', error);
+      logError('Failed to save school grade structure to cloud', error);
     }
   }
   return normalized;

@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './courseDomains.js';
 export * from './constants.js';
 export {
   COURSE_PALETTE,

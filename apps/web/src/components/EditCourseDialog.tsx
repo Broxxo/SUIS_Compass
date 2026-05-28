@@ -2,8 +2,11 @@ import { useState, useEffect } from 'react';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
+import type { CourseDomainsConfig } from '@repo/shared';
+import { findDomainIdForCourse } from '@repo/shared';
 import { Course, CourseColor, GradeConfigItem, SubjectCategory } from '../types';
 import GradePeriodsFields from './GradePeriodsFields';
+import CourseDomainSelect from './CourseDomainSelect';
 import { useLanguage } from '../contexts/LanguageContext';
 import { COURSE_COLORS } from '../lib/constants';
 import { getColorValue } from '../lib/courseUtils';
@@ -23,9 +26,11 @@ interface EditCourseDialogProps {
       textbookVersion?: string;
       color: CourseColor;
       coTeaching: boolean;
+      domainId: string | null;
     },
   ) => void;
   gradeItems: GradeConfigItem[];
+  domainsConfig?: CourseDomainsConfig;
 }
 
 export default function EditCourseDialog({
@@ -34,6 +39,7 @@ export default function EditCourseDialog({
   onOpenChange,
   onSave,
   gradeItems,
+  domainsConfig = { domains: [], domainOrder: [] },
 }: EditCourseDialogProps) {
   const { t, language } = useLanguage();
   const [subjectCategoryZh, setSubjectCategoryZh] = useState('');
@@ -43,6 +49,7 @@ export default function EditCourseDialog({
   const [textbookVersion, setTextbookVersion] = useState('人教版');
   const [selectedColor, setSelectedColor] = useState<CourseColor>('light-blue');
   const [coTeaching, setCoTeaching] = useState(false);
+  const [domainId, setDomainId] = useState<string | null>(null);
 
   useEffect(() => {
     if (course) {
@@ -59,8 +66,9 @@ export default function EditCourseDialog({
       setTextbookVersion(course.textbookVersion || '人教版');
       setSelectedColor(course.color);
       setCoTeaching(Boolean(course.coTeaching));
+      setDomainId(findDomainIdForCourse(domainsConfig, course.id));
     }
-  }, [course]);
+  }, [course, domainsConfig]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,6 +93,7 @@ export default function EditCourseDialog({
         textbookVersion: textbookVersion.trim() || '人教版',
         color: selectedColor,
         coTeaching,
+        domainId,
       });
       onOpenChange(false);
     }
@@ -146,9 +155,23 @@ export default function EditCourseDialog({
                 </div>
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                {language === 'zh' ? '用于分组显示，相同类别的课程会显示在同一列' : 'Used for grouping, courses with the same category will be displayed in the same column'}
+                {language === 'zh'
+                  ? '未归入「课程领域」时，相同学科分类的课程显示在同一列；归入领域后，在河流中按领域内顺序各占一列并紧密排列。'
+                  : 'Without a domain, same subject categories share one column. With a domain, each course gets its own column inside the domain cluster.'}
               </p>
             </div>
+            {domainsConfig.domains.length > 0 && (
+              <div>
+                <label className="text-sm font-medium text-gray-700 mb-2 block">
+                  {language === 'zh' ? '课程领域' : 'Course domain'}
+                </label>
+                <CourseDomainSelect
+                  domainsConfig={domainsConfig}
+                  value={domainId}
+                  onChange={setDomainId}
+                />
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium text-gray-700 mb-2 block">
                 {t('course.gradeRange')}

@@ -1,6 +1,15 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { getCourseCellHex } from '@repo/shared';
+import {
+  assignCourseToDomain,
+  buildRoadmapLayoutSegments,
+  countRoadmapLayoutColumns,
+  getCourseCellHex,
+  getCourseDomainLabel,
+  removeCourseFromDomains,
+  type CourseDomainsConfig,
+  type RoadmapLayoutSegment,
+} from '@repo/shared';
 import { Course, CourseColor, GradeConfig, Semester, SubjectCategory } from '../types';
 import AddCourseDialog from './AddCourseDialog';
 import SemesterOverviewDialog from './SemesterOverviewDialog';
@@ -10,7 +19,7 @@ import UnitView from './UnitView';
 import ConceptView from './ConceptView';
 import ConceptSettingsDialog from './ConceptSettingsDialog';
 import AppTopBar from './AppTopBar';
-import { Settings, Plus, Globe, Bot, BarChart2, Download, Upload } from 'lucide-react';
+import { Settings, Plus, Bot, Download, Upload, SlidersHorizontal, BarChart2, Globe } from 'lucide-react';
 import { Button } from './ui/button';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -26,7 +35,10 @@ import {
   loadSemesterDataSync,
   loadSemesterData,
   loadCategoryOrder,
+  loadCourseDomainsSync,
   saveCategoryOrder,
+  saveCourseDomains,
+  hydrateCourseDomainsFromCloud,
   hydrateCategoryOrderFromCloud,
   exportAllDataSync,
   importAllData,
@@ -57,6 +69,8 @@ const COLUMN_GAP_MAX_PX = 24;
 const COLUMN_GAP_MIN_PX = 6;
 /** 左侧年级标签列宽（复合名如 G9国际）；右对齐贴近课程区，右侧留少量空隙 */
 const GRADE_LABEL_COL_WIDTH_PX = 84;
+/** 同一课程领域内各课程列之间的间距（紧密排列） */
+const ROADMAP_DOMAIN_INNER_GAP_PX = 2;
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
@@ -327,6 +341,9 @@ export default function CurriculumRoadmap({
   const [categoryOrder, setCategoryOrder] = useState<string[]>(() =>
     USE_CLOUD_STORAGE ? [] : loadCategoryOrder(),
   );
+  const [courseDomains, setCourseDomains] = useState<CourseDomainsConfig>(() =>
+    USE_CLOUD_STORAGE ? { domains: [], domainOrder: [] } : loadCourseDomainsSync(),
+  );
   /** 与 useEffect 持久化学科顺序配合：手动「保存顺序」先写入此 ref，避免已 await save 后再被 effect 打一次重复 PUT */
   const prevPersistedCategoryOrderRef = useRef<string[]>([]);
   const [showTotalPeriods, setShowTotalPeriods] = useState(false);
@@ -383,6 +400,11 @@ export default function CurriculumRoadmap({
         void hydrateCategoryOrderFromCloud().then((order) => {
           setCategoryOrder((prev) => (order.length > 0 ? order : prev));
         });
+        void hydrateCourseDomainsFromCloud().then((config) => {
+          setCourseDomains((prev) =>
+            config.domains.length > 0 || config.domainOrder.length > 0 ? config : prev,
+          );
+        });
       }
     };
     window.addEventListener('focus', onFocus);
@@ -403,6 +425,12 @@ export default function CurriculumRoadmap({
         if (order.length > 0) return order;
         return prev;
       });
+    });
+    hydrateCourseDomainsFromCloud().then((config) => {
+      if (cancelled) return;
+      setCourseDomains((prev) =>
+        config.domains.length > 0 || config.domainOrder.length > 0 ? config : prev,
+      );
     });
     return () => {
       cancelled = true;
@@ -523,6 +551,7 @@ export default function CurriculumRoadmap({
     textbookVersion: string,
     color: Course['color'],
     coTeaching: boolean,
+    domainId: string | null,
   ) => {
     const newCourse: Course = {
       id: `course-${Date.now()}`,
@@ -535,6 +564,11 @@ export default function CurriculumRoadmap({
       coTeaching: Boolean(coTeaching),
     };
     setCourses([...courses, newCourse]);
+    if (domainId) {
+      const next = assignCourseToDomain(courseDomains, newCourse.id, domainId);
+      setCourseDomains(next);
+      void saveCourseDomains(next).catch((err) => console.error('Failed to save course domains:', err));
+    }
     setIsAddCourseDialogOpen(false);
   };
 
@@ -564,10 +598,16 @@ export default function CurriculumRoadmap({
       
       // 从courses数组中移除该课程
       setCourses(courses.filter(course => course.id !== courseId));
+      const nextDomains = removeCourseFromDomains(courseDomains, courseId);
+      setCourseDomains(nextDomains);
+      void saveCourseDomains(nextDomains).catch((err) => console.error('Failed to save course domains:', err));
     } catch (error) {
       console.error('Failed to delete course:', error);
       // 即使云端删除失败，也从本地移除（避免UI不一致）
       setCourses(courses.filter(course => course.id !== courseId));
+      const nextDomains = removeCourseFromDomains(courseDomains, courseId);
+      setCourseDomains(nextDomains);
+      void saveCourseDomains(nextDomains).catch((err) => console.error('Failed to save course domains:', err));
     }
   };
 
@@ -596,9 +636,14 @@ export default function CurriculumRoadmap({
       textbookVersion?: string;
       color: CourseColor;
       coTeaching: boolean;
+      domainId: string | null;
     },
   ) => {
-    handleUpdateCourse(courseId, updates);
+    const { domainId, ...courseUpdates } = updates;
+    handleUpdateCourse(courseId, courseUpdates);
+    const nextDomains = assignCourseToDomain(courseDomains, courseId, domainId);
+    setCourseDomains(nextDomains);
+    void saveCourseDomains(nextDomains).catch((err) => console.error('Failed to save course domains:', err));
     setIsEditCourseDialogOpen(false);
     setEditingCourse(null);
   };
@@ -739,26 +784,15 @@ export default function CurriculumRoadmap({
                   <Plus className="h-4 w-4" />
                 </Button>
               )}
-              {(isHubSurface || (!isHubSurface && canEditFramework)) && (
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setShowTotalPeriods((v) => !v)}
-                  className="h-9 w-9 rounded-lg flex-shrink-0"
-                  title={totalPeriodsToggleTitle}
-                >
-                  <BarChart2 className="h-4 w-4" />
-                </Button>
-              )}
               {!isHubSurface && canEditFramework && (
                 <Button
                   variant="outline"
                   size="icon"
-                  onClick={() => setIsConceptSettingsDialogOpen(true)}
+                  onClick={() => setIsSettingsDialogOpen(true)}
                   className="h-9 w-9 rounded-lg flex-shrink-0"
-                  title={language === 'zh' ? '概念设置' : 'Concept settings'}
+                  title={language === 'zh' ? '课程设置' : 'Course settings'}
                 >
-                  <Globe className="h-4 w-4" />
+                  <SlidersHorizontal className="h-4 w-4" />
                 </Button>
               )}
               {!isHubSurface && canEditFramework && (
@@ -780,11 +814,22 @@ export default function CurriculumRoadmap({
                         className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
                         onClick={() => {
                           setIsSettingsMenuOpen(false);
-                          setIsSettingsDialogOpen(true);
+                          setShowTotalPeriods((v) => !v);
                         }}
                       >
-                        <Settings className="h-4 w-4" />
-                        <span>{language === 'zh' ? '课程设置' : 'Course settings'}</span>
+                        <BarChart2 className="h-4 w-4" />
+                        <span>{totalPeriodsToggleTitle}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
+                        onClick={() => {
+                          setIsSettingsMenuOpen(false);
+                          setIsConceptSettingsDialogOpen(true);
+                        }}
+                      >
+                        <Globe className="h-4 w-4" />
+                        <span>{language === 'zh' ? '概念设置' : 'Concept settings'}</span>
                       </button>
                       <button
                         type="button"
@@ -867,20 +912,11 @@ export default function CurriculumRoadmap({
               <Button
                 variant="outline"
                 size="icon"
-                onClick={() => setShowTotalPeriods((v) => !v)}
+                onClick={() => setIsSettingsDialogOpen(true)}
                 className="h-9 w-9 rounded-lg flex-shrink-0"
-                title={totalPeriodsToggleTitle}
+                title={language === 'zh' ? '课程设置' : 'Course settings'}
               >
-                <BarChart2 className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setIsConceptSettingsDialogOpen(true)}
-                className="h-9 w-9 rounded-lg flex-shrink-0"
-                title={language === 'zh' ? '概念设置' : 'Concept settings'}
-              >
-                <Globe className="h-4 w-4" />
+                <SlidersHorizontal className="h-4 w-4" />
               </Button>
               <div className="relative">
                 <Button
@@ -899,11 +935,22 @@ export default function CurriculumRoadmap({
                       className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
                       onClick={() => {
                         setIsSettingsMenuOpen(false);
-                        setIsSettingsDialogOpen(true);
+                        setShowTotalPeriods((v) => !v);
                       }}
                     >
-                      <Settings className="h-4 w-4" />
-                      <span>{language === 'zh' ? '课程设置' : 'Course settings'}</span>
+                      <BarChart2 className="h-4 w-4" />
+                      <span>{totalPeriodsToggleTitle}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
+                      onClick={() => {
+                        setIsSettingsMenuOpen(false);
+                        setIsConceptSettingsDialogOpen(true);
+                      }}
+                    >
+                      <Globe className="h-4 w-4" />
+                      <span>{language === 'zh' ? '概念设置' : 'Concept settings'}</span>
                     </button>
                     <button
                       type="button"
@@ -951,19 +998,34 @@ export default function CurriculumRoadmap({
             const tabFilteredCourses = courses.filter((c) =>
               courseVisibleInRoadmapTab(c, visibleGradeLevels, gradeConfig),
             );
-            const categoryEntries = buildSortedCategoryEntries(tabFilteredCourses);
+            const layoutSegments = buildRoadmapLayoutSegments(
+              tabFilteredCourses,
+              categoryOrder,
+              courseDomains,
+              language,
+            );
+            const columnCount = countRoadmapLayoutColumns(layoutSegments);
             const labelColWidth = GRADE_LABEL_COL_WIDTH_PX;
             const periodsColWidth = showTotalPeriods ? 52 : 0;
             const isDesktop = overviewRowWidthPx >= 640;
             const availableCourseWidth = Math.max(0, overviewRowWidthPx - labelColWidth - periodsColWidth);
             const adaptive = isDesktop
-              ? computeAdaptiveColumns(categoryEntries.length, availableCourseWidth)
+              ? computeAdaptiveColumns(columnCount, availableCourseWidth)
               : { columnWidthPx: COLUMN_WIDTH_DEFAULT_PX, columnGapPx: COLUMN_GAP_DEFAULT_PX };
-            const totalColumnsWidth =
-              categoryEntries.length * adaptive.columnWidthPx +
-              Math.max(0, categoryEntries.length - 1) * adaptive.columnGapPx;
+            const segmentWidth = (seg: RoadmapLayoutSegment) =>
+              seg.kind === 'domain'
+                ? seg.columns.length * adaptive.columnWidthPx +
+                  Math.max(0, seg.columns.length - 1) * ROADMAP_DOMAIN_INNER_GAP_PX
+                : adaptive.columnWidthPx;
+            const totalColumnsWidth = layoutSegments.reduce((sum, seg, i) => {
+              const gap = i > 0 ? adaptive.columnGapPx : 0;
+              return sum + gap + segmentWidth(seg);
+            }, 0);
             const denseGrades = visibleGradeLevels.length > 9;
             const headerHeight = denseGrades ? 24 : 28;
+            const hasDomainSegments = layoutSegments.some((s) => s.kind === 'domain');
+            const domainLabelRow = hasDomainSegments ? 14 : 0;
+            const totalHeaderHeight = headerHeight + domainLabelRow;
             return (
               <div
                 ref={overviewRowRef}
@@ -971,7 +1033,7 @@ export default function CurriculumRoadmap({
               >
                   {/* 左侧年级 */}
                   <div className="flex flex-col flex-shrink-0 pl-1 pr-1" style={{ width: labelColWidth }}>
-                    <div style={{ height: headerHeight, flexShrink: 0 }} />
+                    <div style={{ height: totalHeaderHeight, flexShrink: 0 }} />
                     <div className="flex-1 flex flex-col min-h-0">
                       {visibleGradeLevels.map((grade) => (
                         <div key={grade} className="flex-1 flex items-center justify-end min-h-0 pr-0.5">
@@ -990,55 +1052,59 @@ export default function CurriculumRoadmap({
                       className="flex flex-col flex-shrink-0 h-full"
                       style={{ width: `max(100%, ${totalColumnsWidth}px)` }}
                     >
-                  {/* Course Names at Top - Parallelogram labels（顺序在「课程设置」中调整，此处不可拖拽） */}
-                  <div
-                    className="flex flex-shrink-0"
-                    style={{ height: headerHeight, gap: adaptive.columnGapPx }}
-                  >
-                    {categoryEntries.map(({ canonicalKey, displayKey, courses: categoryCourses }) => {
-              const course = categoryCourses[0];
-              const tagChrome = getCourseTagChrome(course.color);
-              return (
-                <div
-                  key={canonicalKey}
-                  className="flex-shrink-0 relative select-none cursor-default"
-                  style={{ width: adaptive.columnWidthPx, height: headerHeight }}
-                >
-                  {/* Parallelogram：与单元视图课程条共用 getCourseTagChrome */}
-                  <div
-                    className="absolute inset-0 pointer-events-none"
-                    style={{
-                      transform: 'skewX(-20deg)',
-                      transformOrigin: 'bottom center',
-                      backgroundColor: tagChrome.backgroundColor,
-                      bottom: '0px',
-                      boxShadow: tagChrome.boxShadow,
-                    }}
-                  />
-                  <div
-                    className="relative h-full flex items-center justify-center pointer-events-none"
-                    style={{ transform: 'skewX(20deg)', padding: '0 2px' }}
-                  >
-                    <span
-                      className="text-xs font-semibold text-white whitespace-nowrap italic"
-                      style={{
-                        transform: 'skewX(-20deg)',
-                        maxWidth: '100%',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        textShadow: tagChrome.labelTextShadow,
-                      }}
-                      title={displayKey}
-                    >
-                      {displayKey}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+                  {/* Course Names at Top - 领域簇 + 学科列（顺序在设置中调整） */}
+                  <div className="flex flex-shrink-0 items-end" style={{ height: totalHeaderHeight }}>
+                    {layoutSegments.map((segment, segIdx) => {
+                      const marginLeft = segIdx > 0 ? adaptive.columnGapPx : 0;
+                      if (segment.kind === 'domain') {
+                        const domainLabel = getCourseDomainLabel(segment.label, language);
+                        return (
+                          <div
+                            key={segment.domainId}
+                            className="flex shrink-0 flex-col items-stretch"
+                            style={{ marginLeft, width: segmentWidth(segment) }}
+                          >
+                            {domainLabelRow > 0 && (
+                              <div
+                                className="text-[10px] font-medium text-slate-500 text-center truncate px-0.5 leading-tight"
+                                style={{ height: domainLabelRow }}
+                                title={domainLabel}
+                              >
+                                {domainLabel}
+                              </div>
+                            )}
+                            <div
+                              className="flex items-end rounded-t-md border border-b-0 border-slate-200/90 bg-slate-50/50 px-0.5 pt-0.5"
+                              style={{ gap: ROADMAP_DOMAIN_INNER_GAP_PX, height: headerHeight }}
+                            >
+                              {segment.columns.map((col) => (
+                                <RoadmapParallelogramHeader
+                                  key={col.course.id}
+                                  course={col.course}
+                                  displayKey={col.displayKey}
+                                  columnWidthPx={adaptive.columnWidthPx}
+                                  headerHeight={headerHeight}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }
+                      const course = segment.courses[0];
+                      return (
+                        <div key={segment.canonicalKey} className="shrink-0" style={{ marginLeft }}>
+                          <RoadmapParallelogramHeader
+                            course={course}
+                            displayKey={segment.displayKey}
+                            columnWidthPx={adaptive.columnWidthPx}
+                            headerHeight={headerHeight}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
 
-                  {/* Course Box - 实际课程框体：有边框与背景，标签位于其上方 */}
+                  {/* Course Box - 实际课程框体 */}
                   <div className="relative flex-1 min-h-0 border-2 border-gray-300 rounded-lg bg-gradient-to-b from-gray-50 to-gray-100">
                     <div className="absolute inset-0 pointer-events-none">
                       {visibleGradeLevels.slice(0, -1).map((grade, idx) => (
@@ -1049,21 +1115,53 @@ export default function CurriculumRoadmap({
                         />
                       ))}
                     </div>
-                    <div className="h-full flex overflow-y-hidden" style={{ gap: adaptive.columnGapPx }}>
-                      {categoryEntries.map(({ canonicalKey, displayKey, courses: categoryCourses }) => (
-                        <CategoryColumn
-                          key={canonicalKey}
-                          category={displayKey}
-                          courses={categoryCourses}
-                          onSemesterClick={handleSemesterClick}
-                          getSemesterLabel={getSemesterLabel}
-                          refreshKey={semesterCacheVersion}
-                          columnWidthPx={adaptive.columnWidthPx}
-                          showCellPeriods={showTotalPeriods}
-                          gradeLevels={visibleGradeLevels}
-                          gradeConfig={gradeConfig}
-                        />
-                      ))}
+                    <div className="h-full flex overflow-y-hidden items-stretch">
+                      {layoutSegments.map((segment, segIdx) => {
+                        const marginLeft = segIdx > 0 ? adaptive.columnGapPx : 0;
+                        if (segment.kind === 'domain') {
+                          return (
+                            <div
+                              key={segment.domainId}
+                              className="flex shrink-0 h-full rounded-b-md border border-t-0 border-slate-200/90 bg-white/30"
+                              style={{
+                                marginLeft,
+                                gap: ROADMAP_DOMAIN_INNER_GAP_PX,
+                                width: segmentWidth(segment),
+                              }}
+                            >
+                              {segment.columns.map((col) => (
+                                <CategoryColumn
+                                  key={col.course.id}
+                                  category={col.displayKey}
+                                  courses={[col.course]}
+                                  onSemesterClick={handleSemesterClick}
+                                  getSemesterLabel={getSemesterLabel}
+                                  refreshKey={semesterCacheVersion}
+                                  columnWidthPx={adaptive.columnWidthPx}
+                                  showCellPeriods={showTotalPeriods}
+                                  gradeLevels={visibleGradeLevels}
+                                  gradeConfig={gradeConfig}
+                                />
+                              ))}
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key={segment.canonicalKey} className="shrink-0 h-full" style={{ marginLeft }}>
+                            <CategoryColumn
+                              category={segment.displayKey}
+                              courses={segment.courses}
+                              onSemesterClick={handleSemesterClick}
+                              getSemesterLabel={getSemesterLabel}
+                              refreshKey={semesterCacheVersion}
+                              columnWidthPx={adaptive.columnWidthPx}
+                              showCellPeriods={showTotalPeriods}
+                              gradeLevels={visibleGradeLevels}
+                              gradeConfig={gradeConfig}
+                            />
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                     </div>
@@ -1074,7 +1172,7 @@ export default function CurriculumRoadmap({
                       className="flex flex-col flex-shrink-0 pointer-events-none items-center justify-start pl-0"
                       style={{ width: periodsColWidth }}
                     >
-                      <div style={{ height: headerHeight, flexShrink: 0 }} />
+                      <div style={{ height: totalHeaderHeight, flexShrink: 0 }} />
                       <div className="flex-1 flex flex-col min-h-0">
                         {visibleGradeLevels.map((grade) => {
                           const totalWeeklyPeriods = (() => {
@@ -1131,6 +1229,7 @@ export default function CurriculumRoadmap({
       <AddCourseDialog
         onAddCourse={handleAddCourse}
         gradeItems={gradeItems}
+        domainsConfig={courseDomains}
         open={isAddCourseDialogOpen}
         onOpenChange={setIsAddCourseDialogOpen}
       />
@@ -1155,18 +1254,25 @@ export default function CurriculumRoadmap({
         onDeleteCourse={handleDeleteCourse}
         onEditCourse={handleEditCourseClick}
         columnOrderItems={settingsColumnOrderItems}
+        domainsConfig={courseDomains}
         canReorderColumns={canReorderCategories}
         onColumnOrderSave={async (keys) => {
           await saveCategoryOrder(keys);
           prevPersistedCategoryOrderRef.current = [...keys];
           setCategoryOrder(keys);
         }}
+        onDomainsSave={async (config) => {
+          setCourseDomains(config);
+          await saveCourseDomains(config);
+        }}
+        onCreateCourseRequested={() => setIsAddCourseDialogOpen(true)}
       />
 
       {/* Edit Course Dialog */}
       <EditCourseDialog
         course={editingCourse}
         gradeItems={gradeItems}
+        domainsConfig={courseDomains}
         open={isEditCourseDialogOpen}
         onOpenChange={setIsEditCourseDialogOpen}
         onSave={handleSaveEditedCourse}
@@ -1186,6 +1292,55 @@ export default function CurriculumRoadmap({
         aria-hidden
         onChange={handleCourseDataFileChange}
       />
+    </div>
+  );
+}
+
+function RoadmapParallelogramHeader({
+  course,
+  displayKey,
+  columnWidthPx,
+  headerHeight,
+}: {
+  course: Course;
+  displayKey: string;
+  columnWidthPx: number;
+  headerHeight: number;
+}) {
+  const tagChrome = getCourseTagChrome(course.color);
+  return (
+    <div
+      className="flex-shrink-0 relative select-none cursor-default"
+      style={{ width: columnWidthPx, height: headerHeight }}
+    >
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          transform: 'skewX(-20deg)',
+          transformOrigin: 'bottom center',
+          backgroundColor: tagChrome.backgroundColor,
+          bottom: '0px',
+          boxShadow: tagChrome.boxShadow,
+        }}
+      />
+      <div
+        className="relative h-full flex items-center justify-center pointer-events-none"
+        style={{ transform: 'skewX(20deg)', padding: '0 2px' }}
+      >
+        <span
+          className="text-xs font-semibold text-white whitespace-nowrap italic"
+          style={{
+            transform: 'skewX(-20deg)',
+            maxWidth: '100%',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            textShadow: tagChrome.labelTextShadow,
+          }}
+          title={displayKey}
+        >
+          {displayKey}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1231,7 +1386,7 @@ function CategoryColumn({
   const defaultCourse = courses[0];
 
   return (
-    <div className="flex-shrink-0 relative" style={{ width: columnWidthPx }}>
+    <div className="flex-shrink-0 relative h-full" style={{ width: columnWidthPx }}>
       {/* Curriculum Roadmap */}
       <div className="h-full flex flex-col">
         {gradeLevels.map((grade) => {

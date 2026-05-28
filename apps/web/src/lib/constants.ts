@@ -46,6 +46,7 @@ export const STORAGE_KEYS = {
   COURSES: 'curriculum-roadmap-courses',
   SEMESTER_PREFIX: 'semester-data-',
   CATEGORY_ORDER: 'curriculum-roadmap-category-order',
+  COURSE_DOMAINS: 'curriculum-roadmap-course-domains',
   KEY_CONCEPTS: 'curriculum-roadmap-key-concepts',
   /** @deprecated 旧 key，读取时自动迁移 */
   GRADE_CONFIG_LEGACY: 'curriculum-roadmap-grade-config',

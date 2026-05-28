@@ -1,3 +1,5 @@
+import type { CourseDomainsConfig } from '@repo/shared';
+import { normalizeCourseDomainsConfig } from '@repo/shared';
 import { Course, GradeConfig, SemesterData } from '../types';
 import { STORAGE_KEYS } from './constants';
 import { api, USE_CLOUD_STORAGE } from './api';
@@ -351,6 +353,54 @@ export async function saveCategoryOrder(order: string[]): Promise<void> {
   }
 }
 
+export function loadCourseDomainsSync(): CourseDomainsConfig {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.COURSE_DOMAINS);
+    if (stored) {
+      return normalizeCourseDomainsConfig(JSON.parse(stored));
+    }
+  } catch (error) {
+    logError('Failed to load course domains', error);
+  }
+  return { domains: [], domainOrder: [] };
+}
+
+function saveCourseDomainsLocal(config: CourseDomainsConfig): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.COURSE_DOMAINS, JSON.stringify(config));
+  } catch (error) {
+    logError('Failed to save course domains to localStorage', error);
+  }
+}
+
+export async function hydrateCourseDomainsFromCloud(): Promise<CourseDomainsConfig> {
+  if (!USE_CLOUD_STORAGE || !getCurrentUserId()) {
+    return loadCourseDomainsSync();
+  }
+  try {
+    const config = await api.getCourseDomains();
+    const normalized = normalizeCourseDomainsConfig(config);
+    saveCourseDomainsLocal(normalized);
+    return normalized;
+  } catch (error) {
+    logError('Failed to hydrate course domains from cloud', error);
+    return loadCourseDomainsSync();
+  }
+}
+
+export async function saveCourseDomains(config: CourseDomainsConfig): Promise<void> {
+  const normalized = normalizeCourseDomainsConfig(config);
+  saveCourseDomainsLocal(normalized);
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    try {
+      await api.putCourseDomains(normalized);
+    } catch (error) {
+      logError('Failed to save course domains to cloud', error);
+      throw error;
+    }
+  }
+}
+
 function migrateLocalSchoolGradeStructureKey(): void {
   try {
     const newKey = STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE;
@@ -553,6 +603,7 @@ export function exportAllDataSync(): {
   semesterData: Record<string, SemesterData>;
   keyConcepts: string[];
   categoryOrder: string[];
+  courseDomains: CourseDomainsConfig;
   gradeConfig: GradeConfig;
   exportDate: string;
   version: string;
@@ -560,6 +611,7 @@ export function exportAllDataSync(): {
   const courses = loadCoursesSync();
   const keyConcepts = loadKeyConceptsSync();
   const categoryOrder = loadCategoryOrder();
+  const courseDomains = loadCourseDomainsSync();
   const gradeConfig = loadGradeConfigSync();
   
   // 收集所有学期数据
@@ -584,6 +636,7 @@ export function exportAllDataSync(): {
     semesterData,
     keyConcepts,
     categoryOrder,
+    courseDomains,
     gradeConfig,
     exportDate: new Date().toISOString(),
     version: '1.0'
@@ -633,6 +686,7 @@ export async function importAllData(data: {
   semesterData?: Record<string, SemesterData>;
   keyConcepts?: string[];
   categoryOrder?: string[];
+  courseDomains?: CourseDomainsConfig;
   gradeConfig?: GradeConfig;
 }): Promise<{ success: boolean; error?: string }> {
   try {
@@ -642,6 +696,7 @@ export async function importAllData(data: {
       semesterData?: Record<string, SemesterData>;
       keyConcepts?: string[];
       categoryOrder?: string[];
+      courseDomains?: CourseDomainsConfig;
       gradeConfig?: GradeConfig;
     } =
       data && typeof data === 'object' && 'data' in (data as any) && (data as any).data && typeof (data as any).data === 'object'
@@ -733,6 +788,11 @@ export async function importAllData(data: {
       if (!verification.success) {
         return verification;
       }
+    }
+
+    if (normalized.courseDomains) {
+      didImportAnything = true;
+      await saveCourseDomains(normalized.courseDomains);
     }
 
     if (normalized.gradeConfig) {

@@ -1,3 +1,5 @@
+import type { CourseDomainsConfig } from '@repo/shared';
+import { normalizeCourseDomainsConfig } from '@repo/shared';
 import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
   AcademicYear,
@@ -299,6 +301,33 @@ export const api = {
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: 'Failed to save category order' }));
       throw new Error(error.error || 'Failed to save category order');
+    }
+  },
+
+  async getCourseDomains(): Promise<CourseDomainsConfig> {
+    const response = await fetch(apiUrl('/api/settings/course-domains'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      if (response.status === 401) {
+        return { domains: [], domainOrder: [] };
+      }
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Failed to fetch course domains: ${response.status} - ${errorText}`);
+    }
+    const data = await response.json();
+    return normalizeCourseDomainsConfig(data);
+  },
+
+  async putCourseDomains(courseDomains: CourseDomainsConfig): Promise<void> {
+    const response = await fetch(apiUrl('/api/settings/course-domains'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ courseDomains }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to save course domains' }));
+      throw new Error(error.error || 'Failed to save course domains');
     }
   },
 

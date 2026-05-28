@@ -1,11 +1,26 @@
 import express, { Request } from 'express';
 import pool from '../config/database.js';
 import { loadSchoolGradeStructure, saveSchoolGradeStructure } from '../lib/schoolGradeStructure.js';
+import { normalizeCourseDomainsConfig } from '@repo/shared';
 
 const router = express.Router();
+let ensuredCourseDomainsColumn = false;
 
 function userId(req: Request): string {
   return ((req as Request & { userId?: string }).userId ?? req.headers['x-user-id']) as string;
+}
+
+/**
+ * 兼容存量数据库：运行时确保 user_settings.course_domains 列存在，
+ * 避免未执行最新 init.sql 时出现“前端已生效但保存报错”。
+ */
+async function ensureCourseDomainsColumn(): Promise<void> {
+  if (ensuredCourseDomainsColumn) return;
+  await pool.query(
+    `ALTER TABLE user_settings
+     ADD COLUMN IF NOT EXISTS course_domains JSONB DEFAULT '{"domains":[],"domainOrder":[]}'::jsonb`,
+  );
+  ensuredCourseDomainsColumn = true;
 }
 
 /** 学科列顺序的全校唯一存储行：优先首位 system-admin，否则首位 admin（与 PUT 写入目标一致） */
@@ -125,6 +140,61 @@ router.put('/category-order', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Save category order error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** 全校共享：课程领域（存于 holder 用户的 user_settings.course_domains） */
+router.get('/course-domains', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    await ensureCourseDomainsColumn();
+
+    const holderId = await getSchoolCategoryOrderHolderId(uid);
+    const result = await pool.query(
+      `SELECT course_domains FROM user_settings WHERE user_id = $1`,
+      [holderId],
+    );
+    if (result.rows.length === 0) {
+      return res.json(normalizeCourseDomainsConfig(null));
+    }
+    const raw = (result.rows[0] as Record<string, unknown>).course_domains;
+    if (raw == null) return res.json(normalizeCourseDomainsConfig(null));
+    const parsed = typeof raw === 'string' ? JSON.parse(raw as string) : raw;
+    res.json(normalizeCourseDomainsConfig(parsed));
+  } catch (error) {
+    console.error('Get course domains error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/course-domains', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    await ensureCourseDomainsColumn();
+
+    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
+    const role = roleResult.rows[0]?.role as string | undefined;
+    if (role !== 'system-admin' && role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
+    }
+
+    const normalized = normalizeCourseDomainsConfig((req.body as { courseDomains?: unknown })?.courseDomains ?? req.body);
+    const holderId = await getSchoolCategoryOrderHolderId(uid);
+
+    await pool.query(
+      `INSERT INTO user_settings (user_id, course_domains, updated_at)
+       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+       ON CONFLICT (user_id)
+       DO UPDATE SET course_domains = EXCLUDED.course_domains, updated_at = CURRENT_TIMESTAMP`,
+      [holderId, JSON.stringify(normalized)],
+    );
+
+    res.json({ success: true, courseDomains: normalized });
+  } catch (error) {
+    console.error('Save course domains error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

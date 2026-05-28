@@ -92,11 +92,13 @@ CREATE TABLE IF NOT EXISTS user_settings (
   user_id VARCHAR(50) NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
   key_concepts JSONB DEFAULT '[]'::jsonb,
   category_order JSONB DEFAULT '[]'::jsonb,
+  course_domains JSONB DEFAULT '{"domains":[],"domainOrder":[]}'::jsonb,
   grade_config JSONB DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS grade_config JSONB DEFAULT NULL;
+ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS course_domains JSONB DEFAULT '{"domains":[],"domainOrder":[]}'::jsonb;
 DO $$
 DECLARE
   holder_id VARCHAR(50);

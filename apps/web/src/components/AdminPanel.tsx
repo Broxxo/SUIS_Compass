@@ -4871,13 +4871,26 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
         {adminTab === 'staffing' && (
           <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-              <div>
-                <h2 className="text-base sm:text-lg font-semibold text-slate-800">
-                  {isZh ? '岗位与课时' : 'Staffing & weekly loads'}
-                </h2>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 shrink-0 ml-auto">
+            <div className="flex flex-row items-center justify-between gap-3">
+              <h2 className="text-base sm:text-lg font-semibold text-slate-800 shrink-0">
+                {isZh ? '岗位与课时' : 'Staffing & weekly loads'}
+              </h2>
+              <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
+                <select
+                  value={staffingYearId}
+                  onChange={(e) => setStaffingYearId(e.target.value)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[140px] sm:min-w-[180px]"
+                  disabled={staffingLoading || allYears.length === 0}
+                >
+                  {allYears.length === 0 ? (
+                    <option value="">{isZh ? '暂无学年' : 'No years'}</option>
+                  ) : (
+                    allYears.map((y) => (
+                      <option key={y.id} value={y.id}>{y.name}</option>
+                    ))
+                  )}
+                </select>
                 {USE_CLOUD_STORAGE && staffingYearId ? (
                   <>
                     <Button
@@ -4911,21 +4924,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     </Button>
                   </>
                 ) : null}
-                <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
-                <select
-                  value={staffingYearId}
-                  onChange={(e) => setStaffingYearId(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[180px]"
-                  disabled={staffingLoading || allYears.length === 0}
-                >
-                  {allYears.length === 0 ? (
-                    <option value="">{isZh ? '暂无学年' : 'No years'}</option>
-                  ) : (
-                    allYears.map((y) => (
-                      <option key={y.id} value={y.id}>{y.name}</option>
-                    ))
-                  )}
-                </select>
               </div>
             </div>
 

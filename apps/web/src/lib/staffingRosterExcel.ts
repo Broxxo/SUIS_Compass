@@ -1,5 +1,12 @@
 /**
  * 岗位安排表 Excel 导入/导出（按学段分 sheet；课程列按课程名称匹配，顺序无关）
+ *
+ * 任课单元格格式（导入/导出一致）：
+ * - 独立授课：`姓名` + 周课时数字，无空格，如 `Wendy1`、`王琪6`
+ * - 合作授课：`姓名1+姓名2` + 周课时数字（仅写在末段），如 `Morné+白雪豆1`、`陈予琪+Rebecca1`
+ * - 班主任列：仅教师姓名（不含课时后缀）
+ *
+ * 导入规则：系统中不存在的课程列整列跳过；未登记教师留空并给出提示，不阻断导入。
  */
 import * as XLSX from 'xlsx';
 import type { Course, GradeConfig } from '../types';
@@ -66,8 +73,8 @@ function formatWeeklyPeriodsForExcel(n: number): string {
   return v.toFixed(1);
 }
 
-/** 导入单元格：去掉导出后缀周课时（「桂春燕5」或旧版「桂春燕 5」） */
-function parseTeacherNameFromExportCell(raw: string): string {
+/** 从任课单元格片段解析教师姓名（去掉末尾周课时：「王琪6」「桂春燕 5」；无数字则原样） */
+export function parseTeacherNameFromRosterCellSegment(raw: string): string {
   const t = raw.trim();
   if (!t) return '';
   const withSpace = t.match(/^(.+?)\s+(\d+(?:\.\d+)?)$/);
@@ -75,6 +82,11 @@ function parseTeacherNameFromExportCell(raw: string): string {
   const compact = t.match(/^(.+?)(\d+(?:\.\d+)?)$/);
   if (compact && compact[1].trim()) return compact[1].trim();
   return t;
+}
+
+/** @deprecated alias */
+function parseTeacherNameFromExportCell(raw: string): string {
+  return parseTeacherNameFromRosterCellSegment(raw);
 }
 
 function teacherDisplayName(t: StaffingRosterTeacherRef, isZh: boolean): string {
@@ -103,11 +115,16 @@ export function resolveStaffingTeacherId(
   return null;
 }
 
-function parseTeacherSlotsFromCell(cellText: string): string[] {
+/** 任课单元格 → 各 slot 教师姓名（合作课按 + 拆分；兼容旧版 /、| 分隔） */
+export function parseTeacherSlotsFromRosterCell(cellText: string): string[] {
   const raw = cellText.trim();
-  if (!raw || raw === '—' || raw === '-') return [];
+  if (!raw || raw === '—' || raw === '-' || raw === '–') return [];
   const segments = raw.includes('+') ? raw.split('+') : raw.split(/[/／|、;；\n]/);
-  return segments.map((s) => parseTeacherNameFromExportCell(s)).filter(Boolean);
+  return segments.map((s) => parseTeacherNameFromRosterCellSegment(s)).filter(Boolean);
+}
+
+function parseTeacherSlotsFromCell(cellText: string): string[] {
+  return parseTeacherSlotsFromRosterCell(cellText);
 }
 
 function parseGradeLevelFromCell(text: string, gc: GradeConfig): number | null {
@@ -144,11 +161,22 @@ function findCourseByHeader(header: string, courses: readonly Course[], isZh: bo
   return undefined;
 }
 
-/** 独立授课：桂春燕5；合作授课片段：Zamran1、王超男1，单元格内用 + 连接 */
-function exportTeacherCell(name: string, periods: number): string {
+/** 独立授课单元格：姓名 + 周课时，如「王琪6」 */
+function exportSoloTeacherCell(name: string, periods: number): string {
   if (!name) return '';
   if (periods <= 0) return name;
   return `${name}${formatWeeklyPeriodsForExcel(periods)}`;
+}
+
+/** 合作授课单元格：姓名1+姓名2+课时（课时仅写在最后一段），如「陈予琪+Rebecca1」 */
+function exportCoTeachingTeacherCell(names: string[], periods: number): string {
+  const parts = names.map((n) => n.trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  if (parts.length === 1) return exportSoloTeacherCell(parts[0], periods);
+  const last = parts.length - 1;
+  return parts
+    .map((n, i) => (i === last ? exportSoloTeacherCell(n, periods) : n))
+    .join('+');
 }
 
 function isHeaderRow(row: unknown[]): boolean {
@@ -209,11 +237,13 @@ export function downloadStaffingRosterExport(input: {
           const tid = input.assignments.get(key)?.teacherId;
           if (!tid) continue;
           const t = input.teachers.find((x) => x.id === tid);
-          if (t) {
-            names.push(exportTeacherCell(teacherDisplayName(t, input.isZh), periods));
-          }
+          if (t) names.push(teacherDisplayName(t, input.isZh));
         }
-        row.push(names.join('+'));
+        row.push(
+          col.coTeaching
+            ? exportCoTeachingTeacherCell(names, periods)
+            : exportSoloTeacherCell(names[0] ?? '', periods),
+        );
       }
       body.push(row);
     }
@@ -384,24 +414,24 @@ export function parseStaffingRosterWorkbook(
 
       if (colHomeroom >= 0) {
         const cell = String(row[colHomeroom] ?? '').trim();
-        const tid = resolveStaffingTeacherId(cell, input.teachers, input.isZh);
-        if (cell && !tid) {
-          errors.push(
+        const homeroomName = parseTeacherNameFromRosterCellSegment(cell);
+        const tid = homeroomName ? resolveStaffingTeacherId(homeroomName, input.teachers, input.isZh) : null;
+        if (homeroomName && !tid) {
+          warnings.push(
             input.isZh
-              ? `工作表「${sheetName}」第 ${ri + 1} 行班主任：未找到教师「${cell}」`
-              : `Sheet "${sheetName}" row ${ri + 1}: homeroom teacher not found "${cell}"`,
+              ? `工作表「${sheetName}」第 ${ri + 1} 行班主任：未登记教师「${homeroomName}」，已留空`
+              : `Sheet "${sheetName}" row ${ri + 1}: homeroom teacher "${homeroomName}" not registered, left blank`,
           );
-        } else {
-          operations.push({
-            academicYearId: input.academicYearId,
-            classId: cls.id,
-            subjectKey: STAFFING_HOMEROOM_SUBJECT_KEY,
-            subjectName: staffingHomeroomSubjectName(input.isZh),
-            teacherId: tid,
-            teacherSlot: 0,
-            coTeaching: false,
-          });
         }
+        operations.push({
+          academicYearId: input.academicYearId,
+          classId: cls.id,
+          subjectKey: STAFFING_HOMEROOM_SUBJECT_KEY,
+          subjectName: staffingHomeroomSubjectName(input.isZh),
+          teacherId: tid,
+          teacherSlot: 0,
+          coTeaching: false,
+        });
       }
 
       for (const meta of courseColMeta) {
@@ -409,17 +439,17 @@ export function parseStaffingRosterWorkbook(
         const cell = String(row[meta.colIdx] ?? '').trim();
         const names = parseTeacherSlotsFromCell(cell);
         const slots: (0 | 1)[] = meta.coTeaching ? [0, 1] : [0];
+        const colLabel = staffingCourseExcelHeader(meta.course, input.isZh);
         for (let si = 0; si < slots.length; si += 1) {
           const slot = slots[si];
           const name = names[si] ?? '';
           const tid = name ? resolveStaffingTeacherId(name, input.teachers, input.isZh) : null;
           if (name && !tid) {
-            errors.push(
+            warnings.push(
               input.isZh
-                ? `工作表「${sheetName}」第 ${ri + 1} 行「${meta.course.name}」：未找到教师「${name}」`
-                : `Sheet "${sheetName}" row ${ri + 1} "${meta.course.name}": teacher not found "${name}"`,
+                ? `工作表「${sheetName}」第 ${ri + 1} 行「${colLabel}」：未登记教师「${name}」，已留空`
+                : `Sheet "${sheetName}" row ${ri + 1} "${colLabel}": teacher "${name}" not registered, left blank`,
             );
-            continue;
           }
           const subjectName =
             getSubjectCategoryText(meta.course.subjectCategory, input.isZh ? 'zh' : 'en') || meta.course.name;

@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
 import { Input } from './ui/input';
+import type { CourseDomainsConfig } from '@repo/shared';
 import { CourseColor, GradeConfigItem, SubjectCategory } from '../types';
 import GradePeriodsFields from './GradePeriodsFields';
+import CourseDomainSelect from './CourseDomainSelect';
 import { useLanguage } from '../contexts/LanguageContext';
 import { COURSE_COLORS } from '../lib/constants';
 import { getColorValue } from '../lib/courseUtils';
@@ -17,8 +19,10 @@ interface AddCourseDialogProps {
     textbookVersion: string,
     color: CourseColor,
     coTeaching: boolean,
+    domainId: string | null,
   ) => void;
   gradeItems: GradeConfigItem[];
+  domainsConfig?: CourseDomainsConfig;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
@@ -26,6 +30,7 @@ interface AddCourseDialogProps {
 export default function AddCourseDialog({
   onAddCourse,
   gradeItems,
+  domainsConfig = { domains: [], domainOrder: [] },
   open: controlledOpen,
   onOpenChange,
 }: AddCourseDialogProps) {
@@ -38,6 +43,7 @@ export default function AddCourseDialog({
   const [textbookVersion, setTextbookVersion] = useState('人教版');
   const [selectedColor, setSelectedColor] = useState<CourseColor>('light-blue');
   const [coTeaching, setCoTeaching] = useState(false);
+  const [domainId, setDomainId] = useState<string | null>(null);
 
   const open = controlledOpen !== undefined ? controlledOpen : internalOpen;
   const setOpen = (value: boolean) => {
@@ -72,6 +78,7 @@ export default function AddCourseDialog({
       textbookVersion.trim() || '人教版',
       selectedColor,
       coTeaching,
+      domainId,
     );
     setSubjectCategoryZh('');
     setSubjectCategoryEn('');
@@ -80,6 +87,7 @@ export default function AddCourseDialog({
     setTextbookVersion('人教版');
     setSelectedColor('light-blue');
     setCoTeaching(false);
+    setDomainId(null);
     setOpen(false);
   };
 
@@ -121,9 +129,23 @@ export default function AddCourseDialog({
                 </div>
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                {language === 'zh' ? '用于分组显示，相同类别的课程会显示在同一列' : 'Used for grouping, courses with the same category will be displayed in the same column'}
+                {language === 'zh'
+                  ? '未归入「课程领域」时，相同学科分类的课程显示在同一列；归入领域后，在河流中按领域内顺序各占一列并紧密排列。'
+                  : 'Without a domain, same subject categories share one column. With a domain, each course gets its own column inside the domain cluster.'}
               </p>
             </div>
+            {domainsConfig.domains.length > 0 && (
+              <div>
+                <label className="text-sm font-medium text-gray-700 mb-2 block">
+                  {language === 'zh' ? '课程领域' : 'Course domain'}
+                </label>
+                <CourseDomainSelect
+                  domainsConfig={domainsConfig}
+                  value={domainId}
+                  onChange={setDomainId}
+                />
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium text-gray-700 mb-2 block">
                 {t('course.gradeRange')}

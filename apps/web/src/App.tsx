@@ -10,6 +10,7 @@ import AdminPanel from './components/AdminPanel'
 import ClassManagement from './components/ClassManagement'
 import ClassAssistant from './components/ClassAssistant'
 import StudentPortrait from './components/StudentPortrait'
+import TeacherPortrait from './components/TeacherPortrait'
 
 type HubView =
   | 'suis-ai'
@@ -156,7 +157,7 @@ function AppContent() {
   }
 
   if (view === 'teacher-portrait') {
-    return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="my-students" />;
+    return <TeacherPortrait onBackToHub={() => setView('hub')} />;
   }
 
   if (view === 'academic-reports') {

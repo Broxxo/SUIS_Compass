@@ -196,9 +196,38 @@ export function reorderCoursesInDomain(
 }
 
 export type RoadmapCourseColumn = {
-  course: Course;
+  /** 列头显示名（同学科分类名，不含教材版本） */
   displayKey: string;
+  /** 同名列下的多门课（如小学苏教数学 + 中学沪科数学） */
+  courses: Course[];
 };
+
+/** 课程河流/岗位等列头：学科分类名优先，不含教材版本 */
+export function getRoadmapColumnDisplayKey(course: Course, language: 'zh' | 'en'): string {
+  return (getSubjectCategoryTextForLayout(course.subjectCategory, language) || course.name || '').trim();
+}
+
+/** 按列显示名合并课程，保留首次出现顺序（与课程设置领域内顺序一致） */
+export function groupCoursesByRoadmapDisplayKey(
+  courses: readonly Course[],
+  language: 'zh' | 'en',
+): RoadmapCourseColumn[] {
+  const columns: RoadmapCourseColumn[] = [];
+  const indexByKey = new Map<string, number>();
+  for (const course of courses) {
+    const displayKey = getRoadmapColumnDisplayKey(course, language);
+    if (!displayKey) continue;
+    const idx = indexByKey.get(displayKey);
+    if (idx !== undefined) {
+      const col = columns[idx];
+      if (!col.courses.some((c) => c.id === course.id)) col.courses.push(course);
+    } else {
+      indexByKey.set(displayKey, columns.length);
+      columns.push({ displayKey, courses: [course] });
+    }
+  }
+  return columns;
+}
 
 export type RoadmapLayoutSegment =
   | {
@@ -259,17 +288,14 @@ export function buildRoadmapLayoutSegments(
   for (const domainId of config.domainOrder) {
     const domain = config.domains.find((d) => d.id === domainId);
     if (!domain) continue;
-    const columns: RoadmapCourseColumn[] = [];
+    const domainCourses: Course[] = [];
     for (const cid of domain.courseIds) {
       const course = courseById.get(cid);
       if (!course) continue;
       inDomain.add(cid);
-      columns.push({
-        course,
-        displayKey:
-          getSubjectCategoryTextForLayout(course.subjectCategory, language) || course.name,
-      });
+      domainCourses.push(course);
     }
+    const columns = groupCoursesByRoadmapDisplayKey(domainCourses, language);
     if (columns.length > 0) {
       segments.push({
         kind: 'domain',
@@ -310,4 +336,39 @@ export function buildRoadmapLayoutSegments(
   }
 
   return segments;
+}
+
+/**
+ * 与课程设置 / 课程河流整体视图一致的单维课程列表顺序：
+ * 先按 domainOrder + 领域内 courseIds，再按 categoryOrder 展开未归属领域的学科列。
+ */
+export function sortCoursesLikeCourseSettings(
+  courses: readonly Course[],
+  categoryOrder: readonly string[],
+  domainsConfig: CourseDomainsConfig,
+): Course[] {
+  const segments = buildRoadmapLayoutSegments(courses, categoryOrder, domainsConfig, 'zh');
+  const out: Course[] = [];
+  const seen = new Set<string>();
+  for (const seg of segments) {
+    if (seg.kind === 'domain') {
+      for (const col of seg.columns) {
+        for (const course of col.courses) {
+          if (seen.has(course.id)) continue;
+          seen.add(course.id);
+          out.push(course);
+        }
+      }
+    } else {
+      for (const c of seg.courses) {
+        if (seen.has(c.id)) continue;
+        seen.add(c.id);
+        out.push(c);
+      }
+    }
+  }
+  for (const c of courses) {
+    if (!seen.has(c.id)) out.push(c);
+  }
+  return out;
 }

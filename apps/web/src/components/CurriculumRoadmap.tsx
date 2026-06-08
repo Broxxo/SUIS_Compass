@@ -1079,8 +1079,8 @@ export default function CurriculumRoadmap({
                             >
                               {segment.columns.map((col) => (
                                 <RoadmapParallelogramHeader
-                                  key={col.course.id}
-                                  course={col.course}
+                                  key={col.displayKey}
+                                  course={col.courses[0]}
                                   displayKey={col.displayKey}
                                   columnWidthPx={adaptive.columnWidthPx}
                                   headerHeight={headerHeight}
@@ -1131,9 +1131,9 @@ export default function CurriculumRoadmap({
                             >
                               {segment.columns.map((col) => (
                                 <CategoryColumn
-                                  key={col.course.id}
+                                  key={col.displayKey}
                                   category={col.displayKey}
-                                  courses={[col.course]}
+                                  courses={col.courses}
                                   onSemesterClick={handleSemesterClick}
                                   getSemesterLabel={getSemesterLabel}
                                   refreshKey={semesterCacheVersion}

@@ -1,6 +1,11 @@
 import express, { Request } from 'express';
 import pool from '../config/database.js';
 import { staffingSubjectKeyFromCourse } from '@repo/shared';
+import {
+  mapDbCourseRowToLibrarySync,
+  removeCourseFromAllYearPresetLibraries,
+  syncCourseToAllYearPresetLibraries,
+} from '../lib/courseReportLibrarySync.js';
 
 const router = express.Router();
 
@@ -147,6 +152,7 @@ router.post('/', async (req, res) => {
     );
 
     const course = result.rows[0] as Record<string, unknown>;
+    await syncCourseToAllYearPresetLibraries(mapDbCourseRowToLibrarySync(course), uid);
     res.status(201).json(mapCourseRow(course));
   } catch (error) {
     console.error('Create course error:', error);
@@ -207,6 +213,7 @@ router.put('/:id', async (req, res) => {
     }
 
     const course = result.rows[0] as Record<string, unknown>;
+    await syncCourseToAllYearPresetLibraries(mapDbCourseRowToLibrarySync(course), uid);
     res.json(mapCourseRow(course));
   } catch (error) {
     console.error('Update course error:', error);
@@ -228,6 +235,7 @@ router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     const result = await pool.query('DELETE FROM courses WHERE id = $1 RETURNING id', [id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Course not found' });
+    await removeCourseFromAllYearPresetLibraries(id);
     res.json({ success: true });
   } catch (error) {
     console.error('Delete course error:', error);

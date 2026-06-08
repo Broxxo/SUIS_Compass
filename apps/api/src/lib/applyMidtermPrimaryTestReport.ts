@@ -200,16 +200,6 @@ function buildPresetSubjectRow(
   };
 }
 
-function buildExamDimensionScores(dims: MidtermPrimaryDimensionDef[]) {
-  return dims
-    .filter((d) => d.examMaxScore != null && Number.isFinite(d.examMaxScore))
-    .map((d) => ({
-      dimensionLabelZh: d.dimensionLabelZh,
-      dimensionLabelEn: d.dimensionLabelEn,
-      score: d.examMaxScore as number,
-    }));
-}
-
 function examScopeKey(term: Term, schoolSegmentId: string): string {
   return `${term}::${schoolSegmentId.trim()}`;
 }
@@ -288,8 +278,9 @@ async function mergeYearPreset(
       subjectNameEn: s.subjectNameEn,
       gradeConfigs: gradeIds.map((gradeId) => ({
         gradeId,
+        fullScore: 100,
         percentBands,
-        dimensionScores: buildExamDimensionScores(s.dimensions),
+        dimensionScores: [],
       })),
     }));
 

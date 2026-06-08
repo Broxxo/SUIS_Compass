@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react';
 import OrgStructurePanel from './OrgStructurePanel';
 import GradeStructureEditor from '../GradeStructureEditor';
+import ClassManagement from '../ClassManagement';
 import { Button } from '../ui/button';
 import { Plus } from 'lucide-react';
 import type { AcademicYear } from '../../types/classManagement';
 
-export type FoundationSubTab = 'years' | 'structure' | 'organization';
+export type FoundationSubTab = 'years' | 'structure' | 'classes' | 'organization';
 
 type FoundationSettingsPanelProps = {
   isZh: boolean;
@@ -76,14 +77,15 @@ export default function FoundationSettingsPanel({
 }: FoundationSettingsPanelProps) {
   return (
     <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
-      <h2 className="text-base font-semibold text-slate-800">{isZh ? '基础设置' : 'Foundation settings'}</h2>
-
       <div className="flex flex-wrap gap-2">
         <SubTabButton active={subTab === 'years'} onClick={() => onSubTabChange('years')}>
           {isZh ? '学年管理' : 'Academic years'}
         </SubTabButton>
         <SubTabButton active={subTab === 'structure'} onClick={() => onSubTabChange('structure')}>
           {isZh ? '学段与年级' : 'Stages & grades'}
+        </SubTabButton>
+        <SubTabButton active={subTab === 'classes'} onClick={() => onSubTabChange('classes')}>
+          {isZh ? '班级管理' : 'Classes'}
         </SubTabButton>
         <SubTabButton active={subTab === 'organization'} onClick={() => onSubTabChange('organization')}>
           {isZh ? '组织架构' : 'Organization'}
@@ -176,6 +178,12 @@ export default function FoundationSettingsPanel({
             canEdit={canEditStructure}
             onSaved={onStructureSaved}
           />
+        </div>
+      )}
+
+      {subTab === 'classes' && (
+        <div className="border-t border-slate-100 pt-4 -mx-4 sm:-mx-6 px-0 sm:px-0">
+          <ClassManagement onBackToHub={() => {}} embedded hideYearGear={false} />
         </div>
       )}
 

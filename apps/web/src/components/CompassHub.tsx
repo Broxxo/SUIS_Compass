@@ -65,13 +65,22 @@ type HubTile = {
   renderLabel?: (isZh: boolean) => React.ReactNode;
 };
 
-const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v2';
+const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v3';
+
+function migrateSavedHubIds(savedIds: string[]): string[] {
+  const out: string[] = [];
+  for (const id of savedIds) {
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
+}
 
 function reorderBySavedIds<T extends { id: string }>(items: T[], savedIds: string[] | null) {
   if (!savedIds || savedIds.length === 0) return items;
+  const migrated = migrateSavedHubIds(savedIds);
   const map = new Map(items.map((x) => [x.id, x] as const));
   const result: T[] = [];
-  for (const id of savedIds) {
+  for (const id of migrated) {
     const hit = map.get(id);
     if (hit) {
       result.push(hit);
@@ -347,21 +356,21 @@ export default function CompassHub({
       { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
 
       {
-        id: 'class-assistant',
+        id: 'teacher-portrait',
         kind: 'app',
-        view: 'class-assistant',
+        view: 'teacher-portrait',
         spanX: 2,
         spanY: 2,
         fontSize: 'clamp(1.25rem, 3vw, 1.85rem)',
         className: 'p-2 sm:p-4',
         style: {
-          background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
-          boxShadow: '0 8px 24px -4px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+          background: 'linear-gradient(145deg, #d9776c 0%, #c4685a 50%, #a85548 100%)',
+          boxShadow: '0 8px 24px -4px rgba(168, 85, 72, 0.38), inset 0 1px 0 rgba(255,255,255,0.2)',
         },
         renderLabel: (zh) => (
           <span className="flex flex-col items-center leading-tight">
-            <span>{zh ? '课堂' : 'Class'}</span>
-            <span>{zh ? '助手' : 'Assistant'}</span>
+            <span>{zh ? '教师' : 'Teacher'}</span>
+            <span>{zh ? '画像' : 'Portrait'}</span>
           </span>
         ),
       },
@@ -438,21 +447,21 @@ export default function CompassHub({
         ),
       },
       {
-        id: 'teacher-portrait',
+        id: 'class-assistant',
         kind: 'app',
-        view: 'teacher-portrait',
+        view: 'class-assistant',
         spanX: 1,
         spanY: 1,
         fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
-        className: 'aspect-square p-1.5 sm:p-2',
+        className: 'p-1.5 sm:p-2',
         style: {
-          background: 'linear-gradient(145deg, #ec4899 0%, #db2777 55%, #be185d 100%)',
-          boxShadow: '0 6px 16px -2px rgba(190, 24, 93, 0.35), inset 0 1px 0 rgba(255,255,255,0.22)',
+          background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
+          boxShadow: '0 6px 16px -2px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
         },
         renderLabel: (zh) => (
           <span className="flex flex-col items-center leading-tight">
-            <span>{zh ? '教师' : 'Teacher'}</span>
-            <span>{zh ? '画像' : 'Portrait'}</span>
+            <span>{zh ? '课堂' : 'Class'}</span>
+            <span>{zh ? '助手' : 'Assistant'}</span>
           </span>
         ),
       },
@@ -462,8 +471,10 @@ export default function CompassHub({
 
   const [tiles, setTiles] = useState<HubTile[]>(() => {
     try {
-      const raw = typeof window !== 'undefined' ? window.localStorage.getItem(HUB_LAYOUT_STORAGE_KEY) : null;
-      const saved = raw ? (JSON.parse(raw) as string[]) : null;
+      if (typeof window === 'undefined') return defaultTiles;
+      let raw = window.localStorage.getItem(HUB_LAYOUT_STORAGE_KEY);
+      if (!raw) raw = window.localStorage.getItem('suis-compass-hub-layout-v2');
+      const saved = raw ? migrateSavedHubIds(JSON.parse(raw) as string[]) : null;
       return reorderBySavedIds(defaultTiles, saved);
     } catch {
       return defaultTiles;

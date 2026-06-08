@@ -29,6 +29,11 @@ export function ensureAcademicReportPdfCloneStyles(clonedDoc: Document): void {
       line-height: 1.22 !important;
       transform: translateY(-0.16em) !important;
     }
+    [data-academic-report-pdf-scope] [data-academic-quality-table] td > div,
+    [data-academic-report-pdf-scope] [data-academic-quality-table] th > div {
+      justify-content: center !important;
+      text-align: center !important;
+    }
     [data-academic-report-pdf-scope] th > div {
       min-height: 1.9rem !important;
       font-weight: 600 !important;

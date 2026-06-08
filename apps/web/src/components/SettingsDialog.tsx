@@ -290,8 +290,13 @@ export default function SettingsDialog({
   };
 
   const coursesForFlatList = useMemo(
-    () => sortCoursesLikeCurriculumRoadmap(courses, columnOrderItems.map((i) => i.canonicalKey)),
-    [courses, columnOrderItems],
+    () =>
+      sortCoursesLikeCurriculumRoadmap(
+        courses,
+        columnOrderItems.map((i) => i.canonicalKey),
+        domainsConfig,
+      ),
+    [courses, columnOrderItems, domainsConfig],
   );
 
   const colorConfig = (c: Course) => COURSE_COLORS.find((x) => x.value === c.color) ?? COURSE_COLORS[0];

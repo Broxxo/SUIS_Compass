@@ -1,15 +1,14 @@
 /**
- * 学业报告可复用压测（多轮覆盖写入 + 学科设置校验）
+ * 多学段学业报告压测（默认仅学业报告，不含教学诊断）
  *
- * 每轮前读取模板与学年「参加评价 / 考试学科」设置，按年级打印评价学科矩阵。
- * 写入规则：
- *   - 考试学科：测评成绩 + 目标等第 + 学科成绩分析 + 教学反思
- *   - 非考试学科：目标等第 + 教学反思（无分数）
- *   - 班主任评语 + 全班任课教师教学反思
+ * 默认：2025-26 下学期 Semester 2
+ *   - 小学期末学业报告（G1–G6）
+ *   - 初中期末学业报告（G7–G9）
  *
  * 用法：
- *   npm run load:report -- --rounds=5
- *   npm run load:report -- --rounds=3 --concurrency=40 --grade-min=5 --grade-max=6
+ *   npm run load:report
+ *   npm run load:report -- --rounds=3 --term=Semester\ 2 --reports-only
+ *   npm run load:report -- --with-portraits   # 含期中/期末教学诊断 KISS
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,30 +30,44 @@ async function main() {
     const outFile = path.join(outDir, `report-load-${Date.now()}.json`);
     fs.writeFileSync(outFile, JSON.stringify(report, null, 2), 'utf8');
 
-    console.log('########## FINAL REPORT ##########');
-    console.log(JSON.stringify(report, null, 2));
-    console.log(`\nSaved: ${outFile}`);
-
     const lastRound = report.rounds[report.rounds.length - 1];
     const lastVerify = report.verifications[report.verifications.length - 1];
-    console.log('\n--- Summary ---');
-    console.log(`Total wall: ${(report.totalWallMs / 1000).toFixed(1)}s | Rounds: ${report.rounds.length}`);
-    if (lastRound) {
+    console.log('\n########## SUMMARY ##########');
+    console.log(`Term: ${config.term} | Reports-only: ${config.reportsOnly}`);
+    console.log(
+      `Reports: ${config.reportSpecs.map((s) => `${s.templateTitle}(G${s.gradeMin}–${s.gradeMax})`).join(' + ')}`,
+    );
+    if (!config.reportsOnly) {
+      console.log(`Portraits: ${config.portraitTemplateTitles.join(' + ') || '—'}`);
+    }
+    console.log(
+      `Total wall: ${(report.totalWallMs / 1000).toFixed(1)}s / ${(config.maxWallMs / 1000).toFixed(0)}s cap | Rounds: ${report.rounds.length}`,
+    );
+    for (const r of report.rounds) {
       console.log(
-        `Last round subject: ${lastRound.subjectOk}/${lastRound.subjectTotal} in ${(lastRound.subjectElapsedMs / 1000).toFixed(1)}s (${lastRound.subjectThroughput.toFixed(1)} req/s)`,
+        `  R${r.round}: ${(r.totalElapsedMs / 1000).toFixed(1)}s | subject ${r.subjectOk}/${r.subjectTotal} | insights ${r.insightOk}/${r.insightTotal} | homeroom ${r.homeroomOk}/${r.homeroomTotal}${config.reportsOnly ? '' : ` | kiss ${r.portraitOk}/${r.portraitTotal}`}`,
       );
     }
-    if (lastVerify) {
+    const lastSegmentVerifies = report.verifications.slice(-report.suite.plans.length);
+    for (let i = 0; i < lastSegmentVerifies.length; i += 1) {
+      const v = lastSegmentVerifies[i]!;
+      const title = report.suite.plans[i]?.template.title ?? '—';
       console.log(
-        `Last verify: exam scores ${lastVerify.examWithScore}/${lastVerify.examWrites}, reflections ${lastVerify.insightsWithReflection}`,
+        `  Verify ${title}: scores ${v.examScoreMin}~${v.examScoreMax} (${v.examScoreBuckets} buckets) | insights ${v.insightsWithFullStudentRows}`,
       );
     }
-    const prog = report.adminProgress;
-    if (prog && !('error' in prog)) {
-      console.log(
-        `Admin completion: ${prog.completedStudents}/${prog.totalStudents} (${prog.completionRate}%)`,
-      );
+    if (!config.reportsOnly && lastVerify) {
+      console.log(`  Verify KISS: ${lastVerify.portraitWithMarker}/${lastRound?.portraitTotal ?? 0} with round marker`);
     }
+    if (report.tierConsistency?.length) {
+      console.log('\n--- 三层一致性复查汇总 ---');
+      for (const t of report.tierConsistency) {
+        const errs = t.issues.filter((i) => i.level === 'error').length;
+        const warns = t.issues.filter((i) => i.level === 'warn').length;
+        console.log(`  ${t.templateTitle}: ${errs} 错误 / ${warns} 警告 | release=${t.released ? 'Y' : 'N'}`);
+      }
+    }
+    console.log(`Saved: ${outFile}`);
   } finally {
     await pool.end();
   }

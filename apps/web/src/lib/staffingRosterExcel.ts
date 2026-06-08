@@ -12,7 +12,11 @@ import * as XLSX from 'xlsx';
 import type { Course, GradeConfig } from '../types';
 import type { ClassItem } from '../types/classManagement';
 import { STAFFING_HOMEROOM_SUBJECT_KEY, staffingHomeroomSubjectName, staffingSubjectKeyFromCourse } from '@repo/shared';
-import { normalizeGradeConfig, getGradeLabelByLevel } from './gradeConfig';
+import {
+  getCurriculumGradeLevelForClass,
+  getSchoolGradeLabelForClass,
+  normalizeGradeConfig,
+} from './gradeConfig';
 import { getCourseReportSubjectLabels, getSubjectCategoryText } from './utils';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from './courseGradeUtils';
 
@@ -99,7 +103,7 @@ function teacherDisplayName(t: StaffingRosterTeacherRef, isZh: boolean): string 
 export function resolveStaffingTeacherId(
   cellText: string,
   teachers: readonly StaffingRosterTeacherRef[],
-  isZh: boolean,
+  _isZh: boolean,
 ): string | null {
   const raw = parseTeacherNameFromExportCell(cellText);
   if (!raw || raw === '—' || raw === '-' || raw === '–') return null;
@@ -219,7 +223,8 @@ export function downloadStaffingRosterExport(input: {
     const classesSorted = [...sheet.classes].sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }));
 
     for (const cls of classesSorted) {
-      const row: (string | number)[] = [getGradeLabelByLevel(gc, cls.grade), cls.name];
+      const curriculumLevel = getCurriculumGradeLevelForClass(gc, cls);
+      const row: (string | number)[] = [getSchoolGradeLabelForClass(cls), cls.name];
       if (homeroomCol) {
         const hk = `${cls.id}::${homeroomCol.key}::0`;
         const tid = input.assignments.get(hk)?.teacherId;
@@ -227,8 +232,8 @@ export function downloadStaffingRosterExport(input: {
         row.push(t ? teacherDisplayName(t, input.isZh) : '');
       }
       for (const col of courseCols) {
-        const periods = courseAppliesToGrade(col.course, cls.grade, gc)
-          ? getWeeklyPeriodsForGrade(col.course, cls.grade, gc)
+        const periods = courseAppliesToGrade(col.course, curriculumLevel, gc)
+          ? getWeeklyPeriodsForGrade(col.course, curriculumLevel, gc)
           : 0;
         const slots: (0 | 1)[] = col.coTeaching ? [0, 1] : [0];
         const names: string[] = [];
@@ -406,7 +411,7 @@ export function parseStaffingRosterWorkbook(
       if (!cls) {
         errors.push(
           input.isZh
-            ? `工作表「${sheetName}」第 ${ri + 1} 行：未找到班级「${getGradeLabelByLevel(gc, gradeLevel)} ${classCell}」`
+            ? `工作表「${sheetName}」第 ${ri + 1} 行：未找到班级「G${gradeLevel} ${classCell}」`
             : `Sheet "${sheetName}" row ${ri + 1}: class not found (${gradeLevel} ${classCell})`,
         );
         continue;
@@ -435,7 +440,8 @@ export function parseStaffingRosterWorkbook(
       }
 
       for (const meta of courseColMeta) {
-        if (!courseAppliesToGrade(meta.course, cls.grade, gc)) continue;
+        const curriculumLevel = getCurriculumGradeLevelForClass(gc, cls);
+        if (!courseAppliesToGrade(meta.course, curriculumLevel, gc)) continue;
         const cell = String(row[meta.colIdx] ?? '').trim();
         const names = parseTeacherSlotsFromCell(cell);
         const slots: (0 | 1)[] = meta.coTeaching ? [0, 1] : [0];

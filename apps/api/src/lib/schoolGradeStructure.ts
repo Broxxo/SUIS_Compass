@@ -179,3 +179,35 @@ export async function loadSegmentGradeIds(segmentId: string): Promise<string[]> 
   if (!hit || !Array.isArray(hit.gradeIds)) return [];
   return hit.gradeIds.map((g) => String(g ?? '').trim()).filter(Boolean);
 }
+
+/** 与前端 gradeConfig.getGradeCatalogIdForClass 一致：班名/学部可映射到 G9I、G9C 等 catalog */
+export function getGradeCatalogIdForClass(
+  config: GradeConfig,
+  classGrade: number,
+  opts?: { className?: string; division?: string | null },
+): string {
+  const norm = normalizeGradeConfig(config);
+  const name = String(opts?.className ?? '').trim().toUpperCase();
+  const div = String(opts?.division ?? '').trim().toUpperCase();
+  if (name === 'S9A' || div === 'G9I') {
+    const hit = norm.items.find((i) => i.label === 'G9I');
+    if (hit) return hit.id;
+  }
+  if (name === 'S9B' || div === 'G9C') {
+    const hit = norm.items.find((i) => i.label === 'G9C');
+    if (hit) return hit.id;
+  }
+  const hit = norm.items.find((i) => i.level === classGrade);
+  return hit?.id ?? `g${classGrade}`;
+}
+
+/** 班级是否属于报告模板学段（按年级 catalog + 班名，与岗位安排学段划分一致） */
+export function isClassInSegmentGrades(
+  config: GradeConfig,
+  cls: { grade: number; name: string },
+  segmentGradeIds: string[],
+): boolean {
+  if (!segmentGradeIds.length) return true;
+  const catalogId = getGradeCatalogIdForClass(config, cls.grade, { className: cls.name });
+  return segmentGradeIds.includes(catalogId);
+}

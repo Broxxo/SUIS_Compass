@@ -3,13 +3,29 @@
  */
 import pg from 'pg';
 import {
+  DEFAULT_EXAM_GRADE_FULL_SCORE,
+  effectiveTemplateSubjectEnableScore,
+  examFullScoreFromGradeConfig,
   extractEvaluationGradeInclusion,
   extractExamGradeInclusion,
   isEvaluationGradeIncluded,
   isExamGradeIncluded,
+  parseReportGradeDimensionSnapshots,
   reportExamScopeKey,
+  resolveTemplateDimensionsForGrade,
+  type ReportGradeDimensionSnapshot,
+  type ReportYearInclusionPresetSlice,
 } from '@repo/shared';
 import { sanitizeExamConfigs } from '../../../apps/api/src/lib/reportExamConfigSanitize.js';
+import {
+  getGradeCatalogIdForClass,
+  isClassInSegmentGrades,
+  loadSchoolGradeStructure,
+} from '../../../apps/api/src/lib/schoolGradeStructure.js';
+import {
+  loadYearPresetSubjectRows,
+  resolveStaffingSubjectKeysForReportTemplate,
+} from '../../../apps/api/src/lib/reportYearInclusionContext.js';
 
 export type Term = 'Semester 1' | 'Semester 2';
 
@@ -18,6 +34,7 @@ export type TemplateSubject = {
   subjectName: string;
   enableScore: boolean;
   enableLearningQuality: boolean;
+  gradeDimensions: ReportGradeDimensionSnapshot[];
   dimensions: Array<{ dimensionKey: string; dimensionLabel: string }>;
 };
 
@@ -31,6 +48,8 @@ export type SubjectFillTask = {
   subjectKey: string;
   subjectName: string;
   enableScore: boolean;
+  /** 考试学科本年级满分；非考试科为 null */
+  examFullScore: number | null;
   dimensions: TemplateSubject['dimensions'];
   templateId: string;
   academicYearId: string;
@@ -43,9 +62,33 @@ export type HomeroomFillTask = {
   classId: string;
   className: string;
   studentId: string;
+  studentName: string;
   templateId: string;
   academicYearId: string;
   term: Term;
+  homeroomCommentMode: string;
+};
+
+export type ReportTemplateSpec = {
+  templateTitle: string;
+  gradeMin: number;
+  gradeMax: number;
+  /** 默认 Semester 2（2025-26 下学期） */
+  term?: Term;
+};
+
+export type ReportLoadSuite = {
+  plans: ReportLoadPlan[];
+  /** 合并后的执行计划（多学段任务并入同一并发池） */
+  executionPlan: ReportLoadPlan;
+  portraitTemplates: Array<{ id: string; title: string }>;
+};
+
+export type PortraitKissTask = {
+  teacherId: string;
+  teacherName: string;
+  templateId: string;
+  templateTitle: string;
 };
 
 export type ReportLoadPlan = {
@@ -57,8 +100,10 @@ export type ReportLoadPlan = {
     schoolSegmentId: string;
     homeroomCommentMode: string;
   };
+  portraitTemplate: { id: string; title: string } | null;
   subjectTasks: SubjectFillTask[];
   homeroomTasks: HomeroomFillTask[];
+  portraitKissTasks: PortraitKissTask[];
   subjectSettings: ReportSubjectSettingsSnapshot;
   stats: {
     classes: number;
@@ -66,6 +111,7 @@ export type ReportLoadPlan = {
     templateSubjects: number;
     skippedStaffingRows: number;
     skippedNotInEvaluation: number;
+    portraitTeachers: number;
   };
 };
 
@@ -233,6 +279,44 @@ export function subjectRequiredForClassGrade(
   );
 }
 
+function presetSliceFromLoadContext(
+  ctx: Awaited<ReturnType<typeof loadYearInclusionPayload>>,
+): ReportYearInclusionPresetSlice {
+  const subjectKeyToCourseId: Record<string, string> = {};
+  for (const [sk, cid] of ctx.subjectKeyToCourseId) {
+    subjectKeyToCourseId[sk] = cid;
+  }
+  return {
+    stageInclusion: ctx.stageInclusion,
+    evaluationGradeInclusion: ctx.evaluationGradeInclusion,
+    examGradeInclusion: ctx.examGradeInclusion,
+    examConfigs: ctx.examConfigs,
+    subjectKeyToCourseId,
+  };
+}
+
+/** 读取考试学科本年级满分（与 API 校验一致） */
+export function resolveExamFullScore(
+  term: Term,
+  segmentId: string,
+  subjectKey: string,
+  gradeCatalogId: string | null,
+  ctx: Awaited<ReturnType<typeof loadYearInclusionPayload>>,
+): number {
+  const examKey = reportExamScopeKey(term, segmentId);
+  const scope = ctx.examConfigs[examKey];
+  if (!scope) return DEFAULT_EXAM_GRADE_FULL_SCORE;
+  const examSubject = scope.subjects.find((s) => s.subjectKey === subjectKey);
+  if (!examSubject) return DEFAULT_EXAM_GRADE_FULL_SCORE;
+  const gradeConfigs = examSubject.gradeConfigs ?? [];
+  const examG =
+    (gradeCatalogId ? gradeConfigs.find((g) => g.gradeId === gradeCatalogId) : null)
+    ?? gradeConfigs[0]
+    ?? null;
+  return examFullScoreFromGradeConfig(examG?.fullScore, examG?.percentBands);
+}
+
+/** 与 API / 教师工作台 / 学生端共用的测评成绩开关（学年模块化配置优先） */
 export function effectiveEnableScore(
   term: Term,
   segmentId: string,
@@ -242,25 +326,15 @@ export function effectiveEnableScore(
   templateEnableScore: boolean,
   ctx: Awaited<ReturnType<typeof loadYearInclusionPayload>>,
 ): boolean {
-  if (!segmentId || !gradeCatalogId) return templateEnableScore;
-  const courseId = ctx.subjectKeyToCourseId.get(subjectKey);
-  if (!courseId) return templateEnableScore;
-  if (
-    isExamGradeIncluded(
-      term,
-      segmentId,
-      courseId,
-      gradeCatalogId,
-      segmentGradeIds,
-      ctx.stageInclusion,
-      ctx.evaluationGradeInclusion,
-      ctx.examGradeInclusion,
-      ctx.examConfigs,
-    )
-  ) {
-    return true;
-  }
-  return templateEnableScore;
+  return effectiveTemplateSubjectEnableScore(
+    term,
+    segmentId,
+    subjectKey,
+    gradeCatalogId,
+    segmentGradeIds,
+    templateEnableScore,
+    presetSliceFromLoadContext(ctx),
+  );
 }
 
 export async function buildReportSubjectSettingsSnapshot(
@@ -330,6 +404,7 @@ export async function buildReportSubjectSettingsSnapshot(
       if (!inEvaluation) continue;
       const displayName =
         sub.subjectName || (courseId ? (courseNameById.get(courseId) ?? subjectKey) : subjectKey);
+      const dimCount = resolveTemplateDimensionsForGrade(sub, gradeCatalogId).length;
       rows.push({
         gradeCatalogId,
         gradeLevel,
@@ -341,7 +416,7 @@ export async function buildReportSubjectSettingsSnapshot(
         isExam,
         templateEnableScore: sub.enableScore,
         effectiveEnableScore: effectiveScore,
-        dimensionCount: sub.dimensions.length,
+        dimensionCount: dimCount,
       });
       if (!evaluationByGradeLevel[gradeLevel]) evaluationByGradeLevel[gradeLevel] = [];
       evaluationByGradeLevel[gradeLevel].push(displayName);
@@ -392,12 +467,168 @@ export function printReportSubjectSettings(snapshot: ReportSubjectSettingsSnapsh
   console.log('');
 }
 
+async function resolvePortraitTemplate(
+  pool: pg.Pool,
+  portraitTitle: string | null | undefined,
+  academicYearId: string,
+): Promise<{ id: string; title: string } | null> {
+  const title = String(portraitTitle ?? '').trim();
+  if (!title) return null;
+  const row = (
+    await pool.query(
+      `SELECT id, title FROM teacher_portrait_collection_templates
+       WHERE academic_year_id = $1 AND status = 'published'
+         AND (title = $2 OR title ILIKE $3)
+       ORDER BY updated_at DESC NULLS LAST
+       LIMIT 1`,
+      [academicYearId, title, `%${title}%`],
+    )
+  ).rows[0] as { id: string; title: string } | undefined;
+  return row ? { id: row.id, title: row.title } : null;
+}
+
+export async function resolvePortraitTemplates(
+  pool: pg.Pool,
+  portraitTitles: string[],
+  academicYearId: string,
+): Promise<Array<{ id: string; title: string }>> {
+  const out: Array<{ id: string; title: string }> = [];
+  const seen = new Set<string>();
+  for (const raw of portraitTitles) {
+    const hit = await resolvePortraitTemplate(pool, raw, academicYearId);
+    if (!hit || seen.has(hit.id)) continue;
+    seen.add(hit.id);
+    out.push(hit);
+  }
+  return out;
+}
+
+async function buildPortraitKissTasksForTeachers(
+  pool: pg.Pool,
+  academicYearId: string,
+  gradeMin: number,
+  gradeMax: number,
+  portraitTemplates: Array<{ id: string; title: string }>,
+): Promise<PortraitKissTask[]> {
+  if (portraitTemplates.length === 0) return [];
+  const teacherRows = (
+    await pool.query(
+      `SELECT DISTINCT u.id AS teacher_id,
+              COALESCE(NULLIF(u.name_zh,''), u.display_name, u.username) AS teacher_name
+       FROM users u
+       WHERE u.role = 'teacher'
+         AND u.id IN (
+           SELECT a.teacher_id
+           FROM class_subject_teacher_assignments a
+           JOIN classes c ON c.id = a.class_id
+           WHERE a.academic_year_id = $1
+             AND c.grade BETWEEN $2 AND $3
+             AND a.subject_key <> '__homeroom__'
+           UNION
+           SELECT a.teacher_id
+           FROM class_teacher_assignments a
+           JOIN classes c ON c.id = a.class_id
+           WHERE c.academic_year_id = $1
+             AND c.grade BETWEEN $2 AND $3
+             AND a.role = 'homeroom'
+             AND a.unassigned_at IS NULL
+         )
+       ORDER BY teacher_name ASC`,
+      [academicYearId, gradeMin, gradeMax],
+    )
+  ).rows as Array<{ teacher_id: string; teacher_name: string }>;
+  const tasks: PortraitKissTask[] = [];
+  for (const t of teacherRows) {
+    for (const pt of portraitTemplates) {
+      tasks.push({
+        teacherId: t.teacher_id,
+        teacherName: t.teacher_name,
+        templateId: pt.id,
+        templateTitle: pt.title,
+      });
+    }
+  }
+  return tasks;
+}
+
+export function mergeReportLoadPlans(
+  plans: ReportLoadPlan[],
+  portraitKissTasks: PortraitKissTask[],
+  portraitTemplates: Array<{ id: string; title: string }>,
+): ReportLoadPlan {
+  const first = plans[0];
+  if (!first) {
+    throw new Error('mergeReportLoadPlans: no plans');
+  }
+  const subjectTasks = plans.flatMap((p) => p.subjectTasks);
+  const homeroomTasks = plans.flatMap((p) => p.homeroomTasks);
+  return {
+    template: first.template,
+    portraitTemplate: portraitTemplates[0] ?? null,
+    subjectTasks,
+    homeroomTasks,
+    portraitKissTasks,
+    subjectSettings: first.subjectSettings,
+    stats: {
+      classes: new Set(subjectTasks.map((t) => t.classId)).size,
+      subjectTeachers: new Set(subjectTasks.map((t) => t.teacherId)).size,
+      templateSubjects: plans.reduce((n, p) => n + p.stats.templateSubjects, 0),
+      skippedStaffingRows: plans.reduce((n, p) => n + p.stats.skippedStaffingRows, 0),
+      skippedNotInEvaluation: plans.reduce((n, p) => n + p.stats.skippedNotInEvaluation, 0),
+      portraitTeachers: new Set(portraitKissTasks.map((t) => t.teacherId)).size,
+    },
+  };
+}
+
+/** 先锋小学 + 先锋初中 两学段学业报告，合并并发执行 */
+export async function buildReportLoadSuite(
+  pool: pg.Pool,
+  specs: ReportTemplateSpec[],
+  portraitTemplateTitles: string[],
+): Promise<ReportLoadSuite> {
+  if (specs.length === 0) throw new Error('buildReportLoadSuite: no report template specs');
+  const plans: ReportLoadPlan[] = [];
+  for (const spec of specs) {
+    const plan = await buildReportLoadPlan(
+      pool,
+      spec.templateTitle,
+      spec.gradeMin,
+      spec.gradeMax,
+      null,
+      spec.term,
+    );
+    plans.push(plan);
+  }
+  const academicYearId = plans[0].template.academicYearId;
+  const gradeMin = Math.min(...specs.map((s) => s.gradeMin));
+  const gradeMax = Math.max(...specs.map((s) => s.gradeMax));
+  const portraitTemplates =
+    portraitTemplateTitles.length > 0
+      ? await resolvePortraitTemplates(pool, portraitTemplateTitles, academicYearId)
+      : [];
+  const portraitKissTasks =
+    portraitTemplates.length > 0
+      ? await buildPortraitKissTasksForTeachers(
+          pool,
+          academicYearId,
+          gradeMin,
+          gradeMax,
+          portraitTemplates,
+        )
+      : [];
+  const executionPlan = mergeReportLoadPlans(plans, portraitKissTasks, portraitTemplates);
+  return { plans, executionPlan, portraitTemplates };
+}
+
 export async function buildReportLoadPlan(
   pool: pg.Pool,
   templateTitle: string,
   gradeMin = 4,
   gradeMax = 6,
+  portraitTemplateTitle?: string | null,
+  term?: Term,
 ): Promise<ReportLoadPlan> {
+  const termFilter = term === 'Semester 1' || term === 'Semester 2' ? term : null;
   let templateRow = (
     await pool.query(
       `SELECT id, academic_year_id, term, status, title,
@@ -405,9 +636,10 @@ export async function buildReportLoadPlan(
               homeroom_comment_mode
        FROM student_report_templates
        WHERE title = $1
+         AND ($2::text IS NULL OR term = $2)
        ORDER BY updated_at DESC NULLS LAST
        LIMIT 1`,
-      [templateTitle],
+      [templateTitle, termFilter],
     )
   ).rows[0] as {
     id: string;
@@ -427,9 +659,10 @@ export async function buildReportLoadPlan(
                 homeroom_comment_mode
          FROM student_report_templates
          WHERE title ILIKE $1 AND status = 'published'
+           AND ($2::text IS NULL OR term = $2)
          ORDER BY updated_at DESC NULLS LAST
          LIMIT 1`,
-        [`%${templateTitle}%`],
+        [`%${templateTitle}%`, termFilter],
       )
     ).rows[0] as typeof templateRow;
   }
@@ -453,10 +686,14 @@ export async function buildReportLoadPlan(
   const inclusionCtx = await loadYearInclusionPayload(pool, templateRow.academic_year_id);
   const gradeItems = await loadGradeConfigItemsForReport(pool);
   const segmentGradeIds = segmentId ? await loadSegmentGradeIds(pool, segmentId) : [];
+  const gradeConfig = await loadSchoolGradeStructure();
+  const classInTemplateSegment = (cls: { grade: number; name: string }) =>
+    segmentGradeIds.length === 0
+      || isClassInSegmentGrades(gradeConfig, cls, segmentGradeIds);
 
   const subjectsRows = (
     await pool.query(
-      `SELECT subject_key, subject_name, enable_score, enable_learning_quality
+      `SELECT subject_key, subject_name, enable_score, enable_learning_quality, grade_dimensions
        FROM student_report_template_subjects
        WHERE template_id = $1
        ORDER BY sort_order ASC`,
@@ -467,6 +704,7 @@ export async function buildReportLoadPlan(
     subject_name: string;
     enable_score: boolean;
     enable_learning_quality: boolean;
+    grade_dimensions: unknown;
   }>;
 
   const dimsRows = (
@@ -487,6 +725,7 @@ export async function buildReportLoadPlan(
       subjectName: s.subject_name,
       enableScore: Boolean(s.enable_score),
       enableLearningQuality: s.enable_learning_quality !== false,
+      gradeDimensions: parseReportGradeDimensionSnapshots(s.grade_dimensions),
       dimensions: [],
     });
   }
@@ -494,6 +733,31 @@ export async function buildReportLoadPlan(
     const sub = subjectMap.get(d.subject_key);
     if (!sub || !d.dimension_key || !d.dimension_label) continue;
     sub.dimensions.push({ dimensionKey: d.dimension_key, dimensionLabel: d.dimension_label });
+  }
+
+  const evaluationSubjectKeys = resolveStaffingSubjectKeysForReportTemplate(
+    [...templateSubjectKeys],
+    segmentId,
+    segmentGradeIds,
+    inclusionCtx,
+  );
+  const libraryRows = await loadYearPresetSubjectRows(templateRow.academic_year_id);
+  const libraryByKey = new Map(libraryRows.map((r) => [r.subjectKey, r] as const));
+  for (const sk of evaluationSubjectKeys) {
+    if (templateSubjectKeys.has(sk)) continue;
+    templateSubjectKeys.add(sk);
+    const lib = libraryByKey.get(sk);
+    subjectMap.set(sk, {
+      subjectKey: sk,
+      subjectName: lib?.subjectNameZh || lib?.subjectNameEn || sk,
+      enableScore: lib?.enableScore ?? true,
+      enableLearningQuality: true,
+      gradeDimensions: lib?.gradeDimensions ?? [],
+      dimensions: (lib?.dimensions ?? []).map((d, i) => ({
+        dimensionKey: `dim_${i}`,
+        dimensionLabel: d.dimensionLabelZh || d.dimensionLabelEn,
+      })),
+    });
   }
 
   const assignmentRows = (
@@ -539,21 +803,50 @@ export async function buildReportLoadPlan(
   let skippedStaffingRows = 0;
   let skippedNotInEvaluation = 0;
   const subjectTasks: SubjectFillTask[] = [];
+  const staffingNameByKey = new Map<string, string>();
+  const segmentAssignmentRows = assignmentRows.filter((r) =>
+    classInTemplateSegment({ grade: Number(r.class_grade), name: r.class_name }),
+  );
 
-  for (const r of assignmentRows) {
+  for (const r of segmentAssignmentRows) {
+    if (!staffingNameByKey.has(r.subject_key)) {
+      staffingNameByKey.set(r.subject_key, r.subject_name);
+    }
+    const sub = subjectMap.get(r.subject_key);
+    if (sub && staffingNameByKey.get(r.subject_key)) {
+      sub.subjectName = staffingNameByKey.get(r.subject_key)!;
+    }
+  }
+
+  for (const r of segmentAssignmentRows) {
     if (!templateSubjectKeys.has(r.subject_key)) {
       skippedStaffingRows += 1;
       continue;
     }
     const sub = subjectMap.get(r.subject_key);
     if (!sub) continue;
-    const gradeCatalogId = gradeCatalogIdForClass(gradeItems, Number(r.class_grade));
+    const gradeCatalogId = getGradeCatalogIdForClass(gradeConfig, Number(r.class_grade), {
+      className: r.class_name,
+    });
     if (
       !subjectRequiredForClassGrade(r.subject_key, segmentId, gradeCatalogId, segmentGradeIds, inclusionCtx)
     ) {
       skippedNotInEvaluation += 1;
       continue;
     }
+    const taskDimensions = resolveTemplateDimensionsForGrade(sub, gradeCatalogId).map((d) => ({
+      dimensionKey: d.dimensionKey,
+      dimensionLabel: d.dimensionLabel,
+    }));
+    const enableScore = effectiveEnableScore(
+      templateRow.term,
+      segmentId,
+      r.subject_key,
+      gradeCatalogId,
+      segmentGradeIds,
+      sub.enableScore,
+      inclusionCtx,
+    );
     subjectTasks.push({
       teacherId: r.teacher_id,
       teacherName: r.teacher_name,
@@ -562,27 +855,22 @@ export async function buildReportLoadPlan(
       classGrade: Number(r.class_grade),
       studentId: r.student_id,
       subjectKey: r.subject_key,
-      subjectName: sub.subjectName,
-      enableScore: effectiveEnableScore(
-        templateRow.term,
-        segmentId,
-        r.subject_key,
-        gradeCatalogId,
-        segmentGradeIds,
-        sub.enableScore,
-        inclusionCtx,
-      ),
-      dimensions: sub.dimensions,
+      subjectName: staffingNameByKey.get(r.subject_key) ?? sub.subjectName,
+      enableScore,
+      examFullScore: enableScore
+        ? resolveExamFullScore(templateRow.term, segmentId, r.subject_key, gradeCatalogId, inclusionCtx)
+        : null,
+      dimensions: taskDimensions,
       templateId: templateRow.id,
       academicYearId: templateRow.academic_year_id,
       term: templateRow.term,
     });
   }
 
-  const homeroomRows = (
+  const homeroomRowsRaw = (
     await pool.query(
       `WITH g46 AS (
-         SELECT id, name FROM classes WHERE academic_year_id = $1 AND grade BETWEEN $2 AND $3
+         SELECT id, name, grade FROM classes WHERE academic_year_id = $1 AND grade BETWEEN $2 AND $3
        ),
        st AS (
          SELECT e.student_id, e.class_id
@@ -595,11 +883,14 @@ export async function buildReportLoadPlan(
          COALESCE(NULLIF(u.name_zh,''), u.display_name, u.username) AS teacher_name,
          c.id AS class_id,
          c.name AS class_name,
-         st.student_id
+         c.grade AS class_grade,
+         st.student_id,
+         COALESCE(NULLIF(s.name_zh,''), s.name_en, s.name, st.student_id) AS student_name
        FROM class_teacher_assignments a
        JOIN g46 c ON c.id = a.class_id
        JOIN users u ON u.id = a.teacher_id
        JOIN st ON st.class_id = c.id
+       JOIN students s ON s.id = st.student_id
        WHERE a.role = 'homeroom' AND a.unassigned_at IS NULL`,
       [templateRow.academic_year_id, gradeMin, gradeMax],
     )
@@ -608,8 +899,14 @@ export async function buildReportLoadPlan(
     teacher_name: string;
     class_id: string;
     class_name: string;
+    class_grade: number;
     student_id: string;
+    student_name: string;
   }>;
+
+  const homeroomRows = homeroomRowsRaw.filter((r) =>
+    classInTemplateSegment({ grade: Number(r.class_grade), name: r.class_name }),
+  );
 
   const homeroomTasks: HomeroomFillTask[] = homeroomRows.map((r) => ({
     teacherId: r.teacher_id,
@@ -617,10 +914,25 @@ export async function buildReportLoadPlan(
     classId: r.class_id,
     className: r.class_name,
     studentId: r.student_id,
+    studentName: r.student_name,
     templateId: templateRow.id,
     academicYearId: templateRow.academic_year_id,
     term: templateRow.term,
+    homeroomCommentMode: templateRow.homeroom_comment_mode,
   }));
+
+  const portraitTemplate = portraitTemplateTitle
+    ? await resolvePortraitTemplate(pool, portraitTemplateTitle, templateRow.academic_year_id)
+    : null;
+  const portraitKissTasks: PortraitKissTask[] = portraitTemplate
+    ? await buildPortraitKissTasksForTeachers(
+        pool,
+        templateRow.academic_year_id,
+        gradeMin,
+        gradeMax,
+        [portraitTemplate],
+      )
+    : [];
 
   const subjectSettings = await buildReportSubjectSettingsSnapshot(
     pool,
@@ -640,8 +952,10 @@ export async function buildReportLoadPlan(
       schoolSegmentId: segmentId,
       homeroomCommentMode: templateRow.homeroom_comment_mode,
     },
+    portraitTemplate,
     subjectTasks,
     homeroomTasks,
+    portraitKissTasks,
     subjectSettings,
     stats: {
       classes: new Set(subjectTasks.map((t) => t.classId)).size,
@@ -649,6 +963,7 @@ export async function buildReportLoadPlan(
       templateSubjects: subjectsRows.length,
       skippedStaffingRows,
       skippedNotInEvaluation,
+      portraitTeachers: portraitKissTasks.length,
     },
   };
 }

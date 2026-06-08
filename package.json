@@ -17,8 +17,11 @@
     "db:down": "docker compose down",
     "db:init": "npm run db:init -w @repo/api",
     "prepare:local": "npm run db:up && npm run db:init",
-    "seed:g456:test-students": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-g456-virtual-students.ts",
+    "seed:g456:test-students": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-g16-loadtest-students.ts",
+    "seed:g16:test-students": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-g16-loadtest-students.ts",
+    "seed:g789:classes-students": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-g789-classes-students.ts",
     "seed:report:midterm-primary-test": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-midterm-primary-test-report.ts",
+    "seed:report:import-dimensions": "cd apps/api && npx tsx ../../tools/load-tests/scripts/import-report-dimensions-to-preset.ts",
     "load:report": "cd apps/api && npx tsx ../../tools/load-tests/scripts/run-report-load-test.ts"
   },
   "workspaces": [

@@ -1,9 +1,11 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
+import type { CourseDomainsConfig } from "@repo/shared"
+import { sortCoursesLikeCourseSettings } from "@repo/shared"
 import type { Course, SubjectCategory } from "../types"
 import { Language } from "../types/language"
 import { KEY_CONCEPTS_OPTIONS } from "./constants"
-import { loadKeyConceptsSync } from "./storage"
+import { loadCourseDomainsSync, loadKeyConceptsSync } from "./storage"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -88,27 +90,15 @@ export function formatCourseBilingualDisplayName(course: Course): string {
 }
 
 /**
- * 与课程管理 / 课程河流「整体视图」列顺序一致：先按 categoryOrder 中的学科键，
- * 再补上未出现在顺序里的类别；同一类别内保持当前 courses 数组中的先后。
+ * 与后台课程设置 / Hub 课程河流整体视图一致：
+ * 先按领域顺序（领域内按 courseIds），再按 categoryOrder 排列未归属领域的学科列。
  */
-export function sortCoursesLikeCurriculumRoadmap(courses: Course[], categoryOrder: string[]): Course[] {
-  const grouped: Record<string, Course[]> = {};
-  courses.forEach((c) => {
-    const canonical = getCategoryCanonicalKey(c.subjectCategory) || c.name;
-    if (!grouped[canonical]) grouped[canonical] = [];
-    grouped[canonical].push(c);
-  });
-  const orderedKeys = categoryOrder.filter((k) => grouped[k]?.length);
-  const keys: string[] = [...orderedKeys];
-  Object.keys(grouped).forEach((k) => {
-    if (!keys.includes(k)) keys.push(k);
-  });
-  const out: Course[] = [];
-  for (const k of keys) {
-    const list = grouped[k];
-    if (list?.length) out.push(...list);
-  }
-  return out;
+export function sortCoursesLikeCurriculumRoadmap(
+  courses: Course[],
+  categoryOrder: string[],
+  domainsConfig: CourseDomainsConfig = loadCourseDomainsSync(),
+): Course[] {
+  return sortCoursesLikeCourseSettings(courses, categoryOrder, domainsConfig);
 }
 
 /**

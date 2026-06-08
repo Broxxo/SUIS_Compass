@@ -101,7 +101,7 @@ export interface ClassPointEvent {
 }
 
 export type Term = 'Semester 1' | 'Semester 2';
-export type ReportGrade = 'A+' | 'A' | 'A-' | 'B+' | 'B' | 'B-' | 'C+' | 'C' | 'C-' | 'D';
+export type ReportGrade = 'A+' | 'A' | 'A-' | 'B+' | 'B' | 'B-' | 'C+' | 'C' | 'C-' | 'D' | 'U';
 export type TargetLevel = 'A' | 'B' | 'C' | 'D';
 
 export interface StudentTermTargetDimension {
@@ -123,7 +123,7 @@ export interface StudentTermSubjectReport {
   finalGrade: ReportGrade | null;
   /** 学习品质等第（A–D），与模板 enableLearningQuality 一致时填写 */
   learningQualityGrade?: TargetLevel | null;
-  /** 考试学科每个目标维度的分项分数（0-100）；总分由前端/后端按分项自动汇总 */
+  /** @deprecated 旧版分项考试成绩；新版考试学科仅使用 finalScore（满分 100） */
   examDimensionScores?: Record<string, number | null> | null;
   teacherComment: string | null;
   teacherId: string | null;
@@ -172,6 +172,15 @@ export interface ReportTemplateSubject {
   enableLearningQuality?: boolean;
   scoreVisibility: ScoreVisibility;
   sortOrder: number;
+  /** 创建报告时从学年模板库快照的分年级维度；已保存报告不随预设变更 */
+  gradeDimensions?: Array<{
+    gradeId: string;
+    dimensions: Array<{
+      dimensionLabelZh: string;
+      dimensionLabelEn: string;
+      levelDescriptions?: Partial<Record<TargetLevel, string>>;
+    }>;
+  }>;
   dimensions: ReportTemplateDimension[];
 }
 
@@ -209,6 +218,45 @@ export interface EvaluationTemplateSummary {
   updatedAt: string | null;
 }
 
+export type TeacherPortraitCollectionTemplateStatus = 'draft' | 'published' | 'closed';
+
+export interface TeacherPortraitCollectionTemplateSummary {
+  id: string;
+  academicYearId: string;
+  academicYearName: string;
+  term: Term;
+  title: string | null;
+  collectionType: string;
+  status: TeacherPortraitCollectionTemplateStatus;
+  publishedAt: string | null;
+  updatedAt: string | null;
+  mySubmission?: { hasContent: boolean; updatedAt: string | null };
+}
+
+export interface TeacherPortraitCollectionProgressTeacher {
+  teacherId: string;
+  teacherName: string;
+  updatedAt: string | null;
+}
+
+export interface TeacherPortraitCollectionProgress {
+  templateId: string;
+  totalTeachers: number;
+  completedTeachers: number;
+  pendingTeachers: number;
+  completionRate: number;
+  completed: TeacherPortraitCollectionProgressTeacher[];
+  pending: Array<{ teacherId: string; teacherName: string }>;
+}
+
+export interface TeacherPortraitCollectionSubmission {
+  teacherId: string;
+  teacherName: string;
+  diagnosis: ReportTeachingDiagnosis;
+  updatedAt: string | null;
+  hasContent: boolean;
+}
+
 export interface ReportYearDimensionPresetSubject {
   courseId?: string;
   subjectKey: string;
@@ -232,6 +280,7 @@ export interface ReportYearDimensionPresetSubject {
   }>;
 }
 
+/** @deprecated 考试学科不再配置分项满分，仅保留类型以兼容旧数据 */
 export interface ReportExamDimensionScore {
   dimensionLabelZh: string;
   dimensionLabelEn: string;
@@ -240,10 +289,12 @@ export interface ReportExamDimensionScore {
 
 export interface ReportExamGradeConfig {
   gradeId: string;
-  /** 百分比阈值（0-100），例如 A+=95 表示 >=95% 为 A+ */
+  /** 本学科本年级考试满分（如 100、50）；未配置时按 100 计 */
+  fullScore?: number;
+  /** 得分率阈值（0-100，%），例如总分 100、A+=95 表示 ≥95 分为 A+ */
   percentBands: Partial<Record<ReportGrade, number>>;
-  /** 各维度分值（同第一步目标维度），总分由前端按明细自动汇总 */
-  dimensionScores: ReportExamDimensionScore[];
+  /** 已废弃：旧版按目标维度分项计分；新配置应为空数组 */
+  dimensionScores?: ReportExamDimensionScore[];
 }
 
 export interface ReportExamSubjectConfig {
@@ -370,13 +421,34 @@ export interface TeacherReportTemplateProgress {
 }
 
 export interface ReportClassWeaknessRow {
+  /** 学生薄弱项 */
   weakPoint: string;
   errorAnalysis: string;
-  nextPlan: string;
+  /** @deprecated 旧版第三列，新数据不再使用 */
+  nextPlan?: string;
+}
+
+export interface ReportStudentAnalysisRow {
+  studentId: string;
+  learningAnalysis: string;
+  supportPlan: string;
+}
+
+export interface ReportTeachingDiagnosis {
+  keep: string;
+  improve: string;
+  stop: string;
+  start: string;
 }
 
 export interface ReportClassSubjectInsights {
+  /** @deprecated 已由班级整体分析替代 */
   weaknessRows: ReportClassWeaknessRow[];
+  /** 班级整体分析（不纳入学生发布的学业报告） */
+  classOverallAnalysis: string | null;
+  studentAnalysisRows: ReportStudentAnalysisRow[];
+  teachingDiagnosis: ReportTeachingDiagnosis | null;
+  /** @deprecated 旧版纯文本反思，读取时可能由 teachingDiagnosis 或此字段回填 */
   teachingReflection: string | null;
   updatedAt: string | null;
 }

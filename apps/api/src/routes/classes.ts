@@ -7,20 +7,43 @@ import { sanitizeExamConfigs } from '../lib/reportExamConfigSanitize.js';
 import {
   effectiveTemplateSubjectEnableScore,
   ensureReportYearDimensionPresetTable,
-  gradeCatalogIdForClassLevel,
-  loadGradeConfigItemsForReport,
+  filterClassIdsForReportSegment,
+  filterSubjectsForGradeCatalog,
+  resolveReportTemplateSubjectsFromLibrary,
+  filterTeacherSubjectByClassForReportTemplate,
+  getGradeCatalogIdForClass,
+  isTemplateSubjectRequiredForGrade,
   loadReportYearInclusionContext,
+  loadSchoolGradeStructure,
   loadSegmentGradeIds,
+  resolveStaffingSubjectKeysForReportTemplate,
+  staffingSubjectKeysForTemplateSubjectAtGrade,
+  isClassInSegmentGrades,
+  type ReportYearInclusionContext,
 } from '../lib/reportYearInclusionContext.js';
 import {
+  configuredReportScoreGradeMins,
+  examFullScoreFromGradeConfig,
   mergeReportScoreGradeMinScores,
+  reportLetterGradeFromExamPercentBands,
   reportLetterGradeFromScore,
+  parseReportGradeDimensionSnapshots,
   reportScoreLetterGradeToTargetLevel,
+  resolveTemplateDimensionsForGrade,
   STAFFING_HOMEROOM_SUBJECT_KEY,
-  isEvaluationGradeIncluded,
+  type ReportGradeDimensionSnapshot,
   type ReportScoreLetterGrade,
 } from '@repo/shared';
 import { createRunOnce } from '../lib/runOnce.js';
+import { ensureGradeLevelConstraints } from '../lib/ensureGradeLevelConstraints.js';
+import {
+  ensureTeacherPortraitCollectionTables,
+  emptyTeachingDiagnosis as portraitEmptyDiagnosis,
+  getTeacherPortraitTemplateById,
+  parseTeachingDiagnosis as parsePortraitDiagnosis,
+  teachingDiagnosisHasContent as portraitDiagnosisHasContent,
+  type TeachingDiagnosisPayload as PortraitDiagnosisPayload,
+} from '../lib/teacherPortraitCollections.js';
 
 type ReqWithUserId = Request & { userId?: string };
 type Term = 'Semester 1' | 'Semester 2';
@@ -33,13 +56,66 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+type TeachingDiagnosisPayload = { keep: string; improve: string; stop: string; start: string };
+
+function emptyTeachingDiagnosis(): TeachingDiagnosisPayload {
+  return { keep: '', improve: '', stop: '', start: '' };
+}
+
+function parseTeachingDiagnosisFromDb(
+  diagnosisRaw: unknown,
+  legacyReflection: string | null,
+): TeachingDiagnosisPayload {
+  if (diagnosisRaw && typeof diagnosisRaw === 'object' && !Array.isArray(diagnosisRaw)) {
+    const rec = diagnosisRaw as Record<string, unknown>;
+    return {
+      keep: String(rec.keep ?? '').trim(),
+      improve: String(rec.improve ?? '').trim(),
+      stop: String(rec.stop ?? '').trim(),
+      start: String(rec.start ?? '').trim(),
+    };
+  }
+  const legacy = String(legacyReflection ?? '').trim();
+  if (!legacy) return emptyTeachingDiagnosis();
+  return { keep: '', improve: '', stop: '', start: legacy };
+}
+
+function teachingDiagnosisHasContent(d: TeachingDiagnosisPayload): boolean {
+  return Boolean(d.keep || d.improve || d.stop || d.start);
+}
+
+function parseWeaknessRowsFromDb(raw: unknown): Array<{ weakPoint: string; errorAnalysis: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((row) => row as Record<string, unknown>)
+    .map((row) => ({
+      weakPoint: String(row.weakPoint ?? '').trim(),
+      errorAnalysis: String(row.errorAnalysis ?? '').trim(),
+    }))
+    .filter((row) => row.weakPoint || row.errorAnalysis);
+}
+
+function parseStudentAnalysisRowsFromDb(raw: unknown): Array<{ studentId: string; learningAnalysis: string; supportPlan: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((row) => row as Record<string, unknown>)
+    .map((row) => ({
+      studentId: String(row.studentId ?? '').trim(),
+      learningAnalysis: String(row.learningAnalysis ?? row.learning_analysis ?? '').trim(),
+      supportPlan: String(row.supportPlan ?? row.support_plan ?? '').trim(),
+    }))
+    .filter((row) => row.studentId && (row.learningAnalysis || row.supportPlan));
+}
+
 function toReportGrade(score: number | null | undefined, mins: Partial<Record<string, number>> | null): ReportGrade | null {
   return reportLetterGradeFromScore(score, mins);
 }
 
 const portraitTablesOnce = createRunOnce();
+const gradeConstraintsOnce = createRunOnce();
 
 async function ensureStudentPortraitTables(): Promise<void> {
+  await gradeConstraintsOnce.run(() => ensureGradeLevelConstraints(pool));
   await portraitTablesOnce.run(async () => {
   await pool.query(`
     ALTER TABLE students
@@ -378,6 +454,18 @@ async function ensureStudentPortraitTables(): Promise<void> {
       ON student_report_subject_class_insights(template_id, class_id, subject_key)
   `);
   await pool.query(`
+    ALTER TABLE student_report_subject_class_insights
+      ADD COLUMN IF NOT EXISTS student_analysis_rows JSONB NOT NULL DEFAULT '[]'::jsonb
+  `);
+  await pool.query(`
+    ALTER TABLE student_report_subject_class_insights
+      ADD COLUMN IF NOT EXISTS teaching_diagnosis JSONB
+  `);
+  await pool.query(`
+    ALTER TABLE student_report_subject_class_insights
+      ADD COLUMN IF NOT EXISTS class_overall_analysis TEXT
+  `);
+  await pool.query(`
     DO $widen$
     BEGIN
       IF EXISTS (
@@ -546,6 +634,24 @@ async function enrollmentClassForStudentYear(studentId: string, academicYearId: 
   return (r.rows[0]?.class_id as string | undefined) ?? null;
 }
 
+async function gradeCatalogIdForStudentEnrollment(
+  studentId: string,
+  academicYearId: string,
+): Promise<string | null> {
+  const classId = await enrollmentClassForStudentYear(studentId, academicYearId);
+  if (!classId) return null;
+  const row = (
+    await pool.query(`SELECT grade, name FROM classes WHERE id = $1 LIMIT 1`, [classId])
+  ).rows[0] as { grade: number; name: string } | undefined;
+  if (!row) return null;
+  const classGrade = Number(row.grade);
+  if (!Number.isFinite(classGrade)) return null;
+  const gradeConfig = await loadSchoolGradeStructure();
+  return getGradeCatalogIdForClass(gradeConfig, classGrade, {
+    className: String(row.name ?? ''),
+  });
+}
+
 async function teacherTeachesSubjectInClass(
   teacherId: string,
   academicYearId: string,
@@ -558,6 +664,51 @@ async function teacherTeachesSubjectInClass(
      WHERE academic_year_id = $1 AND class_id = $2 AND subject_key = $3 AND teacher_id = $4
      LIMIT 1`,
     [academicYearId, classId, subjectKey, teacherId],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
+async function teacherCanFillTemplateSubjectInClass(
+  teacherId: string,
+  academicYearId: string,
+  classId: string,
+  templateSubjectKey: string,
+  templateSubjectKeys: string[],
+  segmentId: string,
+  ctx: ReportYearInclusionContext,
+): Promise<boolean> {
+  const classRow = (
+    await pool.query(
+      `SELECT grade, name FROM classes WHERE id = $1 AND academic_year_id = $2 LIMIT 1`,
+      [classId, academicYearId],
+    )
+  ).rows[0] as { grade: number; name: string } | undefined;
+  if (!classRow) return false;
+  const gradeConfig = await loadSchoolGradeStructure();
+  const gradeCatalogId = getGradeCatalogIdForClass(gradeConfig, Number(classRow.grade), {
+    className: String(classRow.name ?? ''),
+  });
+  const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+  const acceptableKeys = staffingSubjectKeysForTemplateSubjectAtGrade(
+    templateSubjectKey,
+    templateSubjectKeys,
+    gradeCatalogId,
+    segmentId,
+    segmentGradeIds,
+    ctx,
+  );
+  for (const sk of acceptableKeys) {
+    if (await teacherTeachesSubjectInClass(teacherId, academicYearId, classId, sk)) return true;
+  }
+  return false;
+}
+
+async function teacherIsHomeroomOfClass(teacherId: string, classId: string): Promise<boolean> {
+  const r = await pool.query(
+    `SELECT 1 FROM class_teacher_assignments
+     WHERE class_id = $1 AND teacher_id = $2 AND role = 'homeroom' AND unassigned_at IS NULL
+     LIMIT 1`,
+    [classId, teacherId],
   );
   return (r.rowCount ?? 0) > 0;
 }
@@ -629,6 +780,7 @@ async function loadScoreMinScoresForBand(
 
 type ExamGradeCfgRow = {
   gradeId: string;
+  fullScore?: number;
   percentBands: Partial<Record<ReportGrade, number>>;
   dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
 };
@@ -640,6 +792,29 @@ function pickExamGradeConfig(gradeConfigs: ExamGradeCfgRow[], gradeCatalogId: st
     if (hit) return hit;
   }
   return gradeConfigs[0] ?? null;
+}
+
+function resolveSubjectAssessmentGradeFromDb(
+  storedGrade: string | null,
+  storedScore: number | null,
+  subjectKey: string,
+  template: { term: Term; schoolSegmentId: string | null; scoreGradeMinScores: Partial<Record<string, number>> | null },
+  gradeCatalogId: string | null,
+  examConfigs: ReturnType<typeof sanitizeExamConfigs>,
+): ReportGrade | null {
+  const trimmed = String(storedGrade ?? '').trim();
+  if (trimmed) return trimmed as ReportGrade;
+  if (storedScore == null || !Number.isFinite(storedScore)) return null;
+  const examKey = `${template.term}::${String(template.schoolSegmentId ?? '').trim()}`;
+  const examScope = examConfigs[examKey];
+  const examSubject = examScope?.subjects?.find((s) => s.subjectKey === subjectKey);
+  const examG = pickExamGradeConfig(examSubject?.gradeConfigs ?? [], gradeCatalogId);
+  const configuredBands = configuredReportScoreGradeMins(examG?.percentBands ?? {});
+  const hasExamBands = Object.keys(configuredBands).length > 0;
+  if (hasExamBands) {
+    return reportLetterGradeFromExamPercentBands(storedScore, examG?.fullScore, examG?.percentBands);
+  }
+  return toReportGrade(storedScore, template.scoreGradeMinScores);
 }
 
 function matchDimensionMaxByKey(
@@ -673,6 +848,28 @@ async function loadSanitizedExamConfigsForYear(academicYearId: string): Promise<
   return sanitizeExamConfigs(row.payload);
 }
 
+function templateSubjectsForGradeCatalog<
+  T extends {
+    subjectKey?: string;
+    dimensions?: Array<{
+      id: string;
+      dimensionKey: string;
+      dimensionLabel: string;
+      dimensionLabelZh?: string;
+      dimensionLabelEn?: string;
+      sortOrder: number;
+      levelDescriptions?: Partial<Record<TargetLevel, string>>;
+    }>;
+    gradeDimensions?: ReportGradeDimensionSnapshot[];
+  },
+>(subjects: T[], gradeCatalogId: string | null): T[] {
+  if (!gradeCatalogId) return subjects;
+  return subjects.map((s) => ({
+    ...s,
+    dimensions: resolveTemplateDimensionsForGrade(s, gradeCatalogId) as T['dimensions'],
+  }));
+}
+
 async function getTemplateById(templateId: string) {
   const template = (await pool.query(
     `SELECT id, academic_year_id, term, status, title, homeroom_comment_mode, template_type, is_active, published_at, released_at,
@@ -698,6 +895,7 @@ async function getTemplateById(templateId: string) {
   const rows = (await pool.query(
     `SELECT s.id AS subject_id, s.subject_key, s.subject_name, s.subject_name_zh, s.subject_name_en,
             s.module_type, s.enable_score, s.enable_teacher_comment, s.enable_learning_quality, s.score_visibility, s.sort_order,
+            s.grade_dimensions,
             d.id AS dimension_id, d.dimension_key, d.dimension_label, d.dimension_label_zh, d.dimension_label_en, d.sort_order AS dimension_sort,
             ld.level, ld.description
      FROM student_report_template_subjects s
@@ -718,6 +916,7 @@ async function getTemplateById(templateId: string) {
     enable_learning_quality: boolean | null;
     score_visibility: 'teacher_homeroom_admin' | null;
     sort_order: number;
+    grade_dimensions: unknown;
     dimension_id: string | null;
     dimension_key: string | null;
     dimension_label: string | null;
@@ -740,6 +939,7 @@ async function getTemplateById(templateId: string) {
     enableLearningQuality: boolean;
     scoreVisibility: 'teacher_homeroom_admin';
     sortOrder: number;
+    gradeDimensions: ReportGradeDimensionSnapshot[];
     dimensions: Array<{
       id: string;
       dimensionKey: string;
@@ -773,6 +973,7 @@ async function getTemplateById(templateId: string) {
       enableLearningQuality: row.enable_learning_quality !== false,
       scoreVisibility: (row.score_visibility ?? 'teacher_homeroom_admin') as 'teacher_homeroom_admin',
       sortOrder: row.sort_order,
+      gradeDimensions: parseReportGradeDimensionSnapshots(row.grade_dimensions),
       dimensions: [],
     };
     subjectMap.set(row.subject_id, s);
@@ -814,6 +1015,23 @@ async function getTemplateById(templateId: string) {
   };
 }
 
+/** 报告读写流程：从学年模板库 + 参评设置合成有效学科（与课程管理 subject_key 一致）。 */
+async function getTemplateForReportWorkflow(templateId: string) {
+  const template = await getTemplateById(templateId);
+  if (!template) return null;
+  const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+  const segmentId = String(template.schoolSegmentId ?? '').trim();
+  const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+  const subjects = await resolveReportTemplateSubjectsFromLibrary(
+    template.subjects,
+    segmentId,
+    segmentGradeIds,
+    inclusionCtx,
+    template.academicYearId,
+  );
+  return { ...template, subjects };
+}
+
 async function listTemplatesForTerm(academicYearId: string, term: Term, schoolSegmentId?: string | null) {
   const params: unknown[] = [academicYearId, term];
   let segFilter = '';
@@ -828,9 +1046,9 @@ async function listTemplatesForTerm(academicYearId: string, term: Term, schoolSe
      ORDER BY updated_at DESC NULLS LAST`,
     params
   )).rows as Array<{ id: string }>;
-  const templates: Array<Awaited<ReturnType<typeof getTemplateById>>> = [];
+  const templates: Array<Awaited<ReturnType<typeof getTemplateForReportWorkflow>>> = [];
   for (const row of rows) {
-    const tpl = await getTemplateById(row.id);
+    const tpl = await getTemplateForReportWorkflow(row.id);
     if (tpl) templates.push(tpl);
   }
   return templates.filter((t): t is NonNullable<typeof t> => !!t);
@@ -1072,13 +1290,17 @@ router.get('/me/subject-assignments', async (req: ReqWithUserId, res: Response) 
       return res.json({ assignments: [] as Array<{ classId: string; subjectKey: string }> });
     }
     const rows = (await pool.query(
-      `SELECT DISTINCT class_id, subject_key
+      `SELECT DISTINCT class_id, subject_key, subject_name
        FROM class_subject_teacher_assignments
        WHERE academic_year_id = $1 AND teacher_id = $2 AND subject_key <> $3`,
       [academicYearId, req.userId, STAFFING_HOMEROOM_SUBJECT_KEY],
-    )).rows as Array<{ class_id: string; subject_key: string }>;
+    )).rows as Array<{ class_id: string; subject_key: string; subject_name: string }>;
     res.json({
-      assignments: rows.map((r) => ({ classId: r.class_id, subjectKey: r.subject_key })),
+      assignments: rows.map((r) => ({
+        classId: r.class_id,
+        subjectKey: r.subject_key,
+        subjectName: r.subject_name,
+      })),
     });
   } catch (e) {
     console.error('get me subject-assignments', e);
@@ -1779,7 +2001,7 @@ router.put('/profile/students/:studentId/modules/:moduleId/values', requireStude
 router.get('/reports/year-dimension-presets/:academicYearId', async (req: ReqWithUserId, res: Response) => {
   try {
     const role = await getUserRole(req);
-    if (role !== 'teacher' && role !== 'admin' && role !== 'system-admin') {
+    if (role !== 'teacher' && role !== 'admin' && role !== 'system-admin' && role !== 'student') {
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
@@ -1898,27 +2120,79 @@ router.get('/reports/templates/:templateId/assigned-teachers', async (req: ReqWi
       return;
     }
     const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
+    const segmentId = String(template.schoolSegmentId ?? '').trim();
+    const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+    const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+    const staffingSubjectKeys = resolveStaffingSubjectKeysForReportTemplate(
+      templateSubjectKeys,
+      segmentId,
+      segmentGradeIds,
+      inclusionCtx,
+    );
+    let segmentClassIds: string[] | null = null;
+    if (segmentId) {
+      const segmentGradeIds = await loadSegmentGradeIds(segmentId);
+      if (segmentGradeIds.length > 0) {
+        const gradeConfig = await loadSchoolGradeStructure();
+        const classRows = (await pool.query(
+          `SELECT id, grade, name FROM classes WHERE academic_year_id = $1`,
+          [template.academicYearId],
+        )).rows as Array<{ id: string; grade: number; name: string }>;
+        segmentClassIds = classRows
+          .filter((r) =>
+            isClassInSegmentGrades(gradeConfig, { grade: Number(r.grade), name: String(r.name ?? '') }, segmentGradeIds),
+          )
+          .map((r) => r.id);
+      }
+    }
+    if (segmentClassIds !== null && segmentClassIds.length === 0) {
+      res.json({ teachers: [] });
+      return;
+    }
     const rows = (
       await pool.query(
-        `SELECT DISTINCT u.id,
-                COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.display_name), ''), u.username) AS name
-         FROM users u
-         WHERE u.role = 'teacher'
-           AND u.id IN (
-             SELECT a.teacher_id
-             FROM class_subject_teacher_assignments a
-             WHERE a.academic_year_id = $1
-               AND a.subject_key = ANY($2::varchar[])
-             UNION
-             SELECT a.teacher_id
-             FROM class_teacher_assignments a
-             JOIN classes c ON c.id = a.class_id
-             WHERE c.academic_year_id = $1
-               AND a.role = 'homeroom'
-               AND a.unassigned_at IS NULL
-           )
-         ORDER BY name ASC`,
-        [template.academicYearId, templateSubjectKeys],
+        segmentClassIds !== null
+          ? `SELECT DISTINCT u.id,
+                    COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.display_name), ''), u.username) AS name
+             FROM users u
+             WHERE u.role = 'teacher'
+               AND u.id IN (
+                 SELECT a.teacher_id
+                 FROM class_subject_teacher_assignments a
+                 WHERE a.academic_year_id = $1
+                   AND a.subject_key = ANY($2::varchar[])
+                   AND a.class_id = ANY($3::varchar[])
+                 UNION
+                 SELECT a.teacher_id
+                 FROM class_teacher_assignments a
+                 JOIN classes c ON c.id = a.class_id
+                 WHERE c.academic_year_id = $1
+                   AND c.id = ANY($3::varchar[])
+                   AND a.role = 'homeroom'
+                   AND a.unassigned_at IS NULL
+               )
+             ORDER BY name ASC`
+          : `SELECT DISTINCT u.id,
+                    COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.display_name), ''), u.username) AS name
+             FROM users u
+             WHERE u.role = 'teacher'
+               AND u.id IN (
+                 SELECT a.teacher_id
+                 FROM class_subject_teacher_assignments a
+                 WHERE a.academic_year_id = $1
+                   AND a.subject_key = ANY($2::varchar[])
+                 UNION
+                 SELECT a.teacher_id
+                 FROM class_teacher_assignments a
+                 JOIN classes c ON c.id = a.class_id
+                 WHERE c.academic_year_id = $1
+                   AND a.role = 'homeroom'
+                   AND a.unassigned_at IS NULL
+               )
+             ORDER BY name ASC`,
+        segmentClassIds !== null
+          ? [template.academicYearId, staffingSubjectKeys, segmentClassIds]
+          : [template.academicYearId, staffingSubjectKeys],
       )
     ).rows as Array<{ id: string; name: string }>;
     res.json({ teachers: rows });
@@ -1938,7 +2212,7 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
       res.status(400).json({ error: 'templateId required' });
       return;
     }
-    const template = await getTemplateById(templateId);
+    const template = await getTemplateForReportWorkflow(templateId);
     if (!template) {
       res.status(404).json({ error: 'Template not found' });
       return;
@@ -1987,15 +2261,46 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
     const teacherSubjectByClass = new Map<string, Set<string>>();
     const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
 
+    const segmentId = String(template.schoolSegmentId ?? '').trim();
+    const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+    const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
+    const staffingSubjectKeys = resolveStaffingSubjectKeysForReportTemplate(
+      templateSubjectKeys,
+      segmentId,
+      segmentGradeIds,
+      inclusionCtx,
+    );
     if (scopeTeacherId) {
       const scope = await loadTeacherReportScopeForTemplate(
         template.academicYearId,
         scopeTeacherId,
-        templateSubjectKeys,
+        staffingSubjectKeys,
       );
       classIds = scope.classIds;
       for (const cid of scope.homeroomClassIds) teacherHomeroomClassIds.add(cid);
       for (const [cid, keys] of scope.subjectByClass) teacherSubjectByClass.set(cid, keys);
+      if (segmentId) {
+        classIds = await filterClassIdsForReportSegment(template.academicYearId, classIds, segmentId);
+        const allowed = new Set(classIds);
+        for (const cid of Array.from(teacherHomeroomClassIds)) {
+          if (!allowed.has(cid)) teacherHomeroomClassIds.delete(cid);
+        }
+        for (const cid of Array.from(teacherSubjectByClass.keys())) {
+          if (!allowed.has(cid)) teacherSubjectByClass.delete(cid);
+        }
+      }
+      const filteredSubjects = await filterTeacherSubjectByClassForReportTemplate(
+        template.academicYearId,
+        teacherSubjectByClass,
+        templateSubjectKeys,
+        segmentId,
+        inclusionCtx,
+      );
+      teacherSubjectByClass.clear();
+      for (const [cid, keys] of filteredSubjects) teacherSubjectByClass.set(cid, keys);
+      classIds = Array.from(
+        new Set([...Array.from(teacherHomeroomClassIds), ...Array.from(teacherSubjectByClass.keys())]),
+      );
     }
 
     if (classIds.length === 0) {
@@ -2109,7 +2414,7 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
 
     const insightRows = (await pool.query(
       `SELECT class_id, subject_key,
-              CASE WHEN COALESCE(NULLIF(TRIM(teaching_reflection), ''), NULL) IS NULL THEN FALSE ELSE TRUE END AS has_reflection
+              CASE WHEN NULLIF(TRIM(class_overall_analysis), '') IS NOT NULL THEN TRUE ELSE FALSE END AS has_reflection
        FROM student_report_subject_class_insights
        WHERE template_id = $1`,
       [templateId],
@@ -2120,10 +2425,7 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
     }
 
     const templateSubjectByKey = new Map(template.subjects.map((s) => [s.subjectKey, s] as const));
-    const segmentId = String(template.schoolSegmentId ?? '').trim();
-    const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
-    const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
-    const gradeCatalogItems = await loadGradeConfigItemsForReport();
+    const gradeConfig = await loadSchoolGradeStructure();
     const classMap = new Map<string, {
       classId: string;
       className: string;
@@ -2144,22 +2446,9 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
     const classes = Array.from(classMap.values())
       .sort((a, b) => (a.grade - b.grade) || a.className.localeCompare(b.className))
       .map((cls) => {
-        const gradeCatalogId = gradeCatalogIdForClassLevel(gradeCatalogItems, cls.grade);
+        const gradeCatalogId = getGradeCatalogIdForClass(gradeConfig, cls.grade, { className: cls.className });
         const requiredSubjectKeys = Array.from(teacherSubjectByClass.get(cls.classId) ?? new Set<string>()).filter(
-          (subjectKey) => {
-            if (!templateSubjectByKey.has(subjectKey)) return false;
-            if (!segmentId || !gradeCatalogId) return true;
-            const courseId = inclusionCtx.subjectKeyToCourseId.get(subjectKey);
-            if (!courseId) return true;
-            return isEvaluationGradeIncluded(
-              segmentId,
-              courseId,
-              gradeCatalogId,
-              segmentGradeIds,
-              inclusionCtx.stageInclusion,
-              inclusionCtx.evaluationGradeInclusion,
-            );
-          },
+          (subjectKey) => templateSubjectByKey.has(subjectKey),
         );
         const isHomeroomForClass = teacherHomeroomClassIds.has(cls.classId);
         /** 纳入完成度阻塞：仅模板要求且该班班主任为当前教师 */
@@ -2205,7 +2494,9 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
                 subjectOk = false;
                 break;
               }
-              const requiredDimensionKeys = tplSubject.dimensions.map((d) => d.dimensionKey).filter((d) => !!d);
+              const requiredDimensionKeys = resolveTemplateDimensionsForGrade(tplSubject, gradeCatalogId)
+                .map((d) => d.dimensionKey)
+                .filter((d) => !!d);
               if (requiredDimensionKeys.length > 0) {
                 const ratedKeys = ratingKeysByReportAndSubject.get(key) ?? new Set<string>();
                 if (requiredDimensionKeys.some((dk) => !ratedKeys.has(dk))) {
@@ -2251,7 +2542,11 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
           homeroomCompletedStudents,
         };
       })
-      .filter((cls) => cls.totalStudents > 0);
+      .filter(
+        (cls) =>
+          cls.totalStudents > 0
+          && (cls.requiredSubjectKeys.length > 0 || cls.homeroomEvaluationAvailable),
+      );
 
     const totalStudents = classes.reduce((sum, cls) => sum + cls.totalStudents, 0);
     const completedStudents = classes.reduce((sum, cls) => sum + cls.completedStudents, 0);
@@ -2351,7 +2646,7 @@ router.get('/reports/templates/:templateId', async (req: ReqWithUserId, res: Res
       res.status(400).json({ error: 'templateId required' });
       return;
     }
-    const template = await getTemplateById(templateId);
+    const template = await getTemplateForReportWorkflow(templateId);
     if (!template) {
       res.status(404).json({ error: 'Template not found' });
       return;
@@ -2385,7 +2680,7 @@ router.get('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
-    const template = await getTemplateById(templateId);
+    const template = await getTemplateForReportWorkflow(templateId);
     if (!template) {
       res.status(404).json({ error: 'Template not found' });
       return;
@@ -2403,33 +2698,45 @@ router.get('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
     }
     const isAdminRole = role === 'system-admin' || role === 'admin';
     if (!isAdminRole && role === 'teacher') {
-      const canTeach = await teacherTeachesSubjectInClass(req.userId, template.academicYearId, classId, subjectKey);
-      if (!canTeach) {
-        res.status(403).json({ error: 'Forbidden: not assigned to teach this subject for this class' });
+      const segmentId = String(template.schoolSegmentId ?? '').trim();
+      const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+      const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
+      const canTeach = await teacherCanFillTemplateSubjectInClass(
+        req.userId,
+        template.academicYearId,
+        classId,
+        subjectKey,
+        templateSubjectKeys,
+        segmentId,
+        inclusionCtx,
+      );
+      const canHomeroom = await teacherIsHomeroomOfClass(req.userId, classId);
+      if (!canTeach && !canHomeroom) {
+        res.status(403).json({ error: 'Forbidden: not assigned to this class subject' });
         return;
       }
     }
     const row = (await pool.query(
-      `SELECT weakness_rows, teaching_reflection, updated_at
+      `SELECT weakness_rows, student_analysis_rows, class_overall_analysis, teaching_diagnosis, teaching_reflection, updated_at
        FROM student_report_subject_class_insights
        WHERE template_id = $1 AND class_id = $2 AND subject_key = $3
        LIMIT 1`,
       [templateId, classId, subjectKey],
     )).rows[0] as {
       weakness_rows: unknown;
+      student_analysis_rows: unknown;
+      class_overall_analysis: string | null;
+      teaching_diagnosis: unknown;
       teaching_reflection: string | null;
       updated_at: Date | null;
     } | undefined;
-    const weakPoints = Array.isArray(row?.weakness_rows)
-      ? (row?.weakness_rows as Array<{ weakPoint?: string; errorAnalysis?: string; nextPlan?: string }>)
-      : [];
+    const diagnosis = parseTeachingDiagnosisFromDb(row?.teaching_diagnosis, row?.teaching_reflection ?? null);
     res.json({
       insights: {
-        weaknessRows: weakPoints.map((w) => ({
-          weakPoint: String(w?.weakPoint ?? '').trim(),
-          errorAnalysis: String(w?.errorAnalysis ?? '').trim(),
-          nextPlan: String(w?.nextPlan ?? '').trim(),
-        })),
+        weaknessRows: parseWeaknessRowsFromDb(row?.weakness_rows),
+        classOverallAnalysis: String(row?.class_overall_analysis ?? '').trim() || null,
+        studentAnalysisRows: parseStudentAnalysisRowsFromDb(row?.student_analysis_rows),
+        teachingDiagnosis: teachingDiagnosisHasContent(diagnosis) ? diagnosis : null,
         teachingReflection: row?.teaching_reflection ?? null,
         updatedAt: row?.updated_at?.toISOString() ?? null,
       },
@@ -2457,7 +2764,7 @@ router.put('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
-    const template = await getTemplateById(templateId);
+    const template = await getTemplateForReportWorkflow(templateId);
     if (!template) {
       res.status(404).json({ error: 'Template not found' });
       return;
@@ -2468,30 +2775,45 @@ router.put('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
       return;
     }
     if (!isAdminRole && role === 'teacher') {
-      const canTeach = await teacherTeachesSubjectInClass(req.userId, template.academicYearId, classId, subjectKey);
+      const segmentId = String(template.schoolSegmentId ?? '').trim();
+      const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
+      const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
+      const canTeach = await teacherCanFillTemplateSubjectInClass(
+        req.userId,
+        template.academicYearId,
+        classId,
+        subjectKey,
+        templateSubjectKeys,
+        segmentId,
+        inclusionCtx,
+      );
       if (!canTeach) {
         res.status(403).json({ error: 'Forbidden: not assigned to teach this subject for this class' });
         return;
       }
     }
-    const weaknessRowsRaw = Array.isArray(req.body?.weaknessRows) ? req.body.weaknessRows as Array<unknown> : [];
-    const weaknessRows = weaknessRowsRaw
+    const classOverallAnalysis = String(req.body?.classOverallAnalysis ?? '').trim() || null;
+    const studentAnalysisRowsRaw = Array.isArray(req.body?.studentAnalysisRows)
+      ? (req.body.studentAnalysisRows as Array<unknown>)
+      : [];
+    const studentAnalysisRows = studentAnalysisRowsRaw
       .map((row) => row as Record<string, unknown>)
       .map((row) => ({
-        weakPoint: String(row.weakPoint ?? '').trim(),
-        errorAnalysis: String(row.errorAnalysis ?? '').trim(),
-        nextPlan: String(row.nextPlan ?? '').trim(),
+        studentId: String(row.studentId ?? '').trim(),
+        learningAnalysis: String(row.learningAnalysis ?? '').trim(),
+        supportPlan: String(row.supportPlan ?? '').trim(),
       }))
-      .filter((row) => row.weakPoint || row.errorAnalysis || row.nextPlan);
-    const teachingReflection = String(req.body?.teachingReflection ?? '').trim() || null;
+      .filter((row) => row.studentId);
     await pool.query(
       `INSERT INTO student_report_subject_class_insights
-        (id, template_id, academic_year_id, term, class_id, subject_key, weakness_rows, teaching_reflection, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+        (id, template_id, academic_year_id, term, class_id, subject_key, weakness_rows, class_overall_analysis, student_analysis_rows, teaching_reflection, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, '[]'::jsonb, $7, $8::jsonb, NULL, $9, $10)
        ON CONFLICT (template_id, class_id, subject_key)
        DO UPDATE SET
-         weakness_rows = EXCLUDED.weakness_rows,
-         teaching_reflection = EXCLUDED.teaching_reflection,
+         weakness_rows = '[]'::jsonb,
+         class_overall_analysis = EXCLUDED.class_overall_analysis,
+         student_analysis_rows = EXCLUDED.student_analysis_rows,
+         teaching_reflection = NULL,
          updated_by = EXCLUDED.updated_by,
          updated_at = CURRENT_TIMESTAMP`,
       [
@@ -2501,8 +2823,8 @@ router.put('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
         template.term,
         classId,
         subjectKey,
-        JSON.stringify(weaknessRows),
-        teachingReflection,
+        classOverallAnalysis,
+        JSON.stringify(studentAnalysisRows),
         req.userId,
         req.userId,
       ],
@@ -2580,7 +2902,7 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     }
     const viewerRole = await getUserRole(req);
     const hideScores = viewerRole === 'student';
-    const template = await getTemplateById(templateId);
+    const template = await getTemplateForReportWorkflow(templateId);
     if (!template || template.academicYearId !== academicYearId || template.term !== normalizedTerm) {
       res.status(404).json({ error: 'Template not found for selected year/term' });
       return;
@@ -2589,6 +2911,9 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       res.status(403).json({ error: 'Report is not released to students yet' });
       return;
     }
+    const segmentId = String(template.schoolSegmentId ?? '').trim();
+    const inclusionCtx = await loadReportYearInclusionContext(academicYearId);
+    const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
     let filterTeacherSubjectsToStaffing = viewerRole === 'teacher' && !!req.userId;
     if (filterTeacherSubjectsToStaffing) {
       await ensureClassTeacherAssignmentsTable(pool);
@@ -2608,6 +2933,8 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         filterTeacherSubjectsToStaffing = false;
       }
     }
+    const gradeCatalogIdForResolve = await gradeCatalogIdForStudentEnrollment(studentId, academicYearId);
+    const segmentGradeIdsForFilter = segmentId ? await loadSegmentGradeIds(segmentId) : [];
     const reportRow = (await pool.query(
       `SELECT id, student_id, academic_year_id, term, template_id, homeroom_comment, created_at, updated_at
        FROM student_term_reports
@@ -2634,12 +2961,31 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         if (cid) {
           tplSubjectsEmpty = [];
           for (const s of template.subjects) {
-            if (await teacherTeachesSubjectInClass(req.userId!, academicYearId, cid, s.subjectKey)) {
+            if (
+              await teacherCanFillTemplateSubjectInClass(
+                req.userId!,
+                academicYearId,
+                cid,
+                s.subjectKey,
+                templateSubjectKeys,
+                segmentId,
+                inclusionCtx,
+              )
+            ) {
               tplSubjectsEmpty.push(s);
             }
           }
         }
+      } else if (gradeCatalogIdForResolve) {
+        tplSubjectsEmpty = filterSubjectsForGradeCatalog(
+          tplSubjectsEmpty,
+          segmentId,
+          gradeCatalogIdForResolve,
+          segmentGradeIdsForFilter,
+          inclusionCtx,
+        );
       }
+      tplSubjectsEmpty = templateSubjectsForGradeCatalog(tplSubjectsEmpty, gradeCatalogIdForResolve);
       res.json({
         report: {
           id: null,
@@ -2689,18 +3035,57 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       if (cid) {
         subjectRows = [];
         for (const row of subjectRowsRaw) {
-          if (await teacherTeachesSubjectInClass(req.userId!, academicYearId, cid, row.subject_key)) {
+          if (
+            await teacherCanFillTemplateSubjectInClass(
+              req.userId!,
+              academicYearId,
+              cid,
+              row.subject_key,
+              templateSubjectKeys,
+              segmentId,
+              inclusionCtx,
+            )
+          ) {
             subjectRows.push(row);
           }
         }
         templateSubjectsOut = [];
         for (const s of template.subjects) {
-          if (await teacherTeachesSubjectInClass(req.userId!, academicYearId, cid, s.subjectKey)) {
+          if (
+            await teacherCanFillTemplateSubjectInClass(
+              req.userId!,
+              academicYearId,
+              cid,
+              s.subjectKey,
+              templateSubjectKeys,
+              segmentId,
+              inclusionCtx,
+            )
+          ) {
             templateSubjectsOut.push(s);
           }
         }
       }
+    } else if (gradeCatalogIdForResolve) {
+      const applicableKeys = new Set(
+        filterSubjectsForGradeCatalog(
+          template.subjects,
+          segmentId,
+          gradeCatalogIdForResolve,
+          segmentGradeIdsForFilter,
+          inclusionCtx,
+        ).map((s) => s.subjectKey),
+      );
+      subjectRows = subjectRows.filter((r) => applicableKeys.has(r.subject_key));
+      templateSubjectsOut = filterSubjectsForGradeCatalog(
+        templateSubjectsOut,
+        segmentId,
+        gradeCatalogIdForResolve,
+        segmentGradeIdsForFilter,
+        inclusionCtx,
+      );
     }
+    templateSubjectsOut = templateSubjectsForGradeCatalog(templateSubjectsOut, gradeCatalogIdForResolve);
 
     const subjectReportIds = subjectRows.map((s) => s.id);
     let dimensionsBySubject = new Map<
@@ -2782,18 +3167,56 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       }
     }
 
+    const examConfigsForResolve = await loadSanitizedExamConfigsForYear(academicYearId);
+
     const subjectReports = subjectRows.map((s) => {
+      const tplSubject = template.subjects.find((t) => t.subjectKey === s.subject_key);
+      const effectiveEnableScore = tplSubject
+        ? effectiveTemplateSubjectEnableScore(
+            normalizedTerm,
+            segmentId,
+            s.subject_key,
+            gradeCatalogIdForResolve,
+            segmentGradeIdsForFilter,
+            tplSubject.enableScore,
+            inclusionCtx,
+          )
+        : false;
       const lq = String(s.learning_quality_grade ?? '').trim();
       const learningQualityGrade =
         lq === 'A' || lq === 'B' || lq === 'C' || lq === 'D' ? (lq as TargetLevel) : null;
+      const midtermScoreNum =
+        hideScores || !effectiveEnableScore ? null : (s.midterm_score == null ? null : Number(s.midterm_score));
+      const finalScoreNum =
+        hideScores || !effectiveEnableScore ? null : (s.final_score == null ? null : Number(s.final_score));
       return {
         id: s.id,
         subjectKey: s.subject_key,
         subjectName: s.subject_name,
-        midtermScore: hideScores ? null : (s.midterm_score == null ? null : Number(s.midterm_score)),
-        midtermGrade: (s.midterm_grade as ReportGrade | null) ?? null,
-        finalScore: hideScores ? null : (s.final_score == null ? null : Number(s.final_score)),
-        finalGrade: (s.final_grade as ReportGrade | null) ?? null,
+        midtermScore: midtermScoreNum,
+        midtermGrade:
+          hideScores || !effectiveEnableScore
+            ? null
+            : resolveSubjectAssessmentGradeFromDb(
+                s.midterm_grade,
+                midtermScoreNum,
+                s.subject_key,
+                template,
+                gradeCatalogIdForResolve,
+                examConfigsForResolve,
+              ),
+        finalScore: finalScoreNum,
+        finalGrade:
+          hideScores || !effectiveEnableScore
+            ? null
+            : resolveSubjectAssessmentGradeFromDb(
+                s.final_grade,
+                finalScoreNum,
+                s.subject_key,
+                template,
+                gradeCatalogIdForResolve,
+                examConfigsForResolve,
+              ),
         learningQualityGrade,
         examDimensionScores:
           s.exam_dimension_scores && typeof s.exam_dimension_scores === 'object'
@@ -2906,7 +3329,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
-    const template = await getTemplateById(templateId);
+    const template = await getTemplateForReportWorkflow(templateId);
     if (!template || template.academicYearId !== academicYearId || template.term !== normalizedTerm) {
       res.status(409).json({ error: 'No report template configured for this term' });
       return;
@@ -2944,18 +3367,25 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     }
 
     const enrollmentClassId = await enrollmentClassForStudentYear(studentId, academicYearId);
-    const gradeItems = await loadGradeConfigItemsForReport();
-    let classNumericGrade: number | null = null;
-    if (enrollmentClassId) {
-      const cg = await pool.query(`SELECT grade FROM classes WHERE id = $1 LIMIT 1`, [enrollmentClassId]);
-      const g = Number((cg.rows[0] as { grade?: unknown } | undefined)?.grade);
-      classNumericGrade = Number.isFinite(g) ? g : null;
-    }
-    const gradeCatalogId =
-      classNumericGrade != null ? gradeCatalogIdForClassLevel(gradeItems, classNumericGrade) : null;
+    const gradeCatalogId = await gradeCatalogIdForStudentEnrollment(studentId, academicYearId);
+    const activeTemplateDimensions = resolveTemplateDimensionsForGrade(templateSubject, gradeCatalogId);
     const segmentId = String(template.schoolSegmentId ?? '').trim();
     const segmentGradeIds = segmentId ? await loadSegmentGradeIds(segmentId) : [];
     const inclusionCtx = await loadReportYearInclusionContext(academicYearId);
+    if (
+      gradeCatalogId
+      && segmentId
+      && !isTemplateSubjectRequiredForGrade(
+        String(subjectKey).trim(),
+        segmentId,
+        gradeCatalogId,
+        segmentGradeIds,
+        inclusionCtx,
+      )
+    ) {
+      res.status(400).json({ error: 'This subject is not required for the student grade in this report' });
+      return;
+    }
     const effectiveEnableScore = effectiveTemplateSubjectEnableScore(
       normalizedTerm,
       segmentId,
@@ -2970,11 +3400,15 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         res.status(400).json({ error: 'Student has no class enrollment for this academic year' });
         return;
       }
-      const canTeach = await teacherTeachesSubjectInClass(
+      const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
+      const canTeach = await teacherCanFillTemplateSubjectInClass(
         req.userId,
         academicYearId,
         enrollmentClassId,
         String(subjectKey).trim(),
+        templateSubjectKeys,
+        segmentId,
+        inclusionCtx,
       );
       if (!canTeach) {
         res.status(403).json({ error: 'Forbidden: not assigned to teach this subject for this class' });
@@ -2982,11 +3416,16 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       }
     }
 
-    const hasExamDimInput =
+    const hasLegacyExamDimInput =
       Boolean(
         effectiveEnableScore &&
           examDimensionScoresInput &&
-          templateSubject.dimensions.length > 0,
+          activeTemplateDimensions.length > 0 &&
+          Object.values(examDimensionScoresInput).some((v) => {
+            if (v === '' || v == null) return false;
+            const n = Number(v);
+            return Number.isFinite(n);
+          }),
       );
 
     const parseScore = (v: unknown): number | null => {
@@ -2995,7 +3434,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       return Number.isFinite(n) ? n : Number.NaN;
     };
     const midtermScore = effectiveEnableScore ? parseScore(midtermScoreInput) : null;
-    let finalScore = effectiveEnableScore && !hasExamDimInput ? parseScore(finalScoreInput) : null;
+    let finalScore = effectiveEnableScore && !hasLegacyExamDimInput ? parseScore(finalScoreInput) : null;
     let learningQualityGrade: string | null = null;
     if (templateSubject.enableLearningQuality !== false) {
       const v = String(learningQualityInput ?? '').trim();
@@ -3005,7 +3444,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       res.status(400).json({ error: 'Scores must be numbers' });
       return;
     }
-    if (!hasExamDimInput && effectiveEnableScore && Number.isNaN(finalScore)) {
+    if (!hasLegacyExamDimInput && effectiveEnableScore && Number.isNaN(finalScore)) {
       res.status(400).json({ error: 'Scores must be numbers' });
       return;
     }
@@ -3013,8 +3452,17 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       res.status(400).json({ error: 'Scores must be between 0 and 100' });
       return;
     }
-    if (!hasExamDimInput && finalScore != null && (finalScore < 0 || finalScore > 100)) {
-      res.status(400).json({ error: 'Scores must be between 0 and 100' });
+    let examFullMark = 100;
+    if (!hasLegacyExamDimInput && effectiveEnableScore) {
+      const examConfigsAllEarly = await loadSanitizedExamConfigsForYear(academicYearId);
+      const examKeyEarly = `${normalizedTerm}::${String(template.schoolSegmentId ?? '').trim()}`;
+      const examScopeEarly = examConfigsAllEarly[examKeyEarly];
+      const examSubjectEarly = examScopeEarly?.subjects?.find((s) => s.subjectKey === String(subjectKey).trim());
+      const examGEarly = pickExamGradeConfig(examSubjectEarly?.gradeConfigs ?? [], gradeCatalogId);
+      examFullMark = examFullScoreFromGradeConfig(examGEarly?.fullScore, examGEarly?.percentBands);
+    }
+    if (!hasLegacyExamDimInput && finalScore != null && (finalScore < 0 || finalScore > examFullMark)) {
+      res.status(400).json({ error: `Scores must be between 0 and ${examFullMark}` });
       return;
     }
 
@@ -3023,16 +3471,16 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     let resolvedMaxByKey = new Map<string, number>();
     let resolvedLetterMins = template.scoreGradeMinScores;
 
-    if (hasExamDimInput) {
+    if (hasLegacyExamDimInput) {
       const examConfigsAll = await loadSanitizedExamConfigsForYear(academicYearId);
       const examKey = `${normalizedTerm}::${String(template.schoolSegmentId ?? '').trim()}`;
       const examScope = examConfigsAll[examKey];
       const examSubject = examScope?.subjects?.find((s) => s.subjectKey === String(subjectKey).trim());
       const examG = pickExamGradeConfig(examSubject?.gradeConfigs ?? [], gradeCatalogId);
-      const dimsForMatch = templateSubject.dimensions.map((d) => ({
+      const dimsForMatch = activeTemplateDimensions.map((d) => ({
         dimensionKey: d.dimensionKey,
-        dimensionLabelZh: d.dimensionLabelZh,
-        dimensionLabelEn: d.dimensionLabelEn,
+        dimensionLabelZh: d.dimensionLabelZh ?? d.dimensionLabel,
+        dimensionLabelEn: d.dimensionLabelEn ?? d.dimensionLabel,
       }));
       const dimensionMaxByKey = matchDimensionMaxByKey(dimsForMatch, examG?.dimensionScores ?? []);
       resolvedMaxByKey = dimensionMaxByKey;
@@ -3048,7 +3496,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       let allFilled = true;
       let sum = 0;
       let totalMax = 0;
-      for (const dim of templateSubject.dimensions) {
+      for (const dim of activeTemplateDimensions) {
         const key = String(dim.dimensionKey ?? '').trim();
         if (!key) continue;
         const maxPts = dimensionMaxByKey.get(key) ?? 100;
@@ -3071,6 +3519,20 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       const totalPct = finalScore != null && totalMax > 0 ? (finalScore / totalMax) * 100 : null;
       finalGradeForDb = totalPct == null ? null : toReportGrade(totalPct, letterGradeMins);
       examDimensionScores = scoresOut;
+    } else if (effectiveEnableScore) {
+      examDimensionScores = null;
+      if (finalScore != null) {
+        const examConfigsAll = await loadSanitizedExamConfigsForYear(academicYearId);
+        const examKey = `${normalizedTerm}::${String(template.schoolSegmentId ?? '').trim()}`;
+        const examScope = examConfigsAll[examKey];
+        const examSubject = examScope?.subjects?.find((s) => s.subjectKey === String(subjectKey).trim());
+        const examG = pickExamGradeConfig(examSubject?.gradeConfigs ?? [], gradeCatalogId);
+        const configuredBands = configuredReportScoreGradeMins(examG?.percentBands ?? {});
+        const hasExamBands = Object.keys(configuredBands).length > 0;
+        finalGradeForDb = hasExamBands
+          ? reportLetterGradeFromExamPercentBands(finalScore, examG?.fullScore, examG?.percentBands)
+          : toReportGrade(finalScore, template.scoreGradeMinScores);
+      }
     }
 
     await client.query('BEGIN');
@@ -3157,8 +3619,8 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       ratingByKey.set(key, rating);
     }
 
-    for (let i = 0; i < templateSubject.dimensions.length; i += 1) {
-      const dim = templateSubject.dimensions[i];
+    for (let i = 0; i < activeTemplateDimensions.length; i += 1) {
+      const dim = activeTemplateDimensions[i];
       const key = String(dim.dimensionKey ?? '').trim();
       const label = String(dim.dimensionLabel ?? '').trim();
       const dimScore = examDimensionScores?.[key];
@@ -3332,5 +3794,178 @@ router.post('/academic-years/:sourceYearId/promote', requireAdmin(async (req: Re
     client.release();
   }
 }));
+
+router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureTeacherPortraitCollectionTables();
+    const yearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    const term = req.query.term === 'Semester 1' || req.query.term === 'Semester 2' ? req.query.term : null;
+    const role = await getUserRole(req);
+    const isAdmin = role === 'system-admin' || role === 'admin';
+    const where: string[] = [];
+    const values: unknown[] = [];
+    if (!isAdmin) {
+      where.push(`t.status IN ('published', 'closed')`);
+    }
+    if (yearId) {
+      values.push(yearId);
+      where.push(`t.academic_year_id = $${values.length}`);
+    }
+    if (term) {
+      values.push(term);
+      where.push(`t.term = $${values.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const rows = (await pool.query(
+      `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
+              t.published_at, t.updated_at, ay.name AS academic_year_name
+       FROM teacher_portrait_collection_templates t
+       JOIN academic_years ay ON ay.id = t.academic_year_id
+       ${whereSql}
+       ORDER BY t.updated_at DESC NULLS LAST`,
+      values,
+    )).rows;
+    const userId = req.userId;
+    let mySubmissions: Array<{ templateId: string; hasContent: boolean; updatedAt: string | null }> = [];
+    if (userId && role === 'teacher') {
+      const subs = (await pool.query(
+        `SELECT template_id, diagnosis, updated_at
+         FROM teacher_portrait_collection_submissions
+         WHERE teacher_id = $1`,
+        [userId],
+      )).rows;
+      mySubmissions = subs.map((s) => {
+        const d = parsePortraitDiagnosis(s.diagnosis);
+        return {
+          templateId: s.template_id as string,
+          hasContent: portraitDiagnosisHasContent(d),
+          updatedAt: (s.updated_at as Date | null)?.toISOString() ?? null,
+        };
+      });
+    }
+    const submissionByTemplate = new Map(mySubmissions.map((s) => [s.templateId, s]));
+    const templates = rows.map((r) => {
+      const id = r.id as string;
+      const mine = submissionByTemplate.get(id);
+      return {
+        id,
+        academicYearId: r.academic_year_id as string,
+        academicYearName: r.academic_year_name as string,
+        term: r.term as string,
+        title: (r.title as string | null) ?? null,
+        collectionType: r.collection_type as string,
+        status: r.status as string,
+        publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
+        updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
+        mySubmission: mine
+          ? { hasContent: mine.hasContent, updatedAt: mine.updatedAt }
+          : { hasContent: false, updatedAt: null },
+      };
+    });
+    res.json({ templates });
+  } catch (error) {
+    console.error('List teacher portrait collections error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/teacher-portrait/collections/:templateId', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureTeacherPortraitCollectionTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    const userId = req.userId;
+    if (!templateId || !userId) {
+      return res.status(400).json({ error: 'templateId and authenticated user required' });
+    }
+    const role = await getUserRole(req);
+    const template = await getTeacherPortraitTemplateById(templateId);
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+    const isAdmin = role === 'system-admin' || role === 'admin';
+    if (!isAdmin && template.status === 'draft') {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    let diagnosis = portraitEmptyDiagnosis();
+    let updatedAt: string | null = null;
+    if (role === 'teacher') {
+      const row = (await pool.query(
+        `SELECT diagnosis, updated_at FROM teacher_portrait_collection_submissions
+         WHERE template_id = $1 AND teacher_id = $2 LIMIT 1`,
+        [templateId, userId],
+      )).rows[0];
+      if (row) {
+        diagnosis = parsePortraitDiagnosis(row.diagnosis);
+        updatedAt = (row.updated_at as Date | null)?.toISOString() ?? null;
+      }
+    }
+    res.json({
+      template: {
+        ...template,
+        canEdit: role === 'teacher' && template.status === 'published',
+      },
+      submission: {
+        diagnosis,
+        hasContent: portraitDiagnosisHasContent(diagnosis),
+        updatedAt,
+      },
+    });
+  } catch (error) {
+    console.error('Get teacher portrait collection error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/teacher-portrait/collections/:templateId', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureTeacherPortraitCollectionTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    const userId = req.userId;
+    if (!templateId || !userId) {
+      return res.status(400).json({ error: 'templateId and authenticated user required' });
+    }
+    const role = await getUserRole(req);
+    if (role !== 'teacher') {
+      return res.status(403).json({ error: 'Only teachers can submit collection responses' });
+    }
+    const template = await getTeacherPortraitTemplateById(templateId);
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+    if (template.status !== 'published') {
+      return res.status(409).json({ error: 'Collection is not open for submission' });
+    }
+    if (template.collectionType !== 'teaching-diagnosis-kiss') {
+      return res.status(400).json({ error: 'Unsupported collection type' });
+    }
+    const raw = req.body?.diagnosis as PortraitDiagnosisPayload | undefined;
+    const diagnosis: PortraitDiagnosisPayload = {
+      keep: String(raw?.keep ?? '').trim(),
+      improve: String(raw?.improve ?? '').trim(),
+      stop: String(raw?.stop ?? '').trim(),
+      start: String(raw?.start ?? '').trim(),
+    };
+    const submissionId = `tpcs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const result = await pool.query(
+      `INSERT INTO teacher_portrait_collection_submissions
+         (id, template_id, teacher_id, diagnosis, created_by, updated_by)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $5)
+       ON CONFLICT (template_id, teacher_id)
+       DO UPDATE SET diagnosis = EXCLUDED.diagnosis,
+                     updated_by = EXCLUDED.updated_by,
+                     updated_at = CURRENT_TIMESTAMP
+       RETURNING updated_at`,
+      [submissionId, templateId, userId, JSON.stringify(diagnosis), userId],
+    );
+    const updatedAt = (result.rows[0]?.updated_at as Date | null)?.toISOString() ?? null;
+    res.json({
+      success: true,
+      submission: {
+        diagnosis,
+        hasContent: portraitDiagnosisHasContent(diagnosis),
+        updatedAt,
+      },
+    });
+  } catch (error) {
+    console.error('Save teacher portrait collection error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 export default router;

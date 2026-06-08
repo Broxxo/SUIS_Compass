@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
@@ -23,14 +23,30 @@ import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import { fullUnifiedLevelTextFromPreset } from '../lib/reportPresetUnifiedLevels';
 import {
   reportLetterGradeFromScore,
+  reportLetterGradeFromExamPercentBands,
   mergeReportScoreGradeMinScores,
-  reportPercentToTargetLevel,
-  reportScoreLetterGradeToTargetLevel,
-  isExamGradeIncluded,
+  examFullScoreFromGradeConfig,
+  configuredReportScoreGradeMins,
+  effectiveTemplateSubjectEnableScore,
+  pickPreferredPublishedTask,
+  resolveTemplateDimensionsForGrade,
 } from '@repo/shared';
-import { normalizeGradeConfig, getSchoolSegmentIdForStudentGradeLevel } from '../lib/gradeConfig';
-import { loadGradeConfigSync } from '../lib/storage';
+import type { GradeConfig } from '../types';
+import {
+  normalizeGradeConfig,
+  getGradeCatalogIdForClass,
+  getSchoolSegmentIdForStudentGradeLevel,
+  getSegmentGradeIds,
+  countStudentsBySchoolSegment,
+} from '../lib/gradeConfig';
+import { loadGradeConfig, loadGradeConfigSync } from '../lib/storage';
 import { PortraitLensWorkspace, type PortraitLensTab } from './student-portrait/PortraitLensWorkspace';
+import {
+  AcademicYearSelect,
+  FilterSelect,
+  FilterToolbar,
+  TermSelect,
+} from './academicPeriodSelectors';
 import { applyAcademicReportPdfReflow } from '../lib/academicReportPdfCloneFix';
 
 type PortraitTab = 'overview' | 'my-students' | 'academic-reports';
@@ -56,17 +72,74 @@ type SubjectDraft = {
   }>;
 };
 
-type ClassWeaknessRowDraft = {
-  weakPoint: string;
-  errorAnalysis: string;
-  nextPlan: string;
+type StudentAnalysisRowDraft = {
+  studentId: string;
+  learningAnalysis: string;
+  supportPlan: string;
 };
 
-function makeDefaultWorkbenchWeaknessRows(): ClassWeaknessRowDraft[] {
-  return [
-    { weakPoint: '', errorAnalysis: '', nextPlan: '' },
-    { weakPoint: '', errorAnalysis: '', nextPlan: '' },
-  ];
+function mergeStudentAnalysisRowsWithRoster(
+  roster: Array<{ studentId: string }>,
+  saved: StudentAnalysisRowDraft[],
+): StudentAnalysisRowDraft[] {
+  const byId = new Map(saved.map((r) => [r.studentId, r]));
+  return roster.map((s) => {
+    const hit = byId.get(s.studentId);
+    return {
+      studentId: s.studentId,
+      learningAnalysis: hit?.learningAnalysis ?? '',
+      supportPlan: hit?.supportPlan ?? '',
+    };
+  });
+}
+
+const WORKBENCH_ANALYSIS_TEXTAREA_MIN_PX = 72;
+/** 个别学生分析：在默认高度上缩减约 30% */
+const WORKBENCH_STUDENT_ANALYSIS_TEXTAREA_MIN_PX = 50;
+const WORKBENCH_STUDENT_ANALYSIS_VISIBLE_ROWS = 5;
+/** 表头 + 约 5 行学生（含单元格内边距）的可视高度，超出部分纵向滚动 */
+const WORKBENCH_STUDENT_ANALYSIS_SCROLL_MAX_PX =
+  40 + WORKBENCH_STUDENT_ANALYSIS_VISIBLE_ROWS * (WORKBENCH_STUDENT_ANALYSIS_TEXTAREA_MIN_PX + 24);
+
+function WorkbenchAutoGrowTextarea({
+  value,
+  onChange,
+  disabled,
+  ariaLabel,
+  compact = false,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  disabled?: boolean;
+  ariaLabel: string;
+  /** 个别学生分析用：更矮的起始高度，仍可拖拽拉高与随内容增高 */
+  compact?: boolean;
+}) {
+  const minPx = compact ? WORKBENCH_STUDENT_ANALYSIS_TEXTAREA_MIN_PX : WORKBENCH_ANALYSIS_TEXTAREA_MIN_PX;
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const adjustHeight = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.max(el.scrollHeight, minPx)}px`;
+  }, [minPx]);
+  useEffect(() => {
+    adjustHeight();
+  }, [value, adjustHeight]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={(e: ChangeEvent<HTMLTextAreaElement>) => onChange(e.target.value)}
+      onInput={adjustHeight}
+      rows={compact ? 2 : 3}
+      className={`w-full resize-y overflow-hidden rounded border border-slate-300 px-2 py-1.5 text-sm leading-relaxed ${
+        compact ? 'min-h-[3.15rem]' : 'min-h-[4.5rem]'
+      }`}
+      disabled={disabled}
+      aria-label={ariaLabel}
+    />
+  );
 }
 
 type WorkbenchStudentSubjectDraft = {
@@ -92,19 +165,42 @@ type ClassReportSnapshotItem = {
 };
 
 /**
- * GET 报告详情可能按角色过滤 subjectReports；与模板合并后才能稳定展示全部学科行（与初次进入页面的 useEffect 逻辑一致）。
+ * 将 API 已按年级过滤的报告与模板维度对齐；学生端仅展示已保存学科，不补占位等第。
  */
+function gradeCatalogIdForStudentGrade(
+  gradeConfig: GradeConfig,
+  gradeLevel: number | null | undefined,
+  className?: string | null,
+): string | null {
+  if (gradeLevel == null || !Number.isFinite(gradeLevel)) return null;
+  return getGradeCatalogIdForClass(gradeConfig, gradeLevel, { className: className ?? undefined });
+}
+
+type MergeStudentTermReportOptions = {
+  /** 教师工作台：为模板学科补空白行；学生端仅展示已保存学科 */
+  padMissingSubjects?: boolean;
+  /** 无教师填写数据时，等第显示为「—」而非占位 A */
+  blankUnsetRatings?: boolean;
+};
+
 function mergeStudentTermReportWithTemplate(
   detail: StudentTermReport,
-  template: ReportTemplate | null
+  template: ReportTemplate | null,
+  gradeCatalogId?: string | null,
+  options?: MergeStudentTermReportOptions,
 ): StudentTermReport {
+  const padMissingSubjects = options?.padMissingSubjects ?? false;
+  const blankUnsetRatings = options?.blankUnsetRatings ?? false;
+  const defaultRating = (rating: TargetLevel | null | undefined): TargetLevel | null =>
+    (rating ?? (blankUnsetRatings ? null : 'A')) as TargetLevel | null;
+
   const normalized: StudentTermReport = {
     ...detail,
     subjectReports: (detail.subjectReports ?? []).map((s) => ({
       ...s,
       dimensions: (s.dimensions ?? []).map((d) => ({
         ...d,
-        rating: (d.rating ?? 'A') as TargetLevel,
+        rating: defaultRating(d.rating) as TargetLevel,
       })),
     })),
   };
@@ -112,49 +208,56 @@ function mergeStudentTermReportWithTemplate(
   if (tplSubjects.length === 0) {
     return normalized;
   }
-  const mergedSubjects: StudentTermSubjectReport[] = tplSubjects.map((tplSubject) => {
-    const existing = normalized.subjectReports.find((s) => s.subjectKey === tplSubject.subjectKey);
-    if (existing) {
-      return {
-        ...existing,
+  const savedByKey = new Map(
+    normalized.subjectReports.map((s) => [String(s.subjectKey ?? '').trim(), s] as const),
+  );
+  const mergedSubjects: StudentTermSubjectReport[] = [];
+  for (const tplSubject of tplSubjects) {
+    const tplDims = resolveTemplateDimensionsForGrade(tplSubject, gradeCatalogId ?? null);
+    const existing = savedByKey.get(String(tplSubject.subjectKey ?? '').trim());
+    if (!existing) {
+      if (!padMissingSubjects) continue;
+      mergedSubjects.push({
+        id: `tpl-${tplSubject.id}`,
+        subjectKey: tplSubject.subjectKey,
         subjectName: tplSubject.subjectName,
-        learningQualityGrade: (existing.learningQualityGrade ?? 'A') as TargetLevel,
-        dimensions: tplSubject.dimensions.map((tplDim) => {
-          const oldDim = existing.dimensions.find((d) => d.dimensionKey === tplDim.dimensionKey);
-          return {
-            id: oldDim?.id ?? tplDim.id,
-            dimensionKey: tplDim.dimensionKey,
-            dimensionLabel: tplDim.dimensionLabel,
-            sortOrder: tplDim.sortOrder,
-            rating: (oldDim?.rating ?? 'A') as TargetLevel,
-            levelDescriptions: tplDim.levelDescriptions,
-          };
-        }),
-      };
+        midtermScore: null,
+        midtermGrade: null,
+        finalScore: null,
+        finalGrade: null,
+        learningQualityGrade: (blankUnsetRatings ? null : 'A') as TargetLevel,
+        teacherComment: null,
+        teacherId: null,
+        dimensions: tplDims.map((d) => ({
+          id: d.id ?? `tpl-dim-${d.dimensionKey}`,
+          dimensionKey: d.dimensionKey,
+          dimensionLabel: d.dimensionLabel,
+          sortOrder: d.sortOrder,
+          rating: (blankUnsetRatings ? null : 'A') as TargetLevel,
+          levelDescriptions: d.levelDescriptions ?? {},
+        })),
+        createdAt: null,
+        updatedAt: null,
+      });
+      continue;
     }
-    return {
-      id: `tpl-${tplSubject.id}`,
-      subjectKey: tplSubject.subjectKey,
+    mergedSubjects.push({
+      ...existing,
       subjectName: tplSubject.subjectName,
-      midtermScore: null,
-      midtermGrade: null,
-      finalScore: null,
-      finalGrade: null,
-      learningQualityGrade: 'A' as TargetLevel,
-      teacherComment: null,
-      teacherId: null,
-      dimensions: tplSubject.dimensions.map((d) => ({
-        id: d.id,
-        dimensionKey: d.dimensionKey,
-        dimensionLabel: d.dimensionLabel,
-        sortOrder: d.sortOrder,
-        rating: 'A' as TargetLevel,
-        levelDescriptions: d.levelDescriptions,
-      })),
-      createdAt: null,
-      updatedAt: null,
-    };
-  });
+      learningQualityGrade: defaultRating(existing.learningQualityGrade) as TargetLevel,
+      dimensions: tplDims.map((tplDim) => {
+        const oldDim = existing.dimensions.find((d) => d.dimensionKey === tplDim.dimensionKey);
+        return {
+          id: oldDim?.id ?? tplDim.id,
+          dimensionKey: tplDim.dimensionKey,
+          dimensionLabel: tplDim.dimensionLabel,
+          sortOrder: tplDim.sortOrder,
+          rating: defaultRating(oldDim?.rating) as TargetLevel,
+          levelDescriptions: tplDim.levelDescriptions,
+        };
+      }),
+    });
+  }
   return { ...normalized, subjectReports: mergedSubjects };
 }
 
@@ -166,7 +269,6 @@ function reportTermLabel(term: Term, isZh: boolean): string {
 function hasStudentReportContent(report: StudentTermReport): boolean {
   if ((report.homeroomComment ?? '').trim()) return true;
   return report.subjectReports.some((s) => {
-    if ((s.teacherComment ?? '').trim()) return true;
     if (s.finalScore != null || s.midtermScore != null) return true;
     if (s.finalGrade || s.midtermGrade) return true;
     if (s.learningQualityGrade) return true;
@@ -175,26 +277,62 @@ function hasStudentReportContent(report: StudentTermReport): boolean {
   });
 }
 
-function matchWorkbenchDimensionMaxes(
-  templateDims: Array<{ dimensionKey: string; dimensionLabelZh: string; dimensionLabelEn: string }>,
-  examDims: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>,
-): Map<string, number> {
-  const byLabel = new Map<string, number>();
-  for (const e of examDims) {
-    byLabel.set(`${e.dimensionLabelZh.trim()}\t${e.dimensionLabelEn.trim()}`, e.score);
+function workbenchExamLetterGrade(
+  score: number | null | undefined,
+  rules: {
+    examFullScore: number | null;
+    configuredBands: Partial<Record<string, number>> | null;
+    letterMins: Partial<Record<string, number>>;
+  },
+) {
+  if (score == null || !Number.isFinite(score)) return null;
+  if (rules.configuredBands && Object.keys(rules.configuredBands).length > 0) {
+    return reportLetterGradeFromExamPercentBands(score, rules.examFullScore, rules.configuredBands);
   }
-  const out = new Map<string, number>();
-  for (let i = 0; i < templateDims.length; i += 1) {
-    const d = templateDims[i];
-    const key = String(d.dimensionKey ?? '').trim();
-    if (!key) continue;
-    const zh = String(d.dimensionLabelZh ?? '').trim();
-    const en = String(d.dimensionLabelEn ?? '').trim();
-    let max = zh && en ? byLabel.get(`${zh}\t${en}`) : undefined;
-    if (max == null) max = examDims[i]?.score;
-    if (max != null && Number.isFinite(max) && max > 0) out.set(key, max);
+  return reportLetterGradeFromScore(score, rules.letterMins);
+}
+
+type ReportExamPresetSlice = {
+  examConfigs?: Record<string, ReportExamConfigScope>;
+};
+
+function buildExamScoreRulesForSubject(
+  tpl: ReportTemplate | null,
+  examPreset: ReportExamPresetSlice | null,
+  subjectKey: string,
+  gradeCatalogId: string | null,
+): {
+  examFullScore: number | null;
+  configuredBands: Partial<Record<string, number>> | null;
+  letterMins: Partial<Record<string, number>>;
+} {
+  const letterFallback = mergeReportScoreGradeMinScores(tpl?.scoreGradeMinScores ?? {});
+  if (!tpl || !examPreset?.examConfigs) {
+    return { examFullScore: null, configuredBands: null, letterMins: letterFallback };
   }
-  return out;
+  const examKey = `${tpl.term}::${String(tpl.schoolSegmentId ?? '').trim()}`;
+  const scope = examPreset.examConfigs[examKey];
+  const examSubject = scope?.subjects?.find((s) => s.subjectKey === subjectKey);
+  const examG =
+    examSubject?.gradeConfigs?.find((g) => g.gradeId === gradeCatalogId) ?? examSubject?.gradeConfigs?.[0] ?? null;
+  const configuredBands = configuredReportScoreGradeMins(examG?.percentBands ?? {});
+  const hasExamBands = Object.keys(configuredBands).length > 0;
+  return {
+    examFullScore: hasExamBands ? examFullScoreFromGradeConfig(examG?.fullScore, examG?.percentBands) : null,
+    configuredBands: hasExamBands ? configuredBands : null,
+    letterMins: letterFallback,
+  };
+}
+
+function resolveSubjectAssessmentGrade(
+  subject: Pick<StudentTermSubjectReport, 'subjectKey' | 'finalGrade' | 'finalScore'>,
+  tpl: ReportTemplate | null,
+  examPreset: ReportExamPresetSlice | null,
+  gradeCatalogId: string | null,
+): string {
+  if (subject.finalGrade) return subject.finalGrade;
+  const rules = buildExamScoreRulesForSubject(tpl, examPreset, subject.subjectKey, gradeCatalogId);
+  return workbenchExamLetterGrade(subject.finalScore, rules) ?? '—';
 }
 
 /** 得分率（%）分段：与自动分析纵向柱状图一致 */
@@ -222,6 +360,41 @@ const WORKBENCH_HOMEROOM_SENTINEL = '__homeroom__';
 
 function isWorkbenchHomeroomMode(subjectKey: string): boolean {
   return subjectKey === WORKBENCH_HOMEROOM_SENTINEL;
+}
+
+/** 该班在当前模板下是否有可填写的学科或班主任入口 */
+function classHasWorkbenchEntry(
+  cls: TeacherReportTemplateClassProgress,
+  templateSubjects: { subjectKey: string }[] | undefined,
+): boolean {
+  const homeroomOk = Boolean(cls.homeroomEvaluationAvailable ?? cls.requiresHomeroomComment);
+  if (!templateSubjects?.length) {
+    return cls.requiredSubjectKeys.length > 0 || homeroomOk;
+  }
+  const hasSubject = templateSubjects.some((s) => cls.requiredSubjectKeys.includes(s.subjectKey));
+  return hasSubject || homeroomOk;
+}
+
+function sortWorkbenchClassesByGrade(
+  classes: TeacherReportTemplateClassProgress[],
+): TeacherReportTemplateClassProgress[] {
+  return [...classes].sort((a, b) => (a.grade - b.grade) || a.className.localeCompare(b.className));
+}
+
+function pickDefaultWorkbenchClassId(
+  classes: TeacherReportTemplateClassProgress[],
+  templateSubjects: { subjectKey: string }[] | undefined,
+): string {
+  const sorted = sortWorkbenchClassesByGrade(classes);
+  const withEntry = sorted.find((c) => classHasWorkbenchEntry(c, templateSubjects));
+  return withEntry?.classId ?? sorted[0]?.classId ?? '';
+}
+
+function filterWorkbenchActionableClasses(
+  classes: TeacherReportTemplateClassProgress[],
+  templateSubjects: { subjectKey: string }[] | undefined,
+): TeacherReportTemplateClassProgress[] {
+  return sortWorkbenchClassesByGrade(classes).filter((c) => classHasWorkbenchEntry(c, templateSubjects));
 }
 
 /** 班级下拉：优先显示 P6A，不出现 G6 P6A 式前缀 */
@@ -584,6 +757,8 @@ async function wbPdfAppendChunkedDataTableAsImages(
     flow?: { y: number };
     /** 有 flow 时单次尝试的最大行数（防单张 canvas 过大）；默认 100 */
     maxRowsPerChunk?: number;
+    /** 学业质量评价等表格：单元格文字居中 */
+    cellTextAlign?: 'left' | 'center';
   },
 ): Promise<void> {
   const {
@@ -594,7 +769,9 @@ async function wbPdfAppendChunkedDataTableAsImages(
     rowsPerChunk,
     flow,
     maxRowsPerChunk = 100,
+    cellTextAlign = 'left',
   } = opts;
+  const centered = cellTextAlign === 'center';
   if (body.length === 0) return;
 
   const host = document.createElement('div');
@@ -622,15 +799,17 @@ async function wbPdfAppendChunkedDataTableAsImages(
     }
     const table = document.createElement('table');
     table.style.cssText = 'width:100%;border-collapse:collapse;border:1px solid #e2e8f0;table-layout:fixed;';
+    if (centered) table.setAttribute('data-academic-quality-table', '');
     const thead = document.createElement('thead');
     const trh = document.createElement('tr');
     trh.style.background = '#f1f5f9';
     for (const c of head) {
       const th = document.createElement('th');
       th.style.cssText =
-        'border:1px solid #e2e8f0;padding:0;text-align:left;font-weight:600;font-size:11px;vertical-align:middle;word-break:break-word;';
+        `border:1px solid #e2e8f0;padding:0;text-align:${centered ? 'center' : 'left'};font-weight:600;font-size:11px;vertical-align:middle;word-break:break-word;`;
       const thInner = document.createElement('div');
       thInner.textContent = c;
+      if (centered) thInner.style.textAlign = 'center';
       th.appendChild(thInner);
       trh.appendChild(th);
     }
@@ -641,9 +820,10 @@ async function wbPdfAppendChunkedDataTableAsImages(
       const tr = document.createElement('tr');
       for (let j = 0; j < row.length; j += 1) {
         const td = document.createElement('td');
-        td.style.cssText = 'border:1px solid #e2e8f0;padding:0;vertical-align:middle;';
+        td.style.cssText = `border:1px solid #e2e8f0;padding:0;vertical-align:middle;text-align:${centered ? 'center' : 'left'};`;
         const inner = document.createElement('div');
         inner.textContent = row[j];
+        if (centered) inner.style.textAlign = 'center';
         td.appendChild(inner);
         tr.appendChild(td);
       }
@@ -759,7 +939,6 @@ export default function StudentPortrait({
   const [homeroomEditable, setHomeroomEditable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [reportLoading, setReportLoading] = useState(false);
-  const [reportSaving, setReportSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reportTerm, setReportTerm] = useState<Term>('Semester 1');
   const [reportTemplates, setReportTemplates] = useState<ReportTemplate[]>([]);
@@ -778,7 +957,6 @@ export default function StudentPortrait({
   }>>([]);
   const [reportDetail, setReportDetail] = useState<StudentTermReport | null>(null);
   const [reportTemplate, setReportTemplate] = useState<ReportTemplate | null>(null);
-  const [homeroomCommentDraft, setHomeroomCommentDraft] = useState('');
   const [mySubjectAssignments, setMySubjectAssignments] = useState<Array<{ classId: string; subjectKey: string }>>([]);
   const [workbenchTemplates, setWorkbenchTemplates] = useState<ReportTemplate[]>([]);
   const [workbenchTemplateId, setWorkbenchTemplateId] = useState<string>('');
@@ -793,8 +971,8 @@ export default function StudentPortrait({
   const [adminViewTeacherId, setAdminViewTeacherId] = useState('');
   const [adminViewTeachers, setAdminViewTeachers] = useState<Array<{ id: string; name: string }>>([]);
   const [workbenchStudentDrafts, setWorkbenchStudentDrafts] = useState<WorkbenchStudentSubjectDraft[]>([]);
-  const [workbenchWeaknessRows, setWorkbenchWeaknessRows] = useState<ClassWeaknessRowDraft[]>(makeDefaultWorkbenchWeaknessRows);
-  const [workbenchTeachingReflection, setWorkbenchTeachingReflection] = useState('');
+  const [workbenchClassOverallAnalysis, setWorkbenchClassOverallAnalysis] = useState('');
+  const [workbenchStudentAnalysisRows, setWorkbenchStudentAnalysisRows] = useState<StudentAnalysisRowDraft[]>([]);
   const [workbenchSaving, setWorkbenchSaving] = useState(false);
   const [workbenchPdfExporting, setWorkbenchPdfExporting] = useState(false);
   const [studentReportPdfExporting, setStudentReportPdfExporting] = useState(false);
@@ -807,6 +985,10 @@ export default function StudentPortrait({
   const [classReportError, setClassReportError] = useState<string | null>(null);
   const workbenchPdfExportRef = useRef<HTMLDivElement>(null);
   const studentReportPdfExportRef = useRef<HTMLDivElement>(null);
+  /** 教师手动切换学业报告模板后，不再自动改选（直至离开本 tab） */
+  const workbenchManualPickRef = useRef(false);
+  const [academicReportsVisitSeq, setAcademicReportsVisitSeq] = useState(0);
+  const lastWorkbenchAutoPickSeqRef = useRef(0);
   type YearDimensionExamPreset = {
     academicYearId: string;
     examConfigs: Record<string, ReportExamConfigScope>;
@@ -818,10 +1000,12 @@ export default function StudentPortrait({
   };
   /** 学年考试维度满分与百分比档（教师端 API，与管理员目标维度配置同源） */
   const [workbenchYearExamPreset, setWorkbenchYearExamPreset] = useState<YearDimensionExamPreset | null>(null);
+  const [workbenchYearExamPresetLoaded, setWorkbenchYearExamPresetLoaded] = useState(false);
   /** 学生/班级学业报告展示：考试学科年级设置（决定测评成绩是否出现） */
   const [reportYearExamPreset, setReportYearExamPreset] = useState<YearDimensionExamPreset | null>(null);
   /** 学年学科目标预设中的全学科共用 A–D 说明（用于学业报告开头展示一次） */
   const [academicYearRubric, setAcademicYearRubric] = useState<Record<TargetLevel, string> | null>(null);
+  const [gradeConfig, setGradeConfig] = useState<GradeConfig>(() => normalizeGradeConfig(loadGradeConfigSync()));
 
   useEffect(() => {
     if (isStudentSelf) return;
@@ -833,14 +1017,16 @@ export default function StudentPortrait({
       loadAllClasses(),
       loadStudents(),
       loadEnrollments(),
+      loadGradeConfig(),
     ])
-      .then(([y, current, cls, stu, enr]) => {
+      .then(([y, current, cls, stu, enr, gc]) => {
         if (cancelled) return;
         setYears(y);
         setCurrentYearId(current || y[0]?.id || null);
         setClasses(cls);
         setStudents(stu);
         setEnrollments(enr);
+        setGradeConfig(normalizeGradeConfig(gc));
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -960,36 +1146,7 @@ export default function StudentPortrait({
   const canAccessAcademicReportsTab = canUseTeacherWorkbench || canAdminViewTeacherReports;
   const workbenchAdminViewing = canAdminViewTeacherReports && tab === 'academic-reports';
   const canViewSchoolDashboard = !isStudentSelf && isAdminRole;
-  const canEditHomeroomComment = !isStudentSelf && (isAdminRole || homeroomEditable) && reportTemplate?.homeroomCommentMode !== 'disabled';
-  const homeroomCommentRequired = reportTemplate?.homeroomCommentMode === 'required';
   const showHomeroomComment = reportTemplate?.homeroomCommentMode !== 'disabled';
-  const canTeacherEditReport = !isStudentSelf && (isAdminRole || reportTemplate?.status === 'published');
-  const teacherStaffedSubjectKeysForClass = useMemo(() => {
-    if (user?.role !== 'teacher' || !selectedClassId) return new Set<string>();
-    return new Set(
-      mySubjectAssignments.filter((a) => a.classId === selectedClassId).map((a) => a.subjectKey),
-    );
-  }, [user?.role, selectedClassId, mySubjectAssignments]);
-  const canEditSubjectTermReport = (subjectKey: string) =>
-    canTeacherEditReport &&
-    (isAdminRole || (user?.role === 'teacher' && teacherStaffedSubjectKeysForClass.has(subjectKey)));
-  const canHintEditTermReport = useMemo(
-    () =>
-      !isStudentSelf &&
-      canTeacherEditReport &&
-      (isAdminRole ||
-        homeroomEditable ||
-        (user?.role === 'teacher' && !!selectedClassId && teacherStaffedSubjectKeysForClass.size > 0)),
-    [
-      isStudentSelf,
-      canTeacherEditReport,
-      isAdminRole,
-      homeroomEditable,
-      user?.role,
-      selectedClassId,
-      teacherStaffedSubjectKeysForClass,
-    ]
-  );
   const templateSubjectMap = useMemo(
     () => new Map((reportTemplate?.subjects ?? []).map((s) => [s.subjectKey, s] as const)),
     [reportTemplate],
@@ -1001,9 +1158,9 @@ export default function StudentPortrait({
     );
     const cls = classes.find((c) => c.id === enr?.classId);
     if (!cls) return null;
-    const gc = normalizeGradeConfig(loadGradeConfigSync());
-    return gc.items.find((i) => i.level === cls.grade)?.id ?? null;
-  }, [selectedStudentId, currentYearId, enrollments, classes]);
+    return getGradeCatalogIdForClass(gradeConfig, cls.grade, { className: cls.name });
+  }, [selectedStudentId, currentYearId, enrollments, classes, gradeConfig]);
+  /** 学生/班级报告：测评成绩列是否与教师工作台、后台考试年级配置一致 */
   const subjectShowsAssessmentScore = useCallback(
     (
       subjectKey: string,
@@ -1011,33 +1168,19 @@ export default function StudentPortrait({
       gradeCatalogId: string | null,
     ): boolean => {
       const cfg = tpl?.subjects?.find((s) => s.subjectKey === subjectKey);
-      if (!cfg) return false;
-      if (!tpl || !gradeCatalogId || !reportYearExamPreset) return cfg.enableScore !== false;
+      if (!cfg || !tpl) return false;
       const segId = String(tpl.schoolSegmentId ?? '').trim();
-      if (!segId) return cfg.enableScore !== false;
-      const gc = normalizeGradeConfig(loadGradeConfigSync());
-      const seg = gc.segments?.find((s) => s.id === segId);
-      const segmentGradeIds = seg?.gradeIds ?? [];
-      const courseId = String(reportYearExamPreset.subjectKeyToCourseId?.[subjectKey] ?? '').trim();
-      if (!courseId) return cfg.enableScore !== false;
-      if (
-        isExamGradeIncluded(
-          tpl.term,
-          segId,
-          courseId,
-          gradeCatalogId,
-          segmentGradeIds,
-          reportYearExamPreset.stageInclusion,
-          reportYearExamPreset.evaluationGradeInclusion,
-          reportYearExamPreset.examGradeInclusion,
-          reportYearExamPreset.examConfigs,
-        )
-      ) {
-        return true;
-      }
-      return cfg.enableScore !== false;
+      return effectiveTemplateSubjectEnableScore(
+        tpl.term,
+        segId,
+        subjectKey,
+        gradeCatalogId,
+        getSegmentGradeIds(gradeConfig, segId),
+        cfg.enableScore !== false,
+        reportYearExamPreset,
+      );
     },
-    [reportYearExamPreset],
+    [reportYearExamPreset, gradeConfig],
   );
 
   /** 「我的学生」班级下拉：仅当前学年；教师为岗位班级子集，管理员为当前学年全部班级 */
@@ -1074,6 +1217,13 @@ export default function StudentPortrait({
       setTab('my-students');
     }
   }, [isStudentSelf, canViewSchoolDashboard, canAccessAcademicReportsTab, tab]);
+
+  useEffect(() => {
+    if (tab === 'academic-reports') {
+      setAcademicReportsVisitSeq((s) => s + 1);
+      workbenchManualPickRef.current = false;
+    }
+  }, [tab]);
 
   useEffect(() => {
     if (isStudentSelf) {
@@ -1160,7 +1310,6 @@ export default function StudentPortrait({
       setReportList([]);
       setReportDetail(null);
       setReportTemplate(null);
-      setHomeroomCommentDraft('');
       setReportTemplates([]);
       setSelectedTemplateId('');
       return;
@@ -1169,7 +1318,6 @@ export default function StudentPortrait({
     setReportList([]);
     setReportDetail(null);
     setReportTemplate(null);
-    setHomeroomCommentDraft('');
     setReportTemplates([]);
     let cancelled = false;
     setReportLoading(true);
@@ -1186,7 +1334,6 @@ export default function StudentPortrait({
           setSelectedTemplateId('');
           setReportDetail(null);
           setReportTemplate(null);
-          setHomeroomCommentDraft('');
         }
       })
       .catch((e: unknown) => {
@@ -1216,7 +1363,6 @@ export default function StudentPortrait({
       setReportTemplates([]);
       setReportDetail(null);
       setReportTemplate(null);
-      setHomeroomCommentDraft('');
       return;
     }
     const pickMatchesSelection = releasedRows.some(
@@ -1228,15 +1374,13 @@ export default function StudentPortrait({
     if (!selectedTemplateId || !pickMatchesSelection) {
       setReportDetail(null);
       setReportTemplate(null);
-      setHomeroomCommentDraft('');
       return;
     }
     const effectiveTemplateId = selectedTemplateId;
     let cancelled = false;
     setReportLoading(true);
-    const gc = normalizeGradeConfig(loadGradeConfigSync());
     const schoolSeg = getSchoolSegmentIdForStudentGradeLevel(
-      gc,
+      gradeConfig,
       students.find((x) => x.id === studentId)?.currentGrade ?? null,
     );
     api
@@ -1251,18 +1395,30 @@ export default function StudentPortrait({
         if (!sortedReleased.some((t) => t.id === effectiveTemplateId)) {
           setReportTemplate(null);
           setReportDetail(null);
-          setHomeroomCommentDraft('');
           return;
         }
-        const [template, detail] = await Promise.all([
-          api.getReportTemplateById(effectiveTemplateId),
-          api.getStudentTermReportDetail(studentId, currentYearId, reportTerm, effectiveTemplateId),
-        ]);
+        const bundle = await api.getStudentTermReportBundle(
+          studentId,
+          currentYearId,
+          reportTerm,
+          effectiveTemplateId,
+        );
         if (cancelled || selectedStudentId !== studentId) return;
-        setReportTemplate(template);
-        const merged = mergeStudentTermReportWithTemplate(detail, template);
+        const stu = students.find((x) => x.id === studentId);
+        const enrCls = classes.find(
+          (c) =>
+            c.id
+            === enrollments.find(
+              (e) => e.studentId === studentId && (!e.academicYearId || e.academicYearId === currentYearId),
+            )?.classId,
+        );
+        const gradeCatalogId = gradeCatalogIdForStudentGrade(gradeConfig, stu?.currentGrade ?? null, enrCls?.name);
+        setReportTemplate(bundle.template);
+        const merged = mergeStudentTermReportWithTemplate(bundle.report, bundle.template, gradeCatalogId, {
+          padMissingSubjects: false,
+          blankUnsetRatings: true,
+        });
         setReportDetail(merged);
-        setHomeroomCommentDraft(merged.homeroomComment ?? '');
       })
       .catch((e: unknown) => {
         if (cancelled || selectedStudentId !== studentId) return;
@@ -1276,9 +1432,11 @@ export default function StudentPortrait({
     return () => {
       cancelled = true;
     };
-  }, [selectedStudentId, currentYearId, reportTerm, selectedTemplateId, reportList, students]);
+  }, [selectedStudentId, currentYearId, reportTerm, selectedTemplateId, reportList, students, gradeConfig]);
 
   useEffect(() => {
+    if (tab !== 'academic-reports') return;
+
     if (!canAccessAcademicReportsTab || !USE_CLOUD_STORAGE || !currentYearId) {
       setWorkbenchTemplates([]);
       setWorkbenchTemplateId('');
@@ -1289,34 +1447,134 @@ export default function StudentPortrait({
       setAdminViewTeachers([]);
       return;
     }
+
+    const isTeacherSelfServe = user?.role === 'teacher' && !workbenchAdminViewing;
+    const shouldAutoPickOnEnter =
+      !workbenchManualPickRef.current &&
+      lastWorkbenchAutoPickSeqRef.current !== academicReportsVisitSeq;
+
     let cancelled = false;
     setWorkbenchLoading(true);
     setWorkbenchError(null);
     setWorkbenchSaveHint(null);
-    api
-      .getReportTemplatesForTerm(currentYearId, reportTerm)
-      .then((list) => {
+
+    const filterEligible = (list: ReportTemplate[]) =>
+      list.filter((tpl) => (tpl.status === 'published' || tpl.status === 'closed') && !!tpl.id);
+
+    const pickNewestPublishedTemplate = (templates: ReportTemplate[]) => {
+      const eligible = filterEligible(templates);
+      if (eligible.length === 0) return null;
+      const picked = pickPreferredPublishedTask(
+        eligible.map((tpl) => ({
+          id: tpl.id as string,
+          publishedAt: tpl.publishedAt,
+          updatedAt: null,
+          isComplete: false,
+          template: tpl,
+        })),
+      );
+      return picked?.template ?? null;
+    };
+
+    /** 教师：仅在本人有岗位班级的报告里，按最近发布 + 未完成优先自动选中 */
+    const pickTeacherTemplateWithProgress = async (templates: ReportTemplate[]) => {
+      const eligible = filterEligible(templates);
+      if (eligible.length === 0) return null;
+      const rows = await Promise.all(
+        eligible.map(async (tpl) => {
+          const progress = await api.getMyReportTemplateProgress(tpl.id as string);
+          return {
+            id: tpl.id as string,
+            publishedAt: tpl.publishedAt,
+            updatedAt: null,
+            isComplete: progress.pendingStudents <= 0,
+            template: tpl,
+            hasAssignments: progress.classes.length > 0,
+          };
+        }),
+      );
+      const withWork = rows.filter((r) => r.hasAssignments);
+      if (withWork.length === 0) return null;
+      const picked = pickPreferredPublishedTask(withWork);
+      return picked?.template ?? null;
+    };
+
+    (async () => {
+      try {
+        if (shouldAutoPickOnEnter) {
+          lastWorkbenchAutoPickSeqRef.current = academicReportsVisitSeq;
+          const [s1, s2] = await Promise.all([
+            api.getReportTemplatesForTerm(currentYearId, 'Semester 1'),
+            api.getReportTemplatesForTerm(currentYearId, 'Semester 2'),
+          ]);
+          if (cancelled) return;
+
+          const picked = isTeacherSelfServe
+            ? await pickTeacherTemplateWithProgress([...s1, ...s2])
+            : pickNewestPublishedTemplate([...s1, ...s2]);
+          if (cancelled) return;
+
+          if (picked?.id) {
+            const termList = picked.term === 'Semester 2' ? s2 : s1;
+            setReportTerm(picked.term);
+            setWorkbenchTemplates(filterEligible(termList));
+            setWorkbenchTemplateId(picked.id);
+            return;
+          }
+        }
+
+        const list = await api.getReportTemplatesForTerm(currentYearId, reportTerm);
         if (cancelled) return;
-        const editableOrReadonly = list.filter((tpl) => tpl.status === 'published' || tpl.status === 'closed');
+        const editableOrReadonly = filterEligible(list);
         setWorkbenchTemplates(editableOrReadonly);
+
+        if (workbenchManualPickRef.current) {
+          setWorkbenchTemplateId((prev) =>
+            prev && editableOrReadonly.some((tpl) => tpl.id === prev) ? prev : (editableOrReadonly[0]?.id ?? ''),
+          );
+          return;
+        }
+
+        if (isTeacherSelfServe && editableOrReadonly.length > 0) {
+          const picked = await pickTeacherTemplateWithProgress(editableOrReadonly);
+          if (cancelled) return;
+          setWorkbenchTemplateId(picked?.id ?? editableOrReadonly[0]?.id ?? '');
+          return;
+        }
+
+        if (workbenchAdminViewing && editableOrReadonly.length > 0) {
+          const picked = pickNewestPublishedTemplate(editableOrReadonly);
+          if (cancelled) return;
+          setWorkbenchTemplateId(picked?.id ?? editableOrReadonly[0]?.id ?? '');
+          return;
+        }
+
         setWorkbenchTemplateId((prev) =>
           prev && editableOrReadonly.some((tpl) => tpl.id === prev) ? prev : (editableOrReadonly[0]?.id ?? ''),
         );
-      })
-      .catch((e: unknown) => {
+      } catch (e: unknown) {
         if (cancelled) return;
         setWorkbenchTemplates([]);
         setWorkbenchTemplateId('');
         setWorkbenchProgress(null);
         setWorkbenchError((e as Error)?.message || 'Failed to load report tasks');
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setWorkbenchLoading(false);
-      });
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
-  }, [canAccessAcademicReportsTab, currentYearId, reportTerm]);
+  }, [
+    canAccessAcademicReportsTab,
+    currentYearId,
+    reportTerm,
+    tab,
+    user?.role,
+    workbenchAdminViewing,
+    academicReportsVisitSeq,
+  ]);
 
   useEffect(() => {
     if (!canAdminViewTeacherReports || !USE_CLOUD_STORAGE || !workbenchTemplateId) {
@@ -1400,9 +1658,11 @@ export default function StudentPortrait({
   useEffect(() => {
     if (!canAccessAcademicReportsTab || !USE_CLOUD_STORAGE || !workbenchTemplateDetail?.academicYearId) {
       setWorkbenchYearExamPreset(null);
+      setWorkbenchYearExamPresetLoaded(false);
       return;
     }
     let cancelled = false;
+    setWorkbenchYearExamPresetLoaded(false);
     api
       .getTeacherReportYearDimensionExamPreset(workbenchTemplateDetail.academicYearId)
       .then((p) => {
@@ -1410,6 +1670,9 @@ export default function StudentPortrait({
       })
       .catch(() => {
         if (!cancelled) setWorkbenchYearExamPreset(null);
+      })
+      .finally(() => {
+        if (!cancelled) setWorkbenchYearExamPresetLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -1442,8 +1705,13 @@ export default function StudentPortrait({
       setWorkbenchClassId('');
       return;
     }
-    setWorkbenchClassId((prev) => (prev && workbenchProgress.classes.some((c) => c.classId === prev) ? prev : (workbenchProgress.classes[0]?.classId ?? '')));
-  }, [canAccessAcademicReportsTab, workbenchProgress]);
+    const templateSubjects = workbenchTemplateDetail?.subjects;
+    const actionable = filterWorkbenchActionableClasses(workbenchProgress.classes, templateSubjects);
+    setWorkbenchClassId((prev) => {
+      if (prev && actionable.some((c) => c.classId === prev)) return prev;
+      return pickDefaultWorkbenchClassId(actionable, templateSubjects);
+    });
+  }, [canAccessAcademicReportsTab, workbenchProgress, workbenchTemplateDetail]);
 
   useEffect(() => {
     if (!workbenchTemplateDetail || !workbenchClassId) {
@@ -1479,7 +1747,13 @@ export default function StudentPortrait({
             workbenchTemplateDetail.term,
             workbenchTemplateDetail.id ?? '',
           );
-          const merged = mergeStudentTermReportWithTemplate(detail, workbenchTemplateDetail);
+          const wbCls = workbenchProgress?.classes.find((c) => c.classId === workbenchClassId);
+          const merged = mergeStudentTermReportWithTemplate(
+            detail,
+            workbenchTemplateDetail,
+            gradeCatalogIdForStudentGrade(gradeConfig, stu.currentGrade ?? null, wbCls?.className),
+            { padMissingSubjects: true },
+          );
           const stub: SubjectDraft = {
             id: `hr-${stu.id}`,
             subjectKey: WORKBENCH_HOMEROOM_SENTINEL,
@@ -1534,7 +1808,13 @@ export default function StudentPortrait({
     Promise.all(
       workbenchClassStudents.map(async (stu) => {
         const detail = await api.getStudentTermReportDetail(stu.id, workbenchTemplateDetail.academicYearId, workbenchTemplateDetail.term, workbenchTemplateDetail.id ?? '');
-        const merged = mergeStudentTermReportWithTemplate(detail, workbenchTemplateDetail);
+        const wbCls = workbenchProgress?.classes.find((c) => c.classId === workbenchClassId);
+        const merged = mergeStudentTermReportWithTemplate(
+          detail,
+          workbenchTemplateDetail,
+          gradeCatalogIdForStudentGrade(gradeConfig, stu.currentGrade ?? null, wbCls?.className),
+          { padMissingSubjects: true },
+        );
         const existing = merged.subjectReports.find((s) => s.subjectKey === workbenchSubjectKey);
         const subject: SubjectDraft = existing
           ? {
@@ -1566,7 +1846,7 @@ export default function StudentPortrait({
               finalScore: null,
               finalGrade: null,
               learningQualityGrade: 'A',
-              examDimensionScores: Object.fromEntries(targetSubject.dimensions.map((d) => [d.dimensionKey, null])),
+              examDimensionScores: null,
               teacherComment: null,
               teacherId: null,
               dimensions: targetSubject.dimensions.map((d) => ({
@@ -1600,14 +1880,21 @@ export default function StudentPortrait({
   }, [workbenchTemplateDetail, workbenchClassId, workbenchSubjectKey, workbenchClassStudents]);
 
   useEffect(() => {
+    const roster = workbenchStudentDrafts.map((r) => ({ studentId: r.studentId }));
+    if (roster.length > 0) {
+      setWorkbenchStudentAnalysisRows((prev) => mergeStudentAnalysisRowsWithRoster(roster, prev));
+    } else {
+      setWorkbenchStudentAnalysisRows([]);
+    }
+  }, [workbenchStudentDrafts]);
+
+  useEffect(() => {
     if (!USE_CLOUD_STORAGE || !workbenchTemplateId || !workbenchClassId || !workbenchSubjectKey) {
-      setWorkbenchWeaknessRows(makeDefaultWorkbenchWeaknessRows());
-      setWorkbenchTeachingReflection('');
+      setWorkbenchClassOverallAnalysis('');
       return;
     }
     if (isWorkbenchHomeroomMode(workbenchSubjectKey)) {
-      setWorkbenchWeaknessRows(makeDefaultWorkbenchWeaknessRows());
-      setWorkbenchTeachingReflection('');
+      setWorkbenchClassOverallAnalysis('');
       return;
     }
     let cancelled = false;
@@ -1615,36 +1902,47 @@ export default function StudentPortrait({
       .getReportClassSubjectInsights(workbenchTemplateId, workbenchClassId, workbenchSubjectKey)
       .then((ins) => {
         if (cancelled) return;
-        setWorkbenchWeaknessRows(
-          ins.weaknessRows.length > 0
-            ? ins.weaknessRows.map((r) => ({
-                weakPoint: r.weakPoint,
-                errorAnalysis: r.errorAnalysis,
-                nextPlan: r.nextPlan,
-              }))
-            : makeDefaultWorkbenchWeaknessRows(),
+        setWorkbenchClassOverallAnalysis(ins.classOverallAnalysis ?? '');
+        const roster = workbenchStudentDrafts.map((r) => ({ studentId: r.studentId }));
+        const saved = ins.studentAnalysisRows.map((r) => ({
+          studentId: r.studentId,
+          learningAnalysis: r.learningAnalysis,
+          supportPlan: r.supportPlan,
+        }));
+        setWorkbenchStudentAnalysisRows(
+          roster.length > 0 ? mergeStudentAnalysisRowsWithRoster(roster, saved) : saved,
         );
-        setWorkbenchTeachingReflection(ins.teachingReflection ?? '');
       })
       .catch(() => {
         if (cancelled) return;
-        setWorkbenchWeaknessRows(makeDefaultWorkbenchWeaknessRows());
-        setWorkbenchTeachingReflection('');
+        setWorkbenchClassOverallAnalysis('');
       });
     return () => {
       cancelled = true;
     };
-  }, [workbenchTemplateId, workbenchClassId, workbenchSubjectKey]);
+  }, [workbenchTemplateId, workbenchClassId, workbenchSubjectKey, workbenchStudentDrafts]);
 
   const learningStats = useMemo(() => {
     const inYearStudentIds = new Set(activeEnrollments.map((e) => e.studentId));
     const inYearStudents = students.filter((s) => inYearStudentIds.has(s.id));
     const active = inYearStudents.filter((s) => (s.status ?? 'active') === 'active').length;
-    const byDivision = new Map<string, number>();
+    const classById = new Map(classes.map((c) => [c.id, c]));
+    const enrollmentClassByStudent = new Map<string, string>();
+    for (const e of activeEnrollments) {
+      if (!enrollmentClassByStudent.has(e.studentId)) enrollmentClassByStudent.set(e.studentId, e.classId);
+    }
+    const segmentRows = countStudentsBySchoolSegment(
+      gradeConfig,
+      inYearStudents,
+      (studentId) => {
+        const classId = enrollmentClassByStudent.get(studentId);
+        const cls = classId ? classById.get(classId) : undefined;
+        return cls ? { grade: cls.grade, name: cls.name } : null;
+      },
+      isZh,
+    );
     const byGrade = new Map<string, number>();
     for (const s of inYearStudents) {
-      const div = s.division || (isZh ? '未设置' : 'Not set');
-      byDivision.set(div, (byDivision.get(div) ?? 0) + 1);
       const g = s.currentGrade != null ? `G${s.currentGrade}` : (isZh ? '未设置' : 'Not set');
       byGrade.set(g, (byGrade.get(g) ?? 0) + 1);
     }
@@ -1652,113 +1950,10 @@ export default function StudentPortrait({
       total: inYearStudents.length,
       active,
       activeRate: inYearStudents.length ? Math.round((active / inYearStudents.length) * 100) : 0,
-      byDivision: Array.from(byDivision.entries()).sort((a, b) => b[1] - a[1]),
+      byDivision: segmentRows.map((r) => [r.label, r.count] as [string, number]),
       byGrade: Array.from(byGrade.entries()).sort((a, b) => a[0].localeCompare(b[0])),
     };
-  }, [activeEnrollments, students, isZh]);
-
-  const upsertSubjectDraft = (subjectKey: string, updater: (draft: SubjectDraft) => SubjectDraft) => {
-    setReportDetail((prev) => {
-      if (!prev) return prev;
-      const nextSubjects = [...prev.subjectReports];
-      const idx = nextSubjects.findIndex((s) => s.subjectKey === subjectKey);
-      if (idx === -1) return prev;
-      const base = nextSubjects[idx];
-      const draft: SubjectDraft = {
-        id: base.id,
-        subjectKey: base.subjectKey,
-        subjectName: base.subjectName,
-        midtermScore: base.midtermScore,
-        midtermGrade: base.midtermGrade,
-        finalScore: base.finalScore,
-        finalGrade: base.finalGrade,
-        examDimensionScores: base.examDimensionScores ?? null,
-        learningQualityGrade: base.learningQualityGrade ?? null,
-        teacherComment: base.teacherComment,
-        teacherId: base.teacherId,
-        dimensions: base.dimensions.map((d) => ({
-          id: d.id,
-          dimensionKey: d.dimensionKey,
-          dimensionLabel: d.dimensionLabel,
-          rating: (d.rating ?? 'A') as TargetLevel,
-          levelDescriptions: { ...d.levelDescriptions },
-        })),
-      };
-      const updated = updater(draft);
-      nextSubjects[idx] = {
-        ...base,
-        ...updated,
-      } as StudentTermSubjectReport;
-      return { ...prev, subjectReports: nextSubjects };
-    });
-  };
-
-  const saveSubjectReport = async (subject: StudentTermSubjectReport) => {
-    if (!selectedStudentId || !currentYearId || !selectedTemplateId) return;
-    if (!canEditSubjectTermReport(subject.subjectKey)) {
-      setError(isZh ? '您无权保存该学科报告。' : 'You are not allowed to save this subject report.');
-      return;
-    }
-    setReportSaving(true);
-    setError(null);
-    try {
-      await api.upsertStudentTermSubjectReport(selectedStudentId, currentYearId, reportTerm, selectedTemplateId, subject.subjectKey, {
-        subjectName: subject.subjectName,
-        midtermScore: subject.midtermScore,
-        finalScore: subject.finalScore,
-        examDimensionScores: subject.examDimensionScores ?? null,
-        teacherComment: subject.teacherComment,
-        learningQualityGrade: subject.learningQualityGrade ?? null,
-        dimensions: subject.dimensions.map((d) => ({
-          dimensionKey: d.dimensionKey,
-          dimensionLabel: d.dimensionLabel,
-          rating: (d.rating ?? 'A') as TargetLevel,
-          levelDescriptions: d.levelDescriptions,
-        })),
-      });
-      const [next, tpl] = await Promise.all([
-        api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId),
-        api.getReportTemplateById(selectedTemplateId),
-      ]);
-      setReportTemplate(tpl);
-      const merged = mergeStudentTermReportWithTemplate(next, tpl);
-      setReportDetail(merged);
-      setHomeroomCommentDraft(merged.homeroomComment ?? '');
-      const list = await api.getStudentTermReports(selectedStudentId);
-      setReportList(list);
-    } catch (e: unknown) {
-      setError((e as Error)?.message || 'Failed to save subject report');
-    } finally {
-      setReportSaving(false);
-    }
-  };
-
-  const saveHomeroomComment = async () => {
-    if (!selectedStudentId || !currentYearId || !selectedTemplateId) return;
-    if (homeroomCommentRequired && !homeroomCommentDraft.trim()) {
-      setError(isZh ? '该模板要求填写班主任评语。' : 'Homeroom comment is required by template.');
-      return;
-    }
-    setReportSaving(true);
-    setError(null);
-    try {
-      await api.updateStudentTermHomeroomComment(selectedStudentId, currentYearId, reportTerm, selectedTemplateId, homeroomCommentDraft || null);
-      const [next, tpl] = await Promise.all([
-        api.getStudentTermReportDetail(selectedStudentId, currentYearId, reportTerm, selectedTemplateId),
-        api.getReportTemplateById(selectedTemplateId),
-      ]);
-      setReportTemplate(tpl);
-      const merged = mergeStudentTermReportWithTemplate(next, tpl);
-      setReportDetail(merged);
-      setHomeroomCommentDraft(merged.homeroomComment ?? '');
-      const list = await api.getStudentTermReports(selectedStudentId);
-      setReportList(list);
-    } catch (e: unknown) {
-      setError((e as Error)?.message || 'Failed to save homeroom comment');
-    } finally {
-      setReportSaving(false);
-    }
-  };
+  }, [activeEnrollments, students, classes, gradeConfig, isZh]);
 
   const exportStudentReportPdf = useCallback(async () => {
     if (typeof window === 'undefined') return;
@@ -1865,7 +2060,12 @@ export default function StudentPortrait({
         item.report.subjectReports.forEach((s) => {
           const subjectConfig = subjectConfigMap.get(s.subjectKey);
           const subjectTitle = subjectConfig ? workbenchSubjectModuleLabel(subjectConfig, isZh) : s.subjectName;
-          const finalGrade = s.finalGrade ?? reportLetterGradeFromScore(s.finalScore, classReportTemplate.scoreGradeMinScores) ?? '—';
+          const gradeCatalogId = selectedClassRecord
+            ? getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
+                className: selectedClassRecord.name,
+              })
+            : null;
+          const finalGrade = resolveSubjectAssessmentGrade(s, classReportTemplate, reportYearExamPreset, gradeCatalogId);
           const mod = document.createElement('div');
           mod.setAttribute('data-student-report-pdf-module', '');
           const h = document.createElement('div');
@@ -1916,9 +2116,9 @@ export default function StudentPortrait({
               s.subjectKey,
               classReportTemplate,
               selectedClassRecord
-                ? normalizeGradeConfig(loadGradeConfigSync()).items.find(
-                    (i) => i.level === selectedClassRecord.grade,
-                  )?.id ?? null
+                ? getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
+                    className: selectedClassRecord.name,
+                  })
                 : null,
             )
           ) {
@@ -1942,20 +2142,6 @@ export default function StudentPortrait({
           tableWrap.appendChild(table);
           mod.appendChild(tableWrap);
 
-          if (subjectConfig?.enableTeacherComment !== false) {
-            const box = document.createElement('div');
-            box.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;background:#fff;margin-top:6px;padding:7px 10px;';
-            const label = document.createElement('div');
-            label.style.cssText = 'font-size:12px;color:#64748b;margin-bottom:4px;';
-            label.textContent = isZh ? '学科评语' : 'Subject comment';
-            const body = document.createElement('div');
-            body.setAttribute('data-student-report-pdf-body-text', '');
-            body.style.cssText = 'white-space:pre-wrap;font-size:13px;';
-            body.textContent = s.teacherComment?.trim() || (isZh ? '暂无' : 'N/A');
-            box.appendChild(label);
-            box.appendChild(body);
-            mod.appendChild(box);
-          }
           modulesWrap.appendChild(mod);
         });
 
@@ -2023,52 +2209,57 @@ export default function StudentPortrait({
     academicYearRubric,
     subjectShowsAssessmentScore,
     reportYearExamPreset,
+    gradeConfig,
   ]);
 
-  const workbenchSubject = useMemo(
-    () =>
-      isWorkbenchHomeroomMode(workbenchSubjectKey)
-        ? null
-        : workbenchTemplateDetail?.subjects.find((s) => s.subjectKey === workbenchSubjectKey) ?? null,
-    [workbenchTemplateDetail, workbenchSubjectKey],
-  );
-  const workbenchIsExamSubject = useMemo(() => {
-    if (!workbenchSubject) return false;
-    const tpl = workbenchTemplateDetail;
+  const workbenchClassGradeCatalogId = useMemo(() => {
     const cls = workbenchProgress?.classes.find((c) => c.classId === workbenchClassId);
-    if (!tpl || !cls || !workbenchYearExamPreset) {
-      return workbenchSubject.enableScore !== false;
-    }
-    const gc = normalizeGradeConfig(loadGradeConfigSync());
-    const gradeCatalogId = gc.items.find((i) => i.level === cls.grade)?.id ?? null;
+    if (!cls) return null;
+    const classRow = classes.find((c) => c.id === workbenchClassId);
+    return getGradeCatalogIdForClass(gradeConfig, cls.grade, {
+      className: classRow?.name ?? cls.className,
+    });
+  }, [workbenchProgress, workbenchClassId, classes, gradeConfig]);
+
+  const workbenchSubject = useMemo(() => {
+    if (isWorkbenchHomeroomMode(workbenchSubjectKey)) return null;
+    const raw = workbenchTemplateDetail?.subjects.find((s) => s.subjectKey === workbenchSubjectKey);
+    if (!raw) return null;
+    const dims = resolveTemplateDimensionsForGrade(raw, workbenchClassGradeCatalogId);
+    return {
+      ...raw,
+      dimensions: dims.map((d) => ({
+        id: d.id ?? `wb-dim-${d.dimensionKey}`,
+        dimensionKey: d.dimensionKey,
+        dimensionLabel: d.dimensionLabel,
+        dimensionLabelZh: d.dimensionLabelZh ?? d.dimensionLabel,
+        dimensionLabelEn: d.dimensionLabelEn ?? d.dimensionLabel,
+        sortOrder: d.sortOrder,
+        levelDescriptions: d.levelDescriptions ?? {},
+      })),
+    };
+  }, [workbenchTemplateDetail, workbenchSubjectKey, workbenchClassGradeCatalogId]);
+  /** 与后台考试设置、API 保存校验、学生端展示共用：effectiveTemplateSubjectEnableScore + 学年模块化配置 */
+  const workbenchIsExamSubject = useMemo(() => {
+    if (!workbenchSubject || !workbenchTemplateDetail || !workbenchYearExamPresetLoaded) return false;
+    const tpl = workbenchTemplateDetail;
     const segmentId = String(tpl.schoolSegmentId ?? '').trim();
-    if (!segmentId || !gradeCatalogId) return workbenchSubject.enableScore !== false;
-    const seg = gc.segments?.find((s) => s.id === segmentId);
-    const segmentGradeIds = seg?.gradeIds ?? [];
-    const courseId = String(workbenchYearExamPreset.subjectKeyToCourseId?.[workbenchSubject.subjectKey] ?? '').trim();
-    if (!courseId) return workbenchSubject.enableScore !== false;
-    if (
-      isExamGradeIncluded(
-        tpl.term,
-        segmentId,
-        courseId,
-        gradeCatalogId,
-        segmentGradeIds,
-        workbenchYearExamPreset.stageInclusion,
-        workbenchYearExamPreset.evaluationGradeInclusion,
-        workbenchYearExamPreset.examGradeInclusion,
-        workbenchYearExamPreset.examConfigs,
-      )
-    ) {
-      return true;
-    }
-    return workbenchSubject.enableScore !== false;
+    return effectiveTemplateSubjectEnableScore(
+      tpl.term,
+      segmentId,
+      workbenchSubject.subjectKey,
+      workbenchClassGradeCatalogId,
+      getSegmentGradeIds(gradeConfig, segmentId),
+      workbenchSubject.enableScore !== false,
+      workbenchYearExamPreset,
+    );
   }, [
     workbenchSubject,
     workbenchTemplateDetail,
-    workbenchProgress,
-    workbenchClassId,
+    workbenchClassGradeCatalogId,
     workbenchYearExamPreset,
+    workbenchYearExamPresetLoaded,
+    gradeConfig,
   ]);
   const workbenchReadOnly = useMemo(
     () =>
@@ -2090,6 +2281,11 @@ export default function StudentPortrait({
     adminViewTeacherId,
     workbenchTeacherDisplayName,
   ]);
+  const workbenchActionableClasses = useMemo(
+    () => filterWorkbenchActionableClasses(workbenchProgress?.classes ?? [], workbenchTemplateDetail?.subjects),
+    [workbenchProgress, workbenchTemplateDetail],
+  );
+
   const workbenchClassProgressItem = useMemo(
     () => workbenchProgress?.classes.find((c) => c.classId === workbenchClassId) ?? null,
     [workbenchProgress, workbenchClassId],
@@ -2105,43 +2301,42 @@ export default function StudentPortrait({
     const cls = workbenchProgress?.classes.find((c) => c.classId === workbenchClassId);
     const sub = tpl?.subjects.find((s) => s.subjectKey === workbenchSubjectKey);
     const letterFallback = mergeReportScoreGradeMinScores(tpl?.scoreGradeMinScores ?? {});
-    const dimDefaults = () => {
-      const dimMax = new Map<string, number>();
-      for (const d of sub?.dimensions ?? []) dimMax.set(d.dimensionKey, 100);
-      const totalM = Math.max(
-        1,
-        (sub?.dimensions ?? []).reduce((acc, d) => acc + (dimMax.get(d.dimensionKey) ?? 100), 0),
-      );
-      return { dimensionMaxByKey: dimMax, totalMax: totalM, letterMins: letterFallback };
-    };
-    if (!tpl || !sub || !cls || !workbenchYearExamPreset?.examConfigs) {
-      return dimDefaults();
+    const emptyDimMax = new Map<string, number>();
+    if (!workbenchIsExamSubject) {
+      return { dimensionMaxByKey: emptyDimMax, totalMax: 100, examFullScore: null, configuredBands: null, letterMins: letterFallback };
     }
-    const gc = normalizeGradeConfig(loadGradeConfigSync());
-    const gradeCatalogId = gc.items.find((i) => i.level === cls.grade)?.id ?? null;
+    if (!tpl || !sub || !cls || !workbenchYearExamPreset?.examConfigs) {
+      return { dimensionMaxByKey: emptyDimMax, totalMax: 100, examFullScore: null, configuredBands: null, letterMins: letterFallback };
+    }
+    const classRow = classes.find((c) => c.id === workbenchClassId);
+    const gradeCatalogId = getGradeCatalogIdForClass(gradeConfig, cls.grade, {
+      className: classRow?.name ?? cls.className,
+    });
     const examKey = `${tpl.term}::${(tpl.schoolSegmentId ?? '').trim()}`;
     const scope = workbenchYearExamPreset.examConfigs[examKey];
     const examSubject = scope?.subjects?.find((s) => s.subjectKey === workbenchSubjectKey);
     const examG =
       examSubject?.gradeConfigs?.find((g) => g.gradeId === gradeCatalogId) ?? examSubject?.gradeConfigs?.[0] ?? null;
-    if (!examG) return dimDefaults();
-    const dimensionMaxByKey = matchWorkbenchDimensionMaxes(
-      sub.dimensions.map((d) => ({
-        dimensionKey: d.dimensionKey,
-        dimensionLabelZh: d.dimensionLabelZh,
-        dimensionLabelEn: d.dimensionLabelEn,
-      })),
-      examG.dimensionScores ?? [],
-    );
-    let totalMax = 0;
-    for (const d of sub.dimensions) {
-      totalMax += dimensionMaxByKey.get(d.dimensionKey) ?? 100;
-    }
-    totalMax = Math.max(1, totalMax);
-    const examHasBands = Object.values(examG.percentBands ?? {}).some((v) => typeof v === 'number' && Number.isFinite(v));
-    const letterMins = examHasBands ? mergeReportScoreGradeMinScores(examG.percentBands ?? {}) : letterFallback;
-    return { dimensionMaxByKey, totalMax, letterMins };
-  }, [workbenchTemplateDetail, workbenchYearExamPreset, workbenchClassId, workbenchSubjectKey, workbenchProgress]);
+    const configuredBands = configuredReportScoreGradeMins(examG?.percentBands ?? {});
+    const hasExamBands = Object.keys(configuredBands).length > 0;
+    const totalMax = hasExamBands ? examFullScoreFromGradeConfig(examG?.fullScore, examG?.percentBands) : 100;
+    return {
+      dimensionMaxByKey: emptyDimMax,
+      totalMax,
+      examFullScore: hasExamBands ? totalMax : null,
+      configuredBands: hasExamBands ? configuredBands : null,
+      letterMins: letterFallback,
+    };
+  }, [
+    workbenchTemplateDetail,
+    workbenchYearExamPreset,
+    workbenchClassId,
+    workbenchSubjectKey,
+    workbenchProgress,
+    workbenchIsExamSubject,
+    gradeConfig,
+    classes,
+  ]);
   const workbenchScores = useMemo(
     () =>
       workbenchStudentDrafts
@@ -2221,11 +2416,11 @@ export default function StudentPortrait({
     if (typeof window === 'undefined') return;
     const homeroom = isWorkbenchHomeroomMode(workbenchSubjectKey);
     const includedStudentIds = new Set(
-      workbenchStudentDrafts
-        .filter((r) =>
-          homeroom ? (r.homeroomComment ?? '').trim().length > 0 : (r.subject.teacherComment ?? '').trim().length > 0,
-        )
-        .map((r) => r.studentId),
+      homeroom
+        ? workbenchStudentDrafts
+            .filter((r) => (r.homeroomComment ?? '').trim().length > 0)
+            .map((r) => r.studentId)
+        : workbenchStudentDrafts.map((r) => r.studentId),
     );
     setWorkbenchPdfExporting(true);
     setWorkbenchError(null);
@@ -2277,16 +2472,13 @@ export default function StudentPortrait({
 
         const head: string[] = [isZh ? '学生' : 'Student'];
         for (const d of workbenchSubject.dimensions) {
-          const dimMax = workbenchScoreRules.dimensionMaxByKey.get(d.dimensionKey) ?? 100;
-          head.push(
-            workbenchIsExamSubject ? `${d.dimensionLabel}${isZh ? `（${dimMax}）` : `(${dimMax})`}` : d.dimensionLabel,
-          );
+          head.push(d.dimensionLabel);
         }
         if (workbenchIsExamSubject) {
           head.push(
             isZh
-              ? `总成绩（满分${workbenchScoreRules.totalMax}）`
-              : `Total (max ${workbenchScoreRules.totalMax})`,
+              ? `测评成绩（满分${workbenchScoreRules.totalMax}）`
+              : `Assessment score (max ${workbenchScoreRules.totalMax})`,
           );
         }
         head.push(isZh ? '学习品质' : 'Learning quality');
@@ -2294,29 +2486,11 @@ export default function StudentPortrait({
         const body = workbenchStudentDrafts.map((row) => {
           const cells: string[] = [row.studentName];
           for (const d of workbenchSubject.dimensions) {
-            if (workbenchIsExamSubject) {
-              const v = row.subject.examDimensionScores?.[d.dimensionKey];
-              const maxPts = workbenchScoreRules.dimensionMaxByKey.get(d.dimensionKey) ?? 100;
-              if (v != null && Number.isFinite(v)) {
-                const dimPct = maxPts > 0 ? (v / maxPts) * 100 : null;
-                const dimAbcdAuto = reportPercentToTargetLevel(dimPct, workbenchScoreRules.letterMins);
-                const dimLetter =
-                  row.subject.dimensions.find((x) => x.dimensionKey === d.dimensionKey)?.rating ??
-                  dimAbcdAuto ??
-                  'A';
-                cells.push(`${v} ${dimLetter}`);
-              } else {
-                cells.push('');
-              }
-            } else {
-              cells.push(row.subject.dimensions.find((x) => x.dimensionKey === d.dimensionKey)?.rating ?? 'A');
-            }
+            cells.push(row.subject.dimensions.find((x) => x.dimensionKey === d.dimensionKey)?.rating ?? 'A');
           }
           if (workbenchIsExamSubject) {
             const total = row.subject.finalScore;
-            const totalPct =
-              total != null && workbenchScoreRules.totalMax > 0 ? (total / workbenchScoreRules.totalMax) * 100 : null;
-            const totalGradeFine = reportLetterGradeFromScore(totalPct, workbenchScoreRules.letterMins);
+            const totalGradeFine = workbenchExamLetterGrade(total, workbenchScoreRules);
             cells.push(
               total != null ? `${total}${totalGradeFine ? ` ${totalGradeFine}` : ''}`.trim() : '—',
             );
@@ -2327,71 +2501,39 @@ export default function StudentPortrait({
 
         if (body.length > 0) {
           await wbPdfAppendChunkedDataTableAsImages(pdf, {
-            sectionTitle: workbenchIsExamSubject
-              ? isZh
-                ? '第一板块：学科成绩分析'
-                : 'Section 1: Subject score analysis'
-              : isZh
-                ? '第一板块：学习目标达成'
-                : 'Section 1: Learning goal achievement',
+            sectionTitle: isZh ? '学业质量评价' : 'Academic quality evaluation',
             showSectionTitleOnFirstChunkOnly: true,
             head,
             body,
             rowsPerChunk: 10,
             flow,
+            cellTextAlign: 'center',
           });
         }
 
-        const weakBody = workbenchIsExamSubject
-          ? workbenchWeaknessRows
-              .filter((w) => w.weakPoint.trim() || w.errorAnalysis.trim() || w.nextPlan.trim())
-              .map((w) => [w.weakPoint.trim(), w.errorAnalysis.trim(), w.nextPlan.trim()])
-          : [];
-        if (weakBody.length > 0) {
-          await wbPdfAppendChunkedDataTableAsImages(pdf, {
-            sectionTitle: isZh ? '第二板块：薄弱点分析' : 'Section 2: Weak-point analysis',
-            showSectionTitleOnFirstChunkOnly: true,
-            head: [
-              isZh ? '薄弱点' : 'Weak point',
-              isZh ? '原因分析' : 'Cause analysis',
-              isZh ? '下一步计划' : 'Next plan',
-            ],
-            body: weakBody,
-            rowsPerChunk: 12,
-            flow,
-          });
-        }
-
-        const commentRows = workbenchStudentDrafts
-          .filter((r) => includedStudentIds.has(r.studentId))
-          .map((r) => [r.studentName, (r.subject.teacherComment ?? '').trim()]);
-        if (commentRows.length > 0) {
-          await wbPdfAppendChunkedDataTableAsImages(pdf, {
-            sectionTitle: workbenchIsExamSubject
-              ? isZh
-                ? '第三板块：学生评语'
-                : 'Section 3: Student comments'
-              : isZh
-                ? '第二板块：学生评语'
-                : 'Section 2: Student comments',
-            showSectionTitleOnFirstChunkOnly: true,
-            head: [isZh ? '学生' : 'Student', isZh ? '学科评语' : 'Subject comment'],
-            body: commentRows,
-            rowsPerChunk: 8,
-            flow,
-          });
-        }
-
-        if (workbenchTeachingReflection.trim()) {
+        if (workbenchClassOverallAnalysis.trim()) {
           await wbPdfAppendWorkbenchTextSectionAsImage(pdf, {
-            title: workbenchIsExamSubject
-              ? isZh
-                ? '第四板块：阶段教学反思'
-                : 'Section 4: Teaching reflection'
-              : isZh
-                ? '第三板块：阶段教学反思'
-                : 'Section 3: Teaching reflection',
-            body: workbenchTeachingReflection,
+            title: isZh ? '班级整体分析（校内记录）' : 'Class overall analysis (internal)',
+            body: workbenchClassOverallAnalysis,
+            flow,
+          });
+        }
+
+        const studentNameById = new Map(workbenchStudentDrafts.map((r) => [r.studentId, r.studentName]));
+        const analysisBody = workbenchStudentAnalysisRows
+          .filter((row) => row.studentId && (row.learningAnalysis.trim() || row.supportPlan.trim()))
+          .map((row) => [
+            studentNameById.get(row.studentId) ?? row.studentId,
+            row.learningAnalysis.trim(),
+            row.supportPlan.trim(),
+          ]);
+        if (analysisBody.length > 0) {
+          await wbPdfAppendChunkedDataTableAsImages(pdf, {
+            sectionTitle: isZh ? '个别学生分析（校内记录）' : 'Individual student analysis (internal)',
+            showSectionTitleOnFirstChunkOnly: true,
+            head: [isZh ? '学生' : 'Student', isZh ? '学情分析' : 'Learning analysis', isZh ? '支持计划' : 'Support plan'],
+            body: analysisBody,
+            rowsPerChunk: 8,
             flow,
           });
         }
@@ -2420,8 +2562,8 @@ export default function StudentPortrait({
     workbenchStudentDrafts,
     workbenchIsExamSubject,
     workbenchScoreRules,
-    workbenchWeaknessRows,
-    workbenchTeachingReflection,
+    workbenchClassOverallAnalysis,
+    workbenchStudentAnalysisRows,
     workbenchTeacherDisplayName,
     isZh,
   ]);
@@ -2495,8 +2637,8 @@ export default function StudentPortrait({
               subjectName: row.subject.subjectName,
               midtermScore: row.subject.midtermScore,
               finalScore: row.subject.finalScore,
-              examDimensionScores: row.subject.examDimensionScores ?? null,
-              teacherComment: row.subject.teacherComment ?? null,
+              examDimensionScores: null,
+              teacherComment: null,
               learningQualityGrade: row.subject.learningQualityGrade ?? 'A',
               dimensions: row.subject.dimensions.map((d) => ({
                 dimensionKey: d.dimensionKey,
@@ -2509,21 +2651,17 @@ export default function StudentPortrait({
         }),
       );
       await api.upsertReportClassSubjectInsights(workbenchTemplateDetail.id ?? '', workbenchClassId, workbenchSubjectKey, {
-        weaknessRows: workbenchIsExamSubject ? workbenchWeaknessRows : [],
-        teachingReflection: workbenchTeachingReflection.trim() || null,
+        classOverallAnalysis: workbenchClassOverallAnalysis.trim() || null,
+        studentAnalysisRows: workbenchStudentAnalysisRows.filter((row) => row.studentId),
       });
       const progress = await api.getMyReportTemplateProgress(workbenchTemplateDetail.id ?? '');
       setWorkbenchProgress(progress);
 
       const incomplete: string[] = [];
-      if (!workbenchTeachingReflection.trim()) {
-        incomplete.push(isZh ? '阶段教学反思' : 'Teaching reflection');
-      }
       if (workbenchIsExamSubject && workbenchSubject) {
-        const pendingNames = workbenchStudentDrafts.filter((row) => {
-          const scores = row.subject.examDimensionScores ?? {};
-          return !workbenchSubject.dimensions.every((d) => typeof scores[d.dimensionKey] === 'number');
-        }).map((r) => r.studentName);
+        const pendingNames = workbenchStudentDrafts
+          .filter((row) => row.subject.finalScore == null || !Number.isFinite(row.subject.finalScore))
+          .map((r) => r.studentName);
         if (pendingNames.length > 0) {
           const head = pendingNames.slice(0, 8).join(isZh ? '、' : ', ');
           const tail =
@@ -2584,7 +2722,6 @@ export default function StudentPortrait({
       setSelectedTemplateId('');
       setReportDetail(null);
       setReportTemplate(null);
-      setHomeroomCommentDraft('');
       return;
     }
     const key = `${currentYearId ?? ''}::${reportTerm}::${selectedTemplateId}`;
@@ -2677,21 +2814,32 @@ export default function StudentPortrait({
     let cancelled = false;
     setClassReportLoading(true);
     setClassReportError(null);
-    Promise.all([
-      api.getReportTemplateById(templateId),
-      Promise.all(
-        myStudents.map(async (stu) => {
-          const detail = await api.getStudentTermReportDetail(stu.id, academicYearId, term, templateId);
-          return { student: stu, detail };
-        }),
-      ),
-    ])
-      .then(([template, details]) => {
+    Promise.all(
+      myStudents.map(async (stu) => {
+        const bundle = await api.getStudentTermReportBundle(stu.id, academicYearId, term, templateId);
+        const classRow = classes.find((c) => c.id === selectedClassId);
+        return {
+          student: stu,
+          bundle,
+          gradeCatalogId: gradeCatalogIdForStudentGrade(
+            gradeConfig,
+            stu.currentGrade ?? null,
+            classRow?.name,
+          ),
+        };
+      }),
+    )
+      .then((rows) => {
         if (cancelled) return;
-        setClassReportTemplate(template);
-        const merged = details.map((x) => ({
+        setClassReportTemplate(rows[0]?.bundle.template ?? null);
+        const merged = rows.map((x) => ({
           student: x.student,
-          report: mergeStudentTermReportWithTemplate(x.detail, template),
+          report: mergeStudentTermReportWithTemplate(
+            x.bundle.report,
+            x.bundle.template,
+            x.gradeCatalogId,
+            { padMissingSubjects: false, blankUnsetRatings: true },
+          ),
         }));
         setClassReportSnapshotItems(merged);
       })
@@ -2832,29 +2980,20 @@ export default function StudentPortrait({
                 <h3 className="text-base font-semibold text-slate-800">{isZh ? '学业报告（按学期）' : 'Academic report (by term)'}</h3>
                 {reportLoading && <span className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</span>}
               </div>
-              <div className="flex flex-wrap gap-2">
-                <select
+              <FilterToolbar>
+                <AcademicYearSelect
+                  isZh={isZh}
+                  years={reportYearOptions}
                   value={currentYearId || ''}
-                  onChange={(e) => setCurrentYearId(e.target.value || null)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[160px]"
-                >
-                  <option value="">{isZh ? '选择学年' : 'Select year'}</option>
-                  {reportYearOptions.map((y) => (
-                    <option key={y.id} value={y.id}>{y.name}</option>
-                  ))}
-                </select>
-                <select
-                  value={reportTerm}
-                  onChange={(e) => setReportTerm(e.target.value as Term)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[140px]"
-                >
-                  <option value="Semester 1">{isZh ? '上学期' : 'Semester 1'}</option>
-                  <option value="Semester 2">{isZh ? '下学期' : 'Semester 2'}</option>
-                </select>
-                <select
+                  onChange={(id) => setCurrentYearId(id || null)}
+                  allowEmpty
+                  emptyLabel={isZh ? '选择学年' : 'Select year'}
+                />
+                <TermSelect isZh={isZh} value={reportTerm} onChange={setReportTerm} />
+                <FilterSelect
+                  width="report"
                   value={selectedTemplateId}
                   onChange={(e) => setSelectedTemplateId(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[180px]"
                 >
                   <option value="">{isZh ? '选择评价报告' : 'Select report'}</option>
                   {reportTemplates.map((tpl) => (
@@ -2862,8 +3001,8 @@ export default function StudentPortrait({
                       {tpl.title || (isZh ? '未命名评价' : 'Untitled evaluation')}
                     </option>
                   ))}
-                </select>
-              </div>
+                </FilterSelect>
+              </FilterToolbar>
               {!reportDetail || reportDetail.subjectReports.length === 0 ? (
                 <p className="text-sm text-slate-500">{isZh ? '该学期暂无学业报告。' : 'No report for this term yet.'}</p>
               ) : (
@@ -2887,17 +3026,15 @@ export default function StudentPortrait({
                       ) && (
                         <div className="text-xs text-slate-500 mt-1">
                           {isZh ? '期中等第' : 'Midterm grade'}:{' '}
-                          {s.midtermGrade ??
-                            reportLetterGradeFromScore(s.midtermScore, reportTemplate?.scoreGradeMinScores) ??
-                            '—'}{' '}
+                          {resolveSubjectAssessmentGrade(
+                            { ...s, finalGrade: s.midtermGrade, finalScore: s.midtermScore },
+                            reportTemplate,
+                            reportYearExamPreset,
+                            reportStudentGradeCatalogId,
+                          )}{' '}
                           · {isZh ? '期末等第' : 'Final grade'}:{' '}
-                          {s.finalGrade ??
-                            reportLetterGradeFromScore(s.finalScore, reportTemplate?.scoreGradeMinScores) ??
-                            '—'}
+                          {resolveSubjectAssessmentGrade(s, reportTemplate, reportYearExamPreset, reportStudentGradeCatalogId)}
                         </div>
-                      )}
-                      {subjectConfig?.enableTeacherComment !== false && s.teacherComment && (
-                        <p className="text-sm text-slate-700 mt-2">{s.teacherComment}</p>
                       )}
                       {s.dimensions.length > 0 && (
                         <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -2986,35 +3123,39 @@ export default function StudentPortrait({
               <div className="text-sm text-slate-600">
                 {workbenchAdminViewing
                   ? isZh
-                    ? '选择教师后，可只读查看其负责的班级学业报告、考试学科成绩分析与教学反思完成情况。'
-                    : 'Select a teacher to view their assigned classes, exam score analysis, reflections, and completion (read-only).'
+                    ? '选择教师后，可只读查看其负责的班级学业报告、学业质量评价、班级整体分析与个别学生分析完成情况。'
+                    : 'Select a teacher to view assigned classes, quality evaluation, class analysis, individual student notes, and completion (read-only).'
                   : isZh
                     ? '先选择本次学业报告，再查看你需要完成的班级与实时进度。'
                     : 'Select a report first, then work through your assigned classes with live progress.'}
               </div>
-              <div className="flex flex-wrap gap-2">
-                <select
+              <FilterToolbar>
+                <AcademicYearSelect
+                  isZh={isZh}
+                  years={years}
                   value={currentYearId || ''}
-                  onChange={(e) => setCurrentYearId(e.target.value || null)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[180px]"
-                >
-                  <option value="">{isZh ? '选择学年' : 'Select year'}</option>
-                  {years.map((y) => (
-                    <option key={y.id} value={y.id}>{y.name}</option>
-                  ))}
-                </select>
-                <select
+                  onChange={(id) => {
+                    workbenchManualPickRef.current = false;
+                    setCurrentYearId(id || null);
+                  }}
+                  allowEmpty
+                  emptyLabel={isZh ? '选择学年' : 'Select year'}
+                />
+                <TermSelect
+                  isZh={isZh}
                   value={reportTerm}
-                  onChange={(e) => setReportTerm(e.target.value as Term)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[140px]"
-                >
-                  <option value="Semester 1">{isZh ? '上学期' : 'Semester 1'}</option>
-                  <option value="Semester 2">{isZh ? '下学期' : 'Semester 2'}</option>
-                </select>
-                <select
+                  onChange={(next) => {
+                    workbenchManualPickRef.current = false;
+                    setReportTerm(next);
+                  }}
+                />
+                <FilterSelect
+                  width="report"
                   value={workbenchTemplateId}
-                  onChange={(e) => setWorkbenchTemplateId(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[260px]"
+                  onChange={(e) => {
+                    workbenchManualPickRef.current = true;
+                    setWorkbenchTemplateId(e.target.value);
+                  }}
                 >
                   <option value="">{isZh ? '选择学业报告' : 'Select report'}</option>
                   {workbenchTemplates
@@ -3024,12 +3165,12 @@ export default function StudentPortrait({
                         {tpl.title || (isZh ? '未命名评价' : 'Untitled evaluation')}
                       </option>
                     ))}
-                </select>
+                </FilterSelect>
                 {workbenchAdminViewing ? (
-                  <select
+                  <FilterSelect
+                    width="teacher"
                     value={adminViewTeacherId}
                     onChange={(e) => setAdminViewTeacherId(e.target.value)}
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[200px]"
                     disabled={!workbenchTemplateId || adminViewTeachers.length === 0}
                   >
                     <option value="">{isZh ? '选择教师' : 'Select teacher'}</option>
@@ -3038,7 +3179,7 @@ export default function StudentPortrait({
                         {t.name}
                       </option>
                     ))}
-                  </select>
+                  </FilterSelect>
                 ) : null}
                 {workbenchReadOnly ? (
                   <span className="inline-flex h-10 items-center rounded-full border border-amber-300 bg-amber-50 px-3 text-xs font-medium text-amber-800">
@@ -3051,7 +3192,7 @@ export default function StudentPortrait({
                         : 'Read-only mode (stopped)'}
                   </span>
                 ) : null}
-              </div>
+              </FilterToolbar>
               {workbenchError && (
                 <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
                   {workbenchError}
@@ -3128,7 +3269,7 @@ export default function StudentPortrait({
               </div>
             )}
 
-            {!workbenchLoading && workbenchTemplateId && workbenchProgress && workbenchProgress.classes.length === 0 && (
+            {!workbenchLoading && workbenchTemplateId && workbenchProgress && workbenchActionableClasses.length === 0 && (
               <div className="bg-white border border-dashed border-slate-200 rounded-xl p-6 text-sm text-slate-500 text-center">
                 {workbenchAdminViewing
                   ? isZh
@@ -3140,7 +3281,7 @@ export default function StudentPortrait({
               </div>
             )}
 
-            {!workbenchLoading && workbenchTemplateDetail && workbenchClassId && workbenchSubjectKey && (
+            {!workbenchLoading && workbenchTemplateDetail && workbenchClassId && (
               <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
                 <div ref={workbenchPdfExportRef} id="workbench-pdf-export-root" className="space-y-4">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
@@ -3153,7 +3294,7 @@ export default function StudentPortrait({
                     className="h-9 rounded-lg border border-slate-300 px-3 text-sm leading-none bg-white min-w-[120px]"
                     aria-label={isZh ? '班级' : 'Class'}
                   >
-                    {workbenchProgress?.classes.map((c) => (
+                    {workbenchActionableClasses.map((c) => (
                       <option key={c.classId} value={c.classId}>
                         {workbenchClassShortLabel(c)}
                       </option>
@@ -3185,7 +3326,13 @@ export default function StudentPortrait({
                   ) : null}
                 </div>
 
-                {isWorkbenchHomeroomMode(workbenchSubjectKey) ? (
+                {!workbenchSubjectKey ? (
+                  <p className="text-sm text-slate-500 rounded-lg border border-slate-200 bg-slate-50 px-3 py-4">
+                    {isZh
+                      ? '当前班级在本学期学业报告中没有你需要填写的学科，请选择其他班级。'
+                      : 'No subjects assigned for this class in this report; please choose another class.'}
+                  </p>
+                ) : isWorkbenchHomeroomMode(workbenchSubjectKey) ? (
                   <>
                     <div id="workbench-pdf-homeroom-block" className="rounded-lg border border-slate-200 p-3 space-y-2">
                       <div className="text-sm font-medium text-slate-800">
@@ -3225,13 +3372,7 @@ export default function StudentPortrait({
                   <>
                     <div className="rounded-lg border border-slate-200 p-3 space-y-2">
                       <div className="text-sm font-medium text-slate-800">
-                        {workbenchIsExamSubject
-                          ? isZh
-                            ? '第一板块：学科成绩分析'
-                            : 'Section 1: Subject score analysis'
-                          : isZh
-                            ? '第一板块：学习目标达成'
-                            : 'Section 1: Learning goal achievement'}
+                        {isZh ? '学业质量评价' : 'Academic quality evaluation'}
                       </div>
                       {workbenchIsExamSubject && (
                         <div
@@ -3358,204 +3499,106 @@ export default function StudentPortrait({
                         >
                           <thead className="bg-slate-50">
                             <tr>
-                              <th className="px-2 py-[0.4rem] text-left align-middle font-medium">{isZh ? '学生' : 'Student'}</th>
-                              {workbenchSubject.dimensions.map((d) => {
-                                const dimMax = workbenchScoreRules.dimensionMaxByKey.get(d.dimensionKey) ?? 100;
-                                return (
-                                  <th key={d.id} className="px-2 py-[0.4rem] text-left align-middle font-medium">
-                                    {d.dimensionLabel}
-                                    {workbenchIsExamSubject ? (
-                                      <span className="text-slate-500 font-normal">
-                                        {isZh ? `（满分${dimMax}）` : ` (max ${dimMax})`}
-                                      </span>
-                                    ) : null}
-                                  </th>
-                                );
-                              })}
+                              <th className="px-2 py-[0.4rem] text-center align-middle font-medium">{isZh ? '学生' : 'Student'}</th>
+                              {workbenchSubject.dimensions.map((d) => (
+                                <th key={d.id} className="px-2 py-[0.4rem] text-center align-middle font-medium">
+                                  {d.dimensionLabel}
+                                </th>
+                              ))}
                               {workbenchIsExamSubject ? (
-                                <th className="px-2 py-[0.4rem] text-left align-middle font-medium">
-                                  {isZh ? '总成绩' : 'Total'}
+                                <th className="px-2 py-[0.4rem] text-center align-middle font-medium">
+                                  {isZh ? '测评成绩' : 'Assessment score'}
                                   <span className="text-slate-500 font-normal">
                                     {isZh ? `（满分${workbenchScoreRules.totalMax}）` : ` (max ${workbenchScoreRules.totalMax})`}
                                   </span>
                                 </th>
                               ) : null}
-                              <th className="px-2 py-[0.4rem] text-left align-middle font-medium">{isZh ? '学习品质' : 'Learning quality'}</th>
+                              <th className="px-2 py-[0.4rem] text-center align-middle font-medium">{isZh ? '学习品质' : 'Learning quality'}</th>
                             </tr>
                           </thead>
                           <tbody>
                             {workbenchStudentDrafts.map((row, idx) => {
                               const total = row.subject.finalScore;
-                              const totalPct =
-                                total != null && workbenchScoreRules.totalMax > 0
-                                  ? (total / workbenchScoreRules.totalMax) * 100
-                                  : null;
-                              const totalGradeFine = reportLetterGradeFromScore(totalPct, workbenchScoreRules.letterMins);
+                              const totalGradeFine = workbenchExamLetterGrade(total, workbenchScoreRules);
                               return (
                                 <tr key={row.studentId} className="border-t border-slate-100">
-                                  <td className="px-2 py-[0.4rem] align-middle text-slate-800 font-medium">{row.studentName}</td>
+                                  <td className="px-2 py-[0.4rem] align-middle text-center text-slate-800 font-medium">
+                                    {row.studentName}
+                                  </td>
                                   {workbenchSubject.dimensions.map((d) => {
-                                    const dimScore = row.subject.examDimensionScores?.[d.dimensionKey] ?? null;
-                                    const maxPts = workbenchScoreRules.dimensionMaxByKey.get(d.dimensionKey) ?? 100;
-                                    const dimPct =
-                                      dimScore != null && maxPts > 0 ? (dimScore / maxPts) * 100 : null;
-                                    const dimAbcdAuto = reportPercentToTargetLevel(dimPct, workbenchScoreRules.letterMins);
-                                    const dimRating =
-                                      (row.subject.dimensions.find((x) => x.dimensionKey === d.dimensionKey)?.rating ??
-                                        dimAbcdAuto ??
-                                        'A') as TargetLevel;
+                                    const dimRating = (row.subject.dimensions.find((x) => x.dimensionKey === d.dimensionKey)?.rating ??
+                                      'A') as TargetLevel;
                                     return (
-                                      <td key={d.id} className="px-2 py-[0.4rem] align-middle">
-                                        <div className="flex items-center gap-1.5">
-                                          {workbenchIsExamSubject ? (
-                                            <>
-                                            <input
-                                              type="number"
-                                              min={0}
-                                              max={maxPts}
-                                              step={0.5}
-                                              value={dimScore ?? ''}
-                                              onChange={(e) => {
-                                                const v = e.target.value.trim();
-                                                const next = v === '' ? null : Number(v);
-                                                setWorkbenchStudentDrafts((prev) =>
-                                                  prev.map((r, rIdx) => {
-                                                    if (rIdx !== idx) return r;
-                                                    const scores = { ...(r.subject.examDimensionScores ?? {}) };
-                                                    scores[d.dimensionKey] =
-                                                      next !== null && Number.isFinite(next)
-                                                        ? Math.min(maxPts, Math.max(0, next))
-                                                        : null;
-                                                    const dims = workbenchSubject.dimensions
-                                                      .map((x) => scores[x.dimensionKey])
-                                                      .filter((n): n is number => typeof n === 'number');
-                                                    const allFilled = workbenchSubject.dimensions.every(
-                                                      (x) => typeof scores[x.dimensionKey] === 'number',
-                                                    );
-                                                    const totalScore = allFilled
-                                                      ? Number(dims.reduce((a, b) => a + b, 0).toFixed(2))
-                                                      : null;
-                                                    const pct =
-                                                      scores[d.dimensionKey] != null && maxPts > 0
-                                                        ? ((scores[d.dimensionKey] as number) / maxPts) * 100
-                                                        : null;
-                                                    const nextDimRating =
-                                                      scores[d.dimensionKey] == null
-                                                        ? ('A' as TargetLevel)
-                                                        : reportPercentToTargetLevel(
-                                                            pct,
-                                                            workbenchScoreRules.letterMins,
-                                                          ) ?? ('A' as TargetLevel);
-                                                    return {
+                                      <td key={d.id} className="px-2 py-[0.4rem] align-middle text-center">
+                                        <select
+                                          value={dimRating}
+                                          onChange={(e) =>
+                                            setWorkbenchStudentDrafts((prev) =>
+                                              prev.map((r, rIdx) =>
+                                                rIdx !== idx
+                                                  ? r
+                                                  : {
                                                       ...r,
                                                       subject: {
                                                         ...r.subject,
-                                                        examDimensionScores: scores,
-                                                        finalScore: totalScore,
                                                         dimensions: r.subject.dimensions.map((x) =>
                                                           x.dimensionKey === d.dimensionKey
-                                                            ? { ...x, rating: nextDimRating }
+                                                            ? { ...x, rating: e.target.value as TargetLevel }
                                                             : x,
                                                         ),
                                                       },
-                                                    };
-                                                  }),
-                                                );
-                                              }}
-                                              className="h-[1.6rem] w-12 rounded border border-slate-300 px-1 text-center text-xs leading-none tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                                              disabled={workbenchReadOnly}
-                                            />
-                                            <select
-                                              value={dimRating}
-                                              onChange={(e) => {
-                                                const v = e.target.value;
-                                                const nextR = (['A', 'B', 'C', 'D'].includes(v) ? v : 'A') as TargetLevel;
-                                                setWorkbenchStudentDrafts((prev) =>
-                                                  prev.map((r, rIdx) =>
-                                                    rIdx !== idx
-                                                      ? r
-                                                      : {
-                                                          ...r,
-                                                          subject: {
-                                                            ...r.subject,
-                                                            dimensions: r.subject.dimensions.map((x) =>
-                                                              x.dimensionKey === d.dimensionKey
-                                                                ? { ...x, rating: nextR }
-                                                                : x,
-                                                            ),
-                                                          },
-                                                        },
-                                                  ),
-                                                );
-                                              }}
-                                              className="h-[1.6rem] min-w-[2.75rem] rounded border border-slate-300 px-1 text-center text-xs font-semibold leading-none text-slate-800"
-                                              disabled={workbenchReadOnly}
-                                              title={
-                                                isZh
-                                                  ? '默认由得分率按考试规则换算；可改。改分数后会按新分数重新换算。'
-                                                  : 'Default from score %; editable. Changing the score resets to the new auto grade.'
-                                              }
-                                            >
-                                              <option value="A">A</option>
-                                              <option value="B">B</option>
-                                              <option value="C">C</option>
-                                              <option value="D">D</option>
-                                            </select>
-                                            </>
-                                          ) : (
-                                            <select
-                                              value={row.subject.dimensions.find((x) => x.dimensionKey === d.dimensionKey)?.rating ?? 'A'}
-                                              onChange={(e) =>
-                                                setWorkbenchStudentDrafts((prev) =>
-                                                  prev.map((r, rIdx) =>
-                                                    rIdx !== idx
-                                                      ? r
-                                                      : {
-                                                          ...r,
-                                                          subject: {
-                                                            ...r.subject,
-                                                            dimensions: r.subject.dimensions.map((x) =>
-                                                              x.dimensionKey === d.dimensionKey
-                                                                ? { ...x, rating: e.target.value as TargetLevel }
-                                                                : x,
-                                                            ),
-                                                          },
-                                                        },
-                                                  ),
-                                                )
-                                              }
-                                              className="h-[1.6rem] rounded border border-slate-300 px-1 text-xs leading-none"
-                                              disabled={workbenchReadOnly}
-                                            >
-                                              <option value="A">A</option>
-                                              <option value="B">B</option>
-                                              <option value="C">C</option>
-                                              <option value="D">D</option>
-                                            </select>
-                                          )}
-                                        </div>
+                                                    },
+                                              ),
+                                            )
+                                          }
+                                          className="mx-auto h-[1.6rem] min-w-[2.75rem] rounded border border-slate-300 px-1 text-center text-xs font-semibold leading-none text-slate-800"
+                                          disabled={workbenchReadOnly}
+                                          title={isZh ? '过程性目标维度等第，默认 A' : 'Process dimension level, default A'}
+                                        >
+                                          <option value="A">A</option>
+                                          <option value="B">B</option>
+                                          <option value="C">C</option>
+                                          <option value="D">D</option>
+                                        </select>
                                       </td>
                                     );
                                   })}
                                   {workbenchIsExamSubject ? (
-                                    <td className="px-2 py-[0.4rem] align-middle text-slate-700 text-left">
-                                      {total != null ? (
-                                        <div className="inline-flex items-baseline gap-2 text-xs tabular-nums leading-none">
-                                          <span className="inline-block w-[4rem] shrink-0 text-right">{total}</span>
-                                          {totalGradeFine ? (
-                                            <span className="inline-block min-w-[2.75rem] shrink-0 text-left font-medium text-slate-600">
-                                              {totalGradeFine}
-                                            </span>
-                                          ) : (
-                                            <span className="inline-block min-w-[2.25rem] shrink-0" aria-hidden />
-                                          )}
-                                        </div>
-                                      ) : (
-                                        <span className="text-xs">—</span>
-                                      )}
+                                    <td className="px-2 py-[0.4rem] align-middle text-center text-slate-700">
+                                      <div className="inline-flex items-center justify-center gap-1.5">
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={workbenchScoreRules.totalMax}
+                                          step={0.5}
+                                          value={total ?? ''}
+                                          onChange={(e) => {
+                                            const v = e.target.value.trim();
+                                            const next = v === '' ? null : Number(v);
+                                            setWorkbenchStudentDrafts((prev) =>
+                                              prev.map((r, rIdx) => {
+                                                if (rIdx !== idx) return r;
+                                                const finalScore =
+                                                  next !== null && Number.isFinite(next)
+                                                    ? Math.min(workbenchScoreRules.totalMax, Math.max(0, next))
+                                                    : null;
+                                                return {
+                                                  ...r,
+                                                  subject: { ...r.subject, finalScore, examDimensionScores: null },
+                                                };
+                                              }),
+                                            );
+                                          }}
+                                          className="h-[1.6rem] w-14 rounded border border-slate-300 px-1 text-center text-xs leading-none tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                          disabled={workbenchReadOnly}
+                                        />
+                                        {totalGradeFine ? (
+                                          <span className="text-xs font-medium text-slate-600 tabular-nums">{totalGradeFine}</span>
+                                        ) : null}
+                                      </div>
                                     </td>
                                   ) : null}
-                                  <td className="px-2 py-[0.4rem] align-middle">
+                                  <td className="px-2 py-[0.4rem] align-middle text-center">
                                     <select
                                       value={row.subject.learningQualityGrade ?? 'A'}
                                       onChange={(e) =>
@@ -3575,7 +3618,7 @@ export default function StudentPortrait({
                                           ),
                                         )
                                       }
-                                      className="h-[1.6rem] rounded border border-slate-300 px-1 text-xs leading-none"
+                                      className="mx-auto h-[1.6rem] min-w-[2.75rem] rounded border border-slate-300 px-1 text-center text-xs font-semibold leading-none text-slate-800"
                                       disabled={workbenchReadOnly}
                                     >
                                       <option value="A">A</option>
@@ -3592,165 +3635,95 @@ export default function StudentPortrait({
                       </div>
                     </div>
 
-                    {workbenchIsExamSubject ? (
-                    <div id="workbench-pdf-section-weakness" className="rounded-lg border border-slate-200 p-3 space-y-2">
+                    <div id="workbench-pdf-section-class-analysis" className="rounded-lg border border-slate-200 p-3 space-y-2">
                       <div className="text-sm font-medium text-slate-800">
-                        {isZh ? '第二板块：薄弱点分析' : 'Section 2: Weak-point analysis'}
-                      </div>
-                      <div className="overflow-x-auto rounded-lg border border-slate-200" data-workbench-pdf-text-box>
-                        <table className="w-full min-w-[520px] table-fixed border-collapse text-sm">
-                          <thead className="bg-slate-50">
-                            <tr className="border-b border-slate-200">
-                              <th className="w-[22%] min-w-[6.5rem] px-2 py-2 text-left align-middle text-xs font-medium text-slate-700">
-                                {isZh ? '薄弱点' : 'Weak point'}
-                              </th>
-                              <th className="w-[39%] px-2 py-2 text-left align-middle text-xs font-medium text-slate-700">
-                                {isZh ? '原因分析' : 'Cause analysis'}
-                              </th>
-                              <th className="w-[39%] px-2 py-2 text-left align-middle text-xs font-medium text-slate-700">
-                                {isZh ? '下一步计划' : 'Next plan'}
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {workbenchWeaknessRows.map((row, idx) => (
-                              <tr key={idx} className="border-t border-slate-100 first:border-t-0">
-                                <td className="px-2 py-2 align-middle">
-                                  <input
-                                    value={row.weakPoint}
-                                    onChange={(e) =>
-                                      setWorkbenchWeaknessRows((prev) => prev.map((x, i) => (i === idx ? { ...x, weakPoint: e.target.value } : x)))
-                                    }
-                                    className="w-full min-w-0 rounded border border-slate-300 px-2 py-1.5 text-sm"
-                                    aria-label={isZh ? '薄弱点' : 'Weak point'}
-                                    disabled={workbenchReadOnly}
-                                  />
-                                </td>
-                                <td className="px-2 py-2 align-middle">
-                                  <input
-                                    value={row.errorAnalysis}
-                                    onChange={(e) =>
-                                      setWorkbenchWeaknessRows((prev) => prev.map((x, i) => (i === idx ? { ...x, errorAnalysis: e.target.value } : x)))
-                                    }
-                                    className="w-full min-w-0 rounded border border-slate-300 px-2 py-1.5 text-sm"
-                                    aria-label={isZh ? '原因分析' : 'Cause analysis'}
-                                    disabled={workbenchReadOnly}
-                                  />
-                                </td>
-                                <td className="px-2 py-2 align-middle">
-                                  <input
-                                    value={row.nextPlan}
-                                    onChange={(e) =>
-                                      setWorkbenchWeaknessRows((prev) => prev.map((x, i) => (i === idx ? { ...x, nextPlan: e.target.value } : x)))
-                                    }
-                                    className="w-full min-w-0 rounded border border-slate-300 px-2 py-1.5 text-sm"
-                                    aria-label={isZh ? '下一步计划' : 'Next plan'}
-                                    disabled={workbenchReadOnly}
-                                  />
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                          <tfoot>
-                            <tr className="border-t border-slate-200 bg-slate-50/80">
-                              <td colSpan={3} className="p-0 align-middle">
-                                <button
-                                  type="button"
-                                  className="flex w-full cursor-pointer items-center justify-center gap-1 py-2 text-base font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-sky-700"
-                                  onClick={() =>
-                                    setWorkbenchWeaknessRows((prev) => [...prev, { weakPoint: '', errorAnalysis: '', nextPlan: '' }])
-                                  }
-                                  aria-label={isZh ? '添加一行' : 'Add row'}
-                                  disabled={workbenchReadOnly}
-                                >
-                                  <span className="text-lg leading-none">+</span>
-                                </button>
-                              </td>
-                            </tr>
-                          </tfoot>
-                        </table>
-                      </div>
-                    </div>
-                    ) : null}
-
-                    <div id="workbench-pdf-section-comments" className="rounded-lg border border-slate-200 p-3 space-y-2">
-                      <div className="text-sm font-medium text-slate-800">
-                        {workbenchIsExamSubject
-                          ? isZh
-                            ? '第三板块：学生评语'
-                            : 'Section 3: Student comments'
-                          : isZh
-                            ? '第二板块：学生评语'
-                            : 'Section 2: Student comments'}
+                        {isZh ? '班级整体分析' : 'Class overall analysis'}
                       </div>
                       <p className="text-xs text-amber-700">
-                        {isZh ? '建议重点关注学优/学困/波动大学生。' : 'Focus on high performers, struggling and high-variance students.'}
+                        {isZh
+                          ? '不纳入学生的学业报告，仅供班主任从学科视角了解本班情况。'
+                          : 'Not included in student reports—for homeroom teachers to understand this class from the subject teacher’s perspective.'}
+                      </p>
+                      <WorkbenchAutoGrowTextarea
+                        value={workbenchClassOverallAnalysis}
+                        onChange={setWorkbenchClassOverallAnalysis}
+                        disabled={workbenchReadOnly}
+                        ariaLabel={isZh ? '班级整体分析' : 'Class overall analysis'}
+                      />
+                    </div>
+
+                    <div id="workbench-pdf-section-student-analysis" className="rounded-lg border border-slate-200 p-3 space-y-2">
+                      <div className="text-sm font-medium text-slate-800">
+                        {isZh ? '个别学生分析' : 'Individual student analysis'}
+                      </div>
+                      <p className="text-xs text-amber-700">
+                        {isZh
+                          ? '重点关注学困/学优/波动大学生。不纳入学生的学业报告，仅供班主任与学科教师了解学生情况。'
+                          : 'Focus on struggling, high-performing, and high-variance students. Not in student reports—for homeroom and subject teachers to understand students.'}
                       </p>
                       <div
-                        className="max-h-64 overflow-x-auto overflow-y-auto rounded-lg border border-slate-200"
+                        className="overflow-x-auto overflow-y-auto rounded-lg border border-slate-200"
+                        style={{ maxHeight: WORKBENCH_STUDENT_ANALYSIS_SCROLL_MAX_PX }}
                         data-workbench-pdf-scroll
                       >
-                        <table className="w-full min-w-[420px] table-fixed border-collapse text-xs leading-snug">
-                          <thead className="bg-slate-50">
+                        <table className="w-full min-w-[640px] table-fixed border-collapse text-sm">
+                          <thead className="sticky top-0 z-10 bg-slate-50 shadow-[0_1px_0_0_rgb(226,232,240)]">
                             <tr className="border-b border-slate-200">
-                              <th className="w-[22%] min-w-[5rem] px-2 py-[0.4rem] text-left align-middle font-medium text-slate-700">
+                              <th className="w-[14%] min-w-[5rem] px-2 py-2 text-left align-middle text-xs font-medium text-slate-700">
                                 {isZh ? '学生' : 'Student'}
                               </th>
-                              <th className="w-[78%] px-2 py-[0.4rem] text-left align-middle font-medium text-slate-700">
-                                {isZh ? '学科评语' : 'Subject comment'}
+                              <th className="w-[43%] px-2 py-2 text-left align-middle text-xs font-medium text-slate-700">
+                                {isZh ? '学情分析' : 'Learning analysis'}
+                              </th>
+                              <th className="w-[43%] px-2 py-2 text-left align-middle text-xs font-medium text-slate-700">
+                                {isZh ? '支持计划' : 'Support plan'}
                               </th>
                             </tr>
                           </thead>
                           <tbody>
-                            {workbenchStudentDrafts.map((row, idx) => (
-                              <tr
-                                key={row.studentId}
-                                data-workbench-pdf-comment-row={row.studentId}
-                                className="border-t border-slate-100"
-                              >
-                                <td className="px-2 py-[0.4rem] align-top text-slate-800 font-medium whitespace-nowrap">
-                                  {row.studentName}
-                                </td>
-                                <td className="min-w-0 px-2 py-[0.4rem] align-top" data-workbench-pdf-text-box>
-                                  <textarea
-                                    value={row.subject.teacherComment ?? ''}
-                                    onChange={(e) =>
-                                      setWorkbenchStudentDrafts((prev) =>
-                                        prev.map((r, rIdx) =>
-                                          rIdx === idx ? { ...r, subject: { ...r.subject, teacherComment: e.target.value } } : r,
-                                        ),
-                                      )
-                                    }
-                                    rows={2}
-                                    className="w-full resize-y rounded border border-slate-300 px-2 py-1 text-xs leading-snug min-h-[2.5rem]"
-                                    disabled={workbenchReadOnly}
-                                  />
-                                </td>
-                              </tr>
-                            ))}
+                            {workbenchStudentAnalysisRows.map((row) => {
+                              const name =
+                                workbenchStudentDrafts.find((s) => s.studentId === row.studentId)?.studentName ?? row.studentId;
+                              return (
+                                <tr key={row.studentId} className="border-t border-slate-100 first:border-t-0 align-top">
+                                  <td className="px-2 py-2 text-slate-800 font-medium text-sm whitespace-nowrap">
+                                    {name}
+                                  </td>
+                                  <td className="px-2 py-2">
+                                    <WorkbenchAutoGrowTextarea
+                                      compact
+                                      value={row.learningAnalysis}
+                                      onChange={(next) =>
+                                        setWorkbenchStudentAnalysisRows((prev) =>
+                                          prev.map((x) =>
+                                            x.studentId === row.studentId ? { ...x, learningAnalysis: next } : x,
+                                          ),
+                                        )
+                                      }
+                                      disabled={workbenchReadOnly}
+                                      ariaLabel={isZh ? `${name} 学情分析` : `${name} learning analysis`}
+                                    />
+                                  </td>
+                                  <td className="px-2 py-2">
+                                    <WorkbenchAutoGrowTextarea
+                                      compact
+                                      value={row.supportPlan}
+                                      onChange={(next) =>
+                                        setWorkbenchStudentAnalysisRows((prev) =>
+                                          prev.map((x) =>
+                                            x.studentId === row.studentId ? { ...x, supportPlan: next } : x,
+                                          ),
+                                        )
+                                      }
+                                      disabled={workbenchReadOnly}
+                                      ariaLabel={isZh ? `${name} 支持计划` : `${name} support plan`}
+                                    />
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
-                      </div>
-                    </div>
-
-                    <div id="workbench-pdf-section-reflection" className="rounded-lg border border-slate-200 p-3 space-y-2">
-                      <div className="text-sm font-semibold text-slate-900">
-                        {workbenchIsExamSubject
-                          ? isZh
-                            ? '第四板块：阶段教学反思'
-                            : 'Section 4: Teaching reflection'
-                          : isZh
-                            ? '第三板块：阶段教学反思'
-                            : 'Section 3: Teaching reflection'}
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-white">
-                        <textarea
-                          value={workbenchTeachingReflection}
-                          onChange={(e) => setWorkbenchTeachingReflection(e.target.value)}
-                          className="w-full min-h-[90px] resize-y rounded-lg border-0 bg-transparent px-3 py-2.5 text-sm leading-relaxed text-slate-800 shadow-none outline-none ring-0 focus:ring-0"
-                          placeholder={isZh ? '填写本阶段教学反思…' : 'Enter teaching reflection…'}
-                          disabled={workbenchReadOnly}
-                        />
                       </div>
                     </div>
 
@@ -4122,15 +4095,17 @@ export default function StudentPortrait({
                               <p className="text-sm text-slate-500">{isZh ? '暂无已完成报告。' : 'No completed report yet.'}</p>
                             ) : (
                               <div className="space-y-[1.125rem]">
-                                {reportDetail.subjectReports.map((s, idx) => {
+                                {reportDetail.subjectReports.map((s) => {
                                   const subjectConfig = templateSubjectMap.get(s.subjectKey);
                                   const subjectTitle = subjectConfig
                                     ? workbenchSubjectModuleLabel(subjectConfig, isZh)
                                     : s.subjectName || (isZh ? '未命名学科' : 'Untitled subject');
-                                  const finalGrade =
-                                    s.finalGrade ??
-                                    reportLetterGradeFromScore(s.finalScore, reportTemplate?.scoreGradeMinScores) ??
-                                    '—';
+                                  const finalGrade = resolveSubjectAssessmentGrade(
+                                    s,
+                                    reportTemplate,
+                                    reportYearExamPreset,
+                                    reportStudentGradeCatalogId,
+                                  );
                                   return (
                                     <div key={s.subjectKey} data-student-report-pdf-module>
                                       <div className="text-sm font-semibold text-slate-800">{subjectTitle}</div>
@@ -4196,19 +4171,6 @@ export default function StudentPortrait({
                                           </tbody>
                                         </table>
                                       </div>
-                                      {subjectConfig?.enableTeacherComment !== false && (
-                                        <div className="mt-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-[7px] flex flex-col gap-1">
-                                          <div className="text-xs text-slate-500 leading-none flex min-h-[0.9rem] w-full items-center">
-                                            {isZh ? '学科评语' : 'Subject comment'}
-                                          </div>
-                                          <div
-                                            data-student-report-pdf-body-text
-                                            className="flex min-h-[2.025rem] w-full items-center text-sm text-slate-700 leading-tight whitespace-pre-wrap"
-                                          >
-                                            {s.teacherComment?.trim() || (isZh ? '暂无' : 'N/A')}
-                                          </div>
-                                        </div>
-                                      )}
                                     </div>
                                   );
                                 })}

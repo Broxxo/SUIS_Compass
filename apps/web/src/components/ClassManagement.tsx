@@ -39,7 +39,14 @@ import { DEFAULT_GRADE_CONFIG } from '../lib/constants';
 import CreateStudentDialog from './CreateStudentDialog';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import { loadGradeConfig } from '../lib/storage';
-import { getGradeLabelByLevel, normalizeGradeConfig } from '../lib/gradeConfig';
+import {
+  filterClassesBySchoolSegment,
+  getGradeLabelByLevel,
+  getRoadmapSegmentsInDisplayOrder,
+  gradeConfigHasSegments,
+  normalizeGradeConfig,
+  ROADMAP_OVERVIEW_TAB_ALL,
+} from '../lib/gradeConfig';
 
 interface ClassManagementProps {
   onBackToHub: () => void;
@@ -91,6 +98,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const [classTeachers, setClassTeachers] = useState<Record<string, { teacherId: string; role: string; displayName: string }[]>>({});
   const [assignTeacherClass, setAssignTeacherClass] = useState<ClassItem | null>(null);
   const [assignTeacherTeacherId, setAssignTeacherTeacherId] = useState('');
+  const [segmentTabId, setSegmentTabId] = useState<string>(ROADMAP_OVERVIEW_TAB_ALL);
 
   /** 我的班级下教师仅看与自己关联的班级；管理员看全部 */
   const displayedClasses = useMemo(() => {
@@ -404,9 +412,35 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   };
 
   const currentYear = years.find((y) => y.id === currentYearId);
+
+  const segmentTabs = useMemo(() => {
+    if (!gradeConfigHasSegments(gradeConfig)) return [];
+    const segs = getRoadmapSegmentsInDisplayOrder(gradeConfig);
+    if (segs.length === 0) return [];
+    return [
+      { id: ROADMAP_OVERVIEW_TAB_ALL, label: isZh ? '全部班级' : 'All classes' },
+      ...segs.map((seg) => ({ id: seg.id, label: seg.label })),
+    ];
+  }, [gradeConfig, isZh]);
+
+  useEffect(() => {
+    if (segmentTabs.length === 0) {
+      setSegmentTabId(ROADMAP_OVERVIEW_TAB_ALL);
+      return;
+    }
+    if (!segmentTabs.some((t) => t.id === segmentTabId)) {
+      setSegmentTabId(ROADMAP_OVERVIEW_TAB_ALL);
+    }
+  }, [segmentTabs, segmentTabId]);
+
+  const segmentFilteredClasses = useMemo(() => {
+    if (segmentTabs.length === 0) return displayedClasses;
+    return filterClassesBySchoolSegment(gradeConfig, displayedClasses, segmentTabId);
+  }, [displayedClasses, gradeConfig, segmentTabId, segmentTabs.length]);
+
   const gradeSections = useMemo(() => {
     const grouped = new Map<number, ClassItem[]>();
-    displayedClasses.forEach((c) => {
+    segmentFilteredClasses.forEach((c) => {
       const list = grouped.get(c.grade) ?? [];
       list.push(c);
       grouped.set(c.grade, list);
@@ -417,7 +451,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
         grade,
         classList: classList.slice().sort((a, b) => a.name.localeCompare(b.name)),
       }));
-  }, [displayedClasses]);
+  }, [segmentFilteredClasses]);
 
   return (
     <div className={`min-h-screen w-full min-w-0 bg-slate-50 ${embedded ? '' : 'pt-14'}`}>
@@ -506,11 +540,39 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                 </Button>
               )}
             </div>
+            {segmentTabs.length > 0 && (
+              <div
+                className="flex gap-0 border-b border-slate-200 mb-3 overflow-x-auto"
+                role="tablist"
+                aria-label={isZh ? '学段筛选' : 'School segment filter'}
+              >
+                {segmentTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={segmentTabId === tab.id}
+                    onClick={() => setSegmentTabId(tab.id)}
+                    className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap shrink-0 ${
+                      segmentTabId === tab.id
+                        ? 'border-slate-800 text-slate-900'
+                        : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            )}
             {loading ? (
               <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
             ) : displayedClasses.length === 0 ? (
               <p className="text-sm text-slate-500">
                 {isTeacherOnly ? (isZh ? '您暂无关联的班级。' : 'You have no classes assigned.') : (isZh ? '暂无班级。' : 'No classes yet.')}
+              </p>
+            ) : segmentFilteredClasses.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                {isZh ? '该学段暂无班级。' : 'No classes in this segment.'}
               </p>
             ) : (
               <div className="space-y-3">
@@ -658,17 +720,19 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                                   </div>
                                   {canEdit && (
                                     <div className="flex items-center gap-2">
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        className="h-8 text-xs"
-                                        onClick={() => {
-                                          setDialogLinkStudentsClass(expandedInGrade);
-                                          setLinkStudentIds(new Set());
-                                        }}
-                                      >
-                                        {isZh ? '关联' : 'Link'}
-                                      </Button>
+                                      {!embedded && (
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-8 text-xs"
+                                          onClick={() => {
+                                            setDialogLinkStudentsClass(expandedInGrade);
+                                            setLinkStudentIds(new Set());
+                                          }}
+                                        >
+                                          {isZh ? '关联' : 'Link'}
+                                        </Button>
+                                      )}
                                       <Button
                                         size="sm"
                                         variant="outline"
@@ -729,8 +793,8 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
               </div>
             )}
 
-            {/* 未分班学生：当前学年下没有归属任何班级的学生（含从某班移除后的学生） */}
-            {unassignedStudents.length > 0 && (
+            {/* 未分班学生：独立「我的班级」视图展示；后台班级管理不显示 */}
+            {!embedded && unassignedStudents.length > 0 && (
               <section className="bg-amber-50/80 rounded-xl border border-amber-200 p-4 mt-4">
                 <h3 className="text-sm font-semibold text-amber-900 mb-2">
                   {isZh ? '未分班学生' : 'Students not in a class'}

@@ -1,4 +1,9 @@
-import { REPORT_SCORE_LETTER_GRADES, type ReportScoreLetterGrade } from '@repo/shared';
+import {
+  examFullScoreFromGradeConfig,
+  parseConfiguredExamPercentBands,
+  validateConfiguredScoreGradeMinOrder,
+  type ReportScoreLetterGrade,
+} from '@repo/shared';
 
 export type SanitizedExamConfigScope = {
   subjectInclusion: string[];
@@ -9,7 +14,9 @@ export type SanitizedExamConfigScope = {
     subjectNameEn: string;
     gradeConfigs: Array<{
       gradeId: string;
+      fullScore: number;
       percentBands: Partial<Record<ReportScoreLetterGrade, number>>;
+      /** 已废弃，新配置恒为空 */
       dimensionScores: Array<{ dimensionLabelZh: string; dimensionLabelEn: string; score: number }>;
     }>;
   }>;
@@ -17,14 +24,11 @@ export type SanitizedExamConfigScope = {
 
 export function sanitizeExamPercentBands(raw: unknown): Partial<Record<ReportScoreLetterGrade, number>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const rec = raw as Record<string, unknown>;
-  const out: Partial<Record<ReportScoreLetterGrade, number>> = {};
-  for (const g of REPORT_SCORE_LETTER_GRADES) {
-    const v = Number(rec[g]);
-    if (!Number.isFinite(v)) continue;
-    out[g] = Math.max(0, Math.min(100, Math.round(v * 100) / 100));
-  }
-  return out;
+  return parseConfiguredExamPercentBands(raw as Partial<Record<string, string | number | null | undefined>>);
+}
+
+export function sanitizeExamFullScore(raw: unknown): number {
+  return examFullScoreFromGradeConfig(typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : undefined);
 }
 
 /** key = `${term}::${schoolSegmentId}` */
@@ -75,6 +79,7 @@ export function sanitizeExamConfigs(raw: unknown): Record<string, SanitizedExamC
         }
         gradeConfigs.push({
           gradeId,
+          fullScore: sanitizeExamFullScore(gRec.fullScore ?? gRec.totalScore ?? gRec.maxScore),
           percentBands: sanitizeExamPercentBands(gRec.percentBands),
           dimensionScores,
         });
@@ -90,4 +95,20 @@ export function sanitizeExamConfigs(raw: unknown): Record<string, SanitizedExamC
     out[key] = { subjectInclusion, subjects };
   }
   return out;
+}
+
+/** 校验所有考试学科等第下限顺序；返回首条错误文案 */
+export function validateSanitizedExamConfigs(
+  configs: Record<string, SanitizedExamConfigScope>,
+): string | null {
+  for (const scope of Object.values(configs)) {
+    for (const sub of scope.subjects) {
+      for (const gc of sub.gradeConfigs) {
+        if (Object.keys(gc.percentBands).length === 0) continue;
+        const err = validateConfiguredScoreGradeMinOrder(gc.percentBands, true, true);
+        if (err) return err;
+      }
+    }
+  }
+  return null;
 }

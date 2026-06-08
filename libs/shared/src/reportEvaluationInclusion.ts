@@ -114,9 +114,13 @@ export function resolveExamGradesForCourse(
   const allowed = new Set(
     segmentGradeIds.map((g) => String(g).trim()).filter((g) => g && evalSet.has(g)),
   );
-  const stored = examGradeInclusion?.[scopeKey]?.[cid];
-  if (stored !== undefined) {
-    return sanitizeGradeIdList(stored, allowed);
+  const scopeStored = examGradeInclusion?.[scopeKey];
+  if (scopeStored !== undefined) {
+    const stored = scopeStored[cid];
+    if (stored !== undefined) {
+      return sanitizeGradeIdList(stored, allowed);
+    }
+    return [];
   }
   const legacy = inferExamGradeInclusionFromLegacyScope(scopeKey, legacyExamConfigs, [...allowed]);
   if (legacy[cid] !== undefined) {
@@ -203,6 +207,116 @@ export function courseIdsWithEvaluationGrades(
         evaluationGradeInclusion,
       ).length > 0,
   );
+}
+
+function extractPresetSubjectsArrayForInclusion(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === 'object') {
+    const subs = (raw as { subjects?: unknown }).subjects;
+    if (Array.isArray(subs)) return subs;
+  }
+  return [];
+}
+
+/** subjectKey（course_…）→ courseId（course-…）兜底，与学年预设 subjects 映射一致 */
+export function courseIdFromSubjectKey(subjectKey: string): string | null {
+  const sk = String(subjectKey ?? '').trim();
+  if (!sk) return null;
+  if (sk.startsWith('course-')) return sk;
+  if (!sk.startsWith('course_')) return null;
+  return sk.replace(/^course_/, 'course-').replace(/_/g, '-');
+}
+
+export function buildSubjectKeyToCourseIdFromPresetPayload(payload: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const row of extractPresetSubjectsArrayForInclusion(payload)) {
+    if (!row || typeof row !== 'object') continue;
+    const rec = row as Record<string, unknown>;
+    const sk = String(rec.subjectKey ?? '').trim();
+    const cid = String(rec.courseId ?? '').trim() || courseIdFromSubjectKey(sk) || '';
+    if (sk && cid) out[sk] = cid;
+  }
+  return out;
+}
+
+export function resolveSubjectCourseId(
+  subjectKey: string,
+  subjectKeyToCourseId?: Record<string, string> | Map<string, string> | null,
+): string | null {
+  const sk = String(subjectKey ?? '').trim();
+  if (!sk) return null;
+  if (subjectKeyToCourseId instanceof Map) {
+    const hit = subjectKeyToCourseId.get(sk);
+    if (hit) return String(hit).trim();
+  } else if (subjectKeyToCourseId?.[sk]) {
+    return String(subjectKeyToCourseId[sk]).trim();
+  }
+  return courseIdFromSubjectKey(sk);
+}
+
+export type ReportYearInclusionPresetSlice = {
+  stageInclusion?: Record<string, string[]>;
+  evaluationGradeInclusion?: EvaluationGradeInclusionMap;
+  examGradeInclusion?: ExamGradeInclusionMap;
+  examConfigs?: Parameters<typeof inferExamGradeInclusionFromLegacyScope>[1];
+  subjectKeyToCourseId?: Record<string, string> | Map<string, string>;
+};
+
+/**
+ * 学年是否已配置模块化参评/考试规则（stageInclusion、evaluationGradeInclusion、examGradeInclusion、examConfigs）。
+ * 一旦为 true，测评成绩仅出现在显式考试年级，不再回退模板 enableScore 快照。
+ */
+export function hasReportYearInclusionRules(
+  term: string,
+  segmentId: string,
+  preset: ReportYearInclusionPresetSlice | null | undefined,
+): boolean {
+  const seg = String(segmentId ?? '').trim();
+  if (!seg || !preset) return false;
+  const scopeKey = reportExamScopeKey(term, seg);
+  return Boolean(
+    (preset.stageInclusion?.[seg]?.length ?? 0) > 0
+    || preset.evaluationGradeInclusion?.[seg]
+    || preset.examGradeInclusion?.[scopeKey] !== undefined
+    || preset.examConfigs?.[scopeKey] !== undefined,
+  );
+}
+
+/** 模板学科是否在本班年级启用测评成绩（学年模块化配置优先于模板 enableScore 快照） */
+export function effectiveTemplateSubjectEnableScore(
+  term: string,
+  segmentId: string,
+  subjectKey: string,
+  gradeCatalogId: string | null,
+  segmentGradeIds: string[],
+  templateEnableScore: boolean,
+  preset: ReportYearInclusionPresetSlice | null | undefined,
+): boolean {
+  const hasRules = hasReportYearInclusionRules(term, segmentId, preset);
+  if (!segmentId || !gradeCatalogId) {
+    return hasRules ? false : templateEnableScore;
+  }
+  const courseId = resolveSubjectCourseId(subjectKey, preset?.subjectKeyToCourseId ?? null);
+  if (!courseId) {
+    return hasRules ? false : templateEnableScore;
+  }
+  if (
+    isExamGradeIncluded(
+      term,
+      segmentId,
+      courseId,
+      gradeCatalogId,
+      segmentGradeIds,
+      preset?.stageInclusion,
+      preset?.evaluationGradeInclusion,
+      preset?.examGradeInclusion,
+      preset?.examConfigs,
+    )
+  ) {
+    return true;
+  }
+  if (hasRules) return false;
+  return templateEnableScore;
 }
 
 export function courseIdsWithExamGrades(

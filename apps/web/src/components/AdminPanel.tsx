@@ -13,10 +13,10 @@ import {
   resolveExamGradesForCourse,
   isEvaluationGradeIncluded,
   isExamGradeIncluded,
-  courseIdsInEvaluationPool,
   courseIdsWithEvaluationGrades,
   courseIdsWithExamGrades,
   inferExamGradeInclusionFromLegacyScope,
+  groupCoursesByRoadmapDisplayKey,
 } from '@repo/shared';
 import type { AdminUser } from '../lib/adminStorage';
 import {
@@ -47,14 +47,24 @@ import {
   deleteStudent,
   addEnrollment,
 } from '../lib/classStorage';
-import { loadCategoryOrder, hydrateCategoryOrderFromCloud, loadGradeConfigSync } from '../lib/storage';
 import {
+  loadCategoryOrder,
+  hydrateCategoryOrderFromCloud,
+  loadCourseDomainsSync,
+  hydrateCourseDomainsFromCloud,
+  loadGradeConfigSync,
+} from '../lib/storage';
+import {
+  getGradeCatalogIdForClass,
+  getCurriculumGradeLevelForClass,
+  getGradeItemById,
   getGradeLabelByLevel,
+  groupClassesForClassManagement,
   normalizeGradeConfig,
   gradeConfigHasSegments,
   getRoadmapSegmentsInDisplayOrder,
   getGradeLevelById,
-  getGradeIdByLevel,
+  filterClassesBySchoolSegment,
 } from '../lib/gradeConfig';
 import {
   sortCoursesLikeCurriculumRoadmap,
@@ -81,10 +91,19 @@ import {
 } from '../lib/staffingRosterExcel';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
 import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term } from '../types/classManagement';
-import ClassManagement from './ClassManagement';
 import CurriculumRoadmap from './CurriculumRoadmap';
 import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
+import TeacherPortraitCollectionsAdmin from './TeacherPortraitCollectionsAdmin';
+import {
+  AcademicYearSelect,
+  AcademicYearSelectField,
+  AcademicYearTermFields,
+  FilterField,
+  FilterSelect,
+  FilterToolbar,
+  TermSelectField,
+} from './academicPeriodSelectors';
 import { ArrowDown, ArrowUp, Eye, EyeOff, LogIn, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
 import {
   REPORT_PRESET_UNIFIED_LEVEL_DEFAULTS,
@@ -93,25 +112,16 @@ import {
 } from '../lib/reportPresetUnifiedLevels';
 import {
   REPORT_SCORE_LETTER_GRADES,
+  DEFAULT_EXAM_GRADE_FULL_SCORE,
+  configuredReportScoreGradeMins,
+  parseConfiguredExamPercentBands,
+  defaultExamScoreGradeMinsForSchoolSegment,
   defaultReportScoreGradeMinScores,
+  examFullScoreFromGradeConfig,
   reportLetterGradeFromScore,
+  validateConfiguredScoreGradeMinOrder,
+  type ReportScoreLetterGrade,
 } from '@repo/shared';
-
-/** 岗位安排：按年级分组班级行（用于 rowspan 首列） */
-function groupStaffingClassesByGrade(classes: ClassItem[]): Array<{ grade: number; items: ClassItem[] }> {
-  const map = new Map<number, ClassItem[]>();
-  for (const c of classes) {
-    const arr = map.get(c.grade);
-    if (arr) arr.push(c);
-    else map.set(c.grade, [c]);
-  }
-  return Array.from(map.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([grade, items]) => ({
-      grade,
-      items: [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
-    }));
-}
 
 /**
  * 当尚无该学段的 stageInclusion 记录时，根据「该学段年级上已填写名称的目标维度」推断纳入课程，
@@ -248,6 +258,71 @@ function findPresetYearSubjectForPreview(
   return undefined;
 }
 
+function presetSubjectMergeKey(sub: { courseId?: string; subjectKey?: string }): string {
+  const cid = String(sub.courseId ?? '').trim();
+  if (cid) return `course:${cid}`;
+  const sk = String(sub.subjectKey ?? '').trim();
+  return sk ? `key:${sk}` : '';
+}
+
+function gradeDimensionsHaveLabels(
+  gradeDimensions: ReportYearDimensionPresetSubject['gradeDimensions'] | undefined,
+): boolean {
+  return (gradeDimensions ?? []).some((row) =>
+    (row.dimensions ?? []).some((d) => (d.dimensionLabelZh ?? '').trim() || (d.dimensionLabelEn ?? '').trim()),
+  );
+}
+
+function mergePresetSubjectEntries(
+  existing: ReportYearDimensionPresetSubject,
+  incoming: ReportYearDimensionPresetSubject,
+): ReportYearDimensionPresetSubject {
+  const gradeMap = new Map<string, NonNullable<ReportYearDimensionPresetSubject['gradeDimensions']>[number]['dimensions']>();
+  for (const row of existing.gradeDimensions ?? []) {
+    const gid = String(row.gradeId ?? '').trim();
+    if (gid) gradeMap.set(gid, row.dimensions ?? []);
+  }
+  for (const row of incoming.gradeDimensions ?? []) {
+    const gid = String(row.gradeId ?? '').trim();
+    if (!gid) continue;
+    const dims = row.dimensions ?? [];
+    const hasLabels = dims.some((d) => (d.dimensionLabelZh ?? '').trim() || (d.dimensionLabelEn ?? '').trim());
+    if (hasLabels) gradeMap.set(gid, dims);
+  }
+  const gradeDimensions = [...gradeMap.entries()].map(([gradeId, dimensions]) => ({ gradeId, dimensions }));
+  const incomingFlatHasLabels = (incoming.dimensions ?? []).some(
+    (d) => (d.dimensionLabelZh ?? '').trim() || (d.dimensionLabelEn ?? '').trim(),
+  );
+  const dimensions = incomingFlatHasLabels ? (incoming.dimensions ?? []) : (existing.dimensions ?? []);
+  const enableTarget =
+    gradeDimensionsHaveLabels(gradeDimensions) || dimensions.length > 0
+      ? true
+      : incoming.enableTarget ?? existing.enableTarget;
+  return {
+    ...existing,
+    ...incoming,
+    enableTarget,
+    gradeDimensions,
+    dimensions,
+  };
+}
+
+/** 保存学年预设前合并：以云端已有数据为底，再叠加上次内存态，避免局部保存冲掉其它学科 */
+function mergeYearPresetSubjectsForSave(
+  ...lists: ReportYearDimensionPresetSubject[][]
+): ReportYearDimensionPresetSubject[] {
+  const map = new Map<string, ReportYearDimensionPresetSubject>();
+  for (const list of lists) {
+    for (const sub of list) {
+      const key = presetSubjectMergeKey(sub);
+      if (!key) continue;
+      const prev = map.get(key);
+      map.set(key, prev ? mergePresetSubjectEntries(prev, sub) : sub);
+    }
+  }
+  return [...map.values()];
+}
+
 /** 学年预设中某年级上的目标维度行（用于新建/编辑报告预览） */
 function getPresetDimensionsForReportPreviewGrade(
   preset: ReportYearDimensionPreset | null,
@@ -271,13 +346,34 @@ function examScopeKey(term: Term, schoolSegmentId: string): string {
   return reportExamScopeKey(term, schoolSegmentId);
 }
 
-function createEmptyExamGradeDraft(): ExamGradeConfigDraft {
-  const defaults = defaultReportScoreGradeMinScores();
+function parseExamPercentBandsDraft(draft: ExamGradeConfigDraft): Partial<Record<ReportGrade, number>> {
+  return parseConfiguredExamPercentBands(draft.percentBands);
+}
+
+function createEmptyExamGradeDraft(segment?: Pick<GradeConfigSegment, 'label'> | null): ExamGradeConfigDraft {
+  const defaults = defaultExamScoreGradeMinsForSchoolSegment(segment?.label);
   const percentBands = {} as Record<ReportGrade, string>;
   for (const g of REPORT_SCORE_LETTER_GRADES) {
-    percentBands[g as ReportGrade] = String(defaults[g]);
+    const v = defaults[g];
+    percentBands[g as ReportGrade] = v != null && Number.isFinite(v) ? String(v) : '';
   }
-  return { percentBands, dimensionScores: [] };
+  return {
+    fullScore: String(DEFAULT_EXAM_GRADE_FULL_SCORE),
+    percentBands,
+    dimensionScores: [],
+  };
+}
+
+function parseExamFullScoreDraft(draft: ExamGradeConfigDraft): number {
+  const t = String(draft.fullScore ?? '').trim();
+  if (!t) return DEFAULT_EXAM_GRADE_FULL_SCORE;
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_EXAM_GRADE_FULL_SCORE;
+  return Math.round(n * 100) / 100;
+}
+
+function examGradeLabelForBand(g: ReportScoreLetterGrade, isZh: boolean): string {
+  return isZh ? `${g}（%）` : `${g} (%)`;
 }
 
 function formatWeeklyLoadValue(n: number): string {
@@ -368,7 +464,6 @@ function formatPrimarySubjectCell(isZh: boolean, v: string | null | undefined): 
 }
 
 type EvaluationDesignerModule = 'homeroom_comment' | 'subject_evaluation';
-type ReportSettingPortraitTab = 'academic' | 'interests' | 'generalLearning' | 'socialEmotional';
 type ReportSettingSubjectDraft = {
   /** 对应课程管理中的课程 id；从下拉选择时写入，用于生成与岗位安排一致的 subject_key */
   courseId: string;
@@ -402,6 +497,7 @@ type ExamDimensionScoreDraft = {
   score: string;
 };
 type ExamGradeConfigDraft = {
+  fullScore: string;
   percentBands: Record<ReportGrade, string>;
   dimensionScores: ExamDimensionScoreDraft[];
 };
@@ -423,22 +519,13 @@ function buildExamSubjectRowForApi(
   const sk = c ? staffingSubjectKeyFromCourse(c.id, c.name) : String(draft?.subjectKey ?? '').trim();
   const labels = c ? getCourseReportSubjectLabels(c) : { subjectNameZh: '', subjectNameEn: '' };
   const gradeConfigs = segment.gradeIds.map((gid) => {
-    const g = draft?.gradeConfigs?.[gid] ?? createEmptyExamGradeDraft();
-    const percentBands: Partial<Record<ReportGrade, number>> = {};
-    for (const rg of REPORT_SCORE_LETTER_GRADES) {
-      const n = Number(g.percentBands[rg as ReportGrade]);
-      if (Number.isFinite(n)) percentBands[rg as ReportGrade] = n;
-    }
+    const g = draft?.gradeConfigs?.[gid] ?? createEmptyExamGradeDraft(segment);
+    const percentBands = parseConfiguredExamPercentBands(g.percentBands);
     return {
       gradeId: gid,
+      fullScore: parseExamFullScoreDraft(g),
       percentBands,
-      dimensionScores: g.dimensionScores
-        .map((d) => ({
-          dimensionLabelZh: d.dimensionLabelZh.trim(),
-          dimensionLabelEn: (d.dimensionLabelEn || d.dimensionLabelZh).trim(),
-          score: Number(d.score),
-        }))
-        .filter((d) => d.dimensionLabelZh && d.dimensionLabelEn && Number.isFinite(d.score) && d.score >= 0),
+      dimensionScores: [],
     };
   });
   return {
@@ -483,7 +570,14 @@ function mergeExamScopeSubjectsForPersist(args: {
         subjectKey: String(persisted.subjectKey ?? '').trim(),
         subjectNameZh: String(persisted.subjectNameZh ?? ''),
         subjectNameEn: String(persisted.subjectNameEn ?? ''),
-        gradeConfigs: filterGrades(Array.isArray(persisted.gradeConfigs) ? persisted.gradeConfigs : []),
+        gradeConfigs: filterGrades(
+          (Array.isArray(persisted.gradeConfigs) ? persisted.gradeConfigs : []).map((g) => ({
+            gradeId: g.gradeId,
+            fullScore: examFullScoreFromGradeConfig(g.fullScore, g.percentBands),
+            percentBands: g.percentBands ?? {},
+            dimensionScores: [],
+          })),
+        ),
       });
       continue;
     }
@@ -538,7 +632,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [deleteLoading, setDeleteLoading] = useState(false);
 
   const [adminTab, setAdminTab] = useState<
-    'users' | 'foundation' | 'classes' | 'courses' | 'staffing' | 'students' | 'report-settings' | 'database'
+    | 'users'
+    | 'foundation'
+    | 'courses'
+    | 'staffing'
+    | 'students'
+    | 'report-settings'
+    | 'teacher-portrait-settings'
+    | 'database'
   >('users');
   const [foundationSubTab, setFoundationSubTab] = useState<FoundationSubTab>('years');
   const [years, setYears] = useState<AcademicYear[]>([]);
@@ -577,7 +678,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [dialogCreateStudent, setDialogCreateStudent] = useState(false);
   const [reportSettingYearId, setReportSettingYearId] = useState<string>('');
   const [reportSettingTerm, setReportSettingTerm] = useState<Term>('Semester 1');
-  const [reportSettingPortraitTab, setReportSettingPortraitTab] = useState<ReportSettingPortraitTab>('academic');
+  const [teacherPortraitSettingYearId, setTeacherPortraitSettingYearId] = useState<string>('');
+  const [teacherPortraitSettingTerm, setTeacherPortraitSettingTerm] = useState<Term>('Semester 1');
+  const [teacherPortraitSettingLoading, setTeacherPortraitSettingLoading] = useState(false);
   const [reportSettingStatus, setReportSettingStatus] = useState<ReportTemplateStatus>('draft');
   const [reportSettingHomeroomCommentMode, setReportSettingHomeroomCommentMode] = useState<HomeroomCommentMode>('optional');
   const [reportSettingTitle, setReportSettingTitle] = useState('');
@@ -598,7 +701,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [academicPreviewTargetLevels, setAcademicPreviewTargetLevels] = useState<Record<string, string>>({});
   /** 学业报告预览：学习品质等第（仅本地预览，不入库） */
   const [academicPreviewLearningQuality, setAcademicPreviewLearningQuality] = useState<Record<string, string>>({});
-  const [addModuleMenuOpen, setAddModuleMenuOpen] = useState(false);
   const [createEvaluationTitle, setCreateEvaluationTitle] = useState('');
   const [createEvaluationFromTemplateId, setCreateEvaluationFromTemplateId] = useState<string>('');
   /** 新建/编辑学业报告：模板所属学段（与课程设置学段 id 一致） */
@@ -613,6 +715,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [scoreBandLoading, setScoreBandLoading] = useState(false);
   const [scoreBandSaving, setScoreBandSaving] = useState(false);
   const [reportSettingSubjects, setReportSettingSubjects] = useState<ReportSettingSubjectDraft[]>([]);
+  /** 编辑报告时模板学科加载完成计数，驱动与学年预设合并预览学科列表 */
+  const [editTemplateSubjectsVersion, setEditTemplateSubjectsVersion] = useState(0);
   const [reportYearDimensionPreset, setReportYearDimensionPreset] = useState<ReportYearDimensionPreset | null>(null);
   const [reportYearPresetLoading, setReportYearPresetLoading] = useState(false);
   const [reportYearPresetSaving, setReportYearPresetSaving] = useState(false);
@@ -630,6 +734,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [presetTargetDimTableColumnCount, setPresetTargetDimTableColumnCount] = useState(4);
   /** 学科目标设置（preset 模式）专用状态 */
   const [reportTargetStageId, setReportTargetStageId] = useState('');
+  /** 学业报告配置：学年/学期之后选定学段，三步配置共用 */
+  const [reportSettingSegmentId, setReportSettingSegmentId] = useState('');
   const [reportTargetCheckedCourseIds, setReportTargetCheckedCourseIds] = useState<string[]>([]);
   /** 当前学段：courseId → 参加评价的年级 id（仅 stageInclusion 池内课程） */
   const [reportTargetEvaluationGradeByCourse, setReportTargetEvaluationGradeByCourse] = useState<Record<string, string[]>>({});
@@ -663,9 +769,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [progressLoading, setProgressLoading] = useState(false);
   const [progressData, setProgressData] = useState<ReportTemplateProgress | null>(null);
   const [progressTemplateTitle, setProgressTemplateTitle] = useState('');
-  /** 本学期当前列表下所有学业报告的学生完成度汇总（仅进度条，无文案） */
-  const [termReportOverallRate, setTermReportOverallRate] = useState<number | null>(null);
-  const [termReportOverallLoading, setTermReportOverallLoading] = useState(false);
+  /** 本学期各学业报告的学生完成度（按模版 id） */
+  const [reportProgressById, setReportProgressById] = useState<Record<string, ReportTemplateProgress>>({});
+  const [reportProgressListLoading, setReportProgressListLoading] = useState(false);
   const [dbTables, setDbTables] = useState<Array<{ tableName: string; rowCount: number }>>([]);
   const [dbSelectedTable, setDbSelectedTable] = useState<string>('');
   const [dbColumns, setDbColumns] = useState<string[]>([]);
@@ -949,6 +1055,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const loadReportTemplateSetting = async (templateId: string) => {
     if (!templateId) {
       setReportSettingSubjects([]);
+      setEditTemplateSubjectsVersion(0);
       setEvaluationDesignerCourses([]);
       setReportSettingTitle('');
       setNewReportSchoolSegmentId('');
@@ -978,6 +1085,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               subjectNameZh: s.subjectNameZh || s.subjectName || '',
               subjectNameEn: s.subjectNameEn || s.subjectName || '',
             };
+        const flatDims = (s.dimensions ?? []).map((d) => ({
+          dimensionLabelZh: d.dimensionLabelZh || d.dimensionLabel,
+          dimensionLabelEn: d.dimensionLabelEn || d.dimensionLabel,
+          levelDescriptions: d.levelDescriptions ?? {},
+        }));
+        const hasGradeDimLabels = (s.gradeDimensions ?? []).some((row) =>
+          (row.dimensions ?? []).some(
+            (d) => (d.dimensionLabelZh ?? '').trim() || (d.dimensionLabelEn ?? '').trim(),
+          ),
+        );
         return {
           courseId: matchCourse?.id ?? '',
           subjectKey: key,
@@ -986,16 +1103,12 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           moduleType: s.moduleType ?? 'subject_score',
           enableScore: s.enableScore ?? true,
           enableLearningQuality: s.enableLearningQuality !== false,
-          enableTeacherComment: s.enableTeacherComment ?? true,
-          enableTarget: (s.dimensions ?? []).length > 0,
+          enableTeacherComment: false,
+          enableTarget: flatDims.length > 0 || hasGradeDimLabels,
           scorePreview: '',
           commentPreview: '',
           scoreVisibility: s.scoreVisibility ?? 'teacher_homeroom_admin',
-          dimensions: (s.dimensions ?? []).map((d) => ({
-            dimensionLabelZh: d.dimensionLabelZh || d.dimensionLabel,
-            dimensionLabelEn: d.dimensionLabelEn || d.dimensionLabel,
-            levelDescriptions: d.levelDescriptions ?? {},
-          })),
+          dimensions: flatDims,
         };
       });
       const homeroomMode = tpl.homeroomCommentMode ?? 'optional';
@@ -1004,6 +1117,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setReportSettingTitle(tpl.title ?? '');
       setNewReportSchoolSegmentId(String(tpl.schoolSegmentId ?? '').trim());
       setReportSettingSubjects(mappedSubjects);
+      setEditTemplateSubjectsVersion((v) => v + 1);
       const enabled = deriveEnabledModulesFromTemplate(homeroomMode, mappedSubjects);
       setEnabledEvaluationModules(enabled);
       setEvaluationModuleOrder(deriveModuleOrderFromEnabled(enabled));
@@ -1023,9 +1137,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       .catch(() => setEvaluationDesignerCourses([]));
   }, [createEvaluationOpen]);
 
+  const courseLayoutOrderKey =
+    adminTab === 'report-settings' || adminTab === 'staffing'
+      ? JSON.stringify({ categoryOrder: loadCategoryOrder(), courseDomains: loadCourseDomainsSync() })
+      : '';
   const evaluationCoursesSorted = useMemo(
-    () => sortCoursesLikeCurriculumRoadmap(evaluationDesignerCourses, loadCategoryOrder()),
-    [evaluationDesignerCourses],
+    () => sortCoursesLikeCurriculumRoadmap(evaluationDesignerCourses, loadCategoryOrder(), loadCourseDomainsSync()),
+    [evaluationDesignerCourses, courseLayoutOrderKey, staffingCategoryOrderNonce],
   );
   const reportTargetGradeConfigSyncKey =
     adminTab === 'report-settings' ? JSON.stringify(normalizeGradeConfig(loadGradeConfigSync())) : '';
@@ -1039,6 +1157,48 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     for (const s of reportTargetSegments) m.set(s.id, s.label);
     return m;
   }, [reportTargetSegments]);
+  const reportSettingRequiresSegment = reportTargetSegments.length > 0;
+  const reportSettingSegmentReady =
+    !reportSettingRequiresSegment || !!reportSettingSegmentId.trim();
+  const reportSettingSegmentLabel = useMemo(() => {
+    const id = reportSettingSegmentId.trim();
+    if (!id) return '';
+    return reportSegmentLabelById.get(id) ?? id;
+  }, [reportSettingSegmentId, reportSegmentLabelById]);
+  const evaluationDialogSegmentLabel = useMemo(() => {
+    const id =
+      createEvaluationMode === 'edit'
+        ? newReportSchoolSegmentId.trim()
+        : reportSettingSegmentId.trim();
+    if (!id) return isZh ? '未选择学段' : 'No segment';
+    return reportSegmentLabelById.get(id) ?? id;
+  }, [
+    createEvaluationMode,
+    newReportSchoolSegmentId,
+    reportSettingSegmentId,
+    reportSegmentLabelById,
+    isZh,
+  ]);
+
+  useEffect(() => {
+    if (adminTab !== 'report-settings') return;
+    if (!reportSettingRequiresSegment) {
+      setReportSettingSegmentId('');
+      return;
+    }
+    setReportSettingSegmentId((prev) =>
+      prev && reportTargetSegments.some((s) => s.id === prev) ? prev : (reportTargetSegments[0]?.id ?? ''),
+    );
+  }, [adminTab, reportSettingRequiresSegment, reportTargetSegments, reportTargetGradeConfigSyncKey]);
+
+  useEffect(() => {
+    if (adminTab !== 'report-settings') return;
+    const id = reportSettingSegmentId.trim();
+    setReportTargetStageId(id);
+    if (createEvaluationMode !== 'edit') {
+      setNewReportSchoolSegmentId(id);
+    }
+  }, [adminTab, reportSettingSegmentId, createEvaluationMode]);
   const reportExamScopeStorageKey = useMemo(
     () => examScopeKey(reportSettingTerm, reportTargetStageId || reportTargetSegments[0]?.id || ''),
     [reportSettingTerm, reportTargetStageId, reportTargetSegments],
@@ -1176,7 +1336,12 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       if (examGrades.length === 0) return false;
       return examGrades.every((gid) => {
         const g = cfg.gradeConfigs[gid];
-        return !!g && g.dimensionScores.length > 0;
+        if (!g) return false;
+        const fullScore = parseExamFullScoreDraft(g);
+        if (!Number.isFinite(fullScore) || fullScore <= 0) return false;
+        const mins = parseExamPercentBandsDraft(g);
+        if (Object.keys(mins).length === 0) return false;
+        return validateConfiguredScoreGradeMinOrder(mins, isZh, true) == null;
       });
     }).length;
     return {
@@ -1194,23 +1359,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     reportSettingTerm,
     reportYearDimensionPreset,
     reportExamGradeByCourse,
-  ]);
-
-  /** 当前选中的考试学科在学年预设中是否尚未配置任何年级的目标维度（无法配置维度分值） */
-  const reportExamActiveCourseMissingPresetDimensions = useMemo(() => {
-    if (!reportExamActiveCourseId.trim() || !reportTargetCurrentSegment) return false;
-    const c = reportTargetStageCourses.find((x) => x.id === reportExamActiveCourseId);
-    if (!c) return false;
-    const sk = staffingSubjectKeyFromCourse(c.id, c.name);
-    return !reportTargetCurrentSegment.gradeIds.some((gid) => {
-      const dims = getPresetDimensionsForReportPreviewGrade(reportYearDimensionPreset, c.id, sk, gid);
-      return dims.length > 0;
-    });
-  }, [
-    reportExamActiveCourseId,
-    reportTargetCurrentSegment,
-    reportTargetStageCourses,
-    reportYearDimensionPreset,
+    isZh,
   ]);
 
   /** 当前学段已勾选学科：merge 列表中的行优先；其余按学年预设或空草稿合成（避免仅语文在 merge 里导致进度 1/1） */
@@ -1267,7 +1416,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         moduleType: 'subject_score' as const,
         enableScore: !saved || saved.enableScore !== false,
         enableLearningQuality: true,
-        enableTeacherComment: !saved || saved.enableTeacherComment !== false,
+        enableTeacherComment: false,
         enableTarget,
         scorePreview: '',
         commentPreview: '',
@@ -1304,7 +1453,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     const subjectKey = String(reportTargetActiveSubject.subjectKey ?? '').trim();
     if (!subjectKey) return [];
     const gc = normalizeGradeConfig(loadGradeConfigSync());
-    const yearClasses = allClasses.filter((c) => c.academicYearId === reportSettingYearId);
+    const segmentYearClasses = filterClassesBySchoolSegment(
+      gc,
+      allClasses.filter((c) => c.academicYearId === reportSettingYearId),
+      reportTargetStageId,
+    );
     const activeCourseId = String(reportTargetActiveSubject.courseId ?? '').trim();
     const evaluationGradeIds =
       activeCourseId && reportTargetEvaluationGradeByCourse[activeCourseId]
@@ -1322,9 +1475,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     const missingGradeLabels: string[] = [];
     for (const gradeId of reportTargetCurrentSegment.gradeIds) {
       if (evalGradeSet.size > 0 && !evalGradeSet.has(gradeId)) continue;
-      const gradeLevel = getGradeLevelById(gc, gradeId);
-      const gradeLabel = getGradeLabelByLevel(gc, gradeLevel);
-      const classesAtGrade = yearClasses.filter((c) => c.grade === gradeLevel);
+      const gradeLabel = getGradeItemById(gc, gradeId)?.label ?? gradeId;
+      const classesAtGrade = segmentYearClasses.filter(
+        (c) => getGradeCatalogIdForClass(gc, c.grade, { className: c.name }) === gradeId,
+      );
       if (classesAtGrade.length === 0) continue;
       const hasTeacher = classesAtGrade.some((cls) =>
         reportYearStaffingAssignments.some(
@@ -1455,7 +1609,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   useEffect(() => {
     if (adminTab !== 'report-settings') return;
-    setReportSettingPortraitTab('academic');
     if (!USE_CLOUD_STORAGE) {
       setReportSettingYearId('');
       setReportTemplateList([]);
@@ -1483,6 +1636,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       })
       .finally(() => setReportSettingLoading(false));
   }, [adminTab, loadReportYearDimensionPreset, reportSettingTerm]);
+
+  useEffect(() => {
+    if (adminTab !== 'teacher-portrait-settings') return;
+    if (!USE_CLOUD_STORAGE) {
+      setTeacherPortraitSettingYearId('');
+      return;
+    }
+    setTeacherPortraitSettingLoading(true);
+    Promise.all([loadAcademicYears(), loadCurrentAcademicYearId()])
+      .then(([list, cur]) => {
+        setYears(list);
+        setTeacherPortraitSettingYearId(cur || list[0]?.id || '');
+      })
+      .finally(() => setTeacherPortraitSettingLoading(false));
+  }, [adminTab]);
 
   useEffect(() => {
     if (adminTab !== 'report-settings' || !reportSettingYearId) return;
@@ -1636,9 +1804,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [staffingYearId]);
 
   useEffect(() => {
-    if (adminTab !== 'staffing' || !USE_CLOUD_STORAGE) return;
+    if ((adminTab !== 'staffing' && adminTab !== 'report-settings') || !USE_CLOUD_STORAGE) return;
     let cancelled = false;
-    void hydrateCategoryOrderFromCloud().then(() => {
+    void Promise.all([hydrateCategoryOrderFromCloud(), hydrateCourseDomainsFromCloud()]).then(() => {
       if (!cancelled) setStaffingCategoryOrderNonce((n) => n + 1);
     });
     return () => {
@@ -2139,8 +2307,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     moduleType: 'subject_score' as const,
     enableScore: true,
     enableLearningQuality: true,
-    enableTeacherComment: true,
-    /** 学业报告预览中三项默认开启；无维度时保存前需关闭目标维度或补全维度 */
+    enableTeacherComment: false,
+    /** 学业报告预览：目标维度 / 学习品质 / 测评成绩；学科评语不纳入学生发布报告 */
     enableTarget: true,
     scorePreview: '',
     commentPreview: '',
@@ -2216,7 +2384,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       subjectNameEn: subject.subjectNameEn ?? '',
       enableScore: subject.enableScore !== false,
       enableLearningQuality: subject.enableLearningQuality !== false,
-      enableTeacherComment: subject.enableTeacherComment !== false,
+      enableTeacherComment: false,
       enableTarget,
       dimensions,
     };
@@ -2253,11 +2421,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           })),
         };
       };
-      /** 学业报告预览：学习品质 / 评价维度 / 学科评语默认开启；测评成绩由考试学科设置决定 */
+      /** 学业报告预览：学习品质 / 评价维度默认开启；测评成绩由考试学科设置决定；无学科评语 */
       const withAcademicPreviewDefaults = (draft: ReportSettingSubjectDraft): ReportSettingSubjectDraft => ({
         ...draft,
         enableLearningQuality: true,
-        enableTeacherComment: true,
+        enableTeacherComment: false,
         enableTarget: true,
       });
       if (courses.length === 0) {
@@ -2316,6 +2484,39 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [],
   );
 
+  /** 编辑报告预览：以学年预设学科为全集，叠加上已保存模板的考试/可见性等配置 */
+  const mergeReportTemplateSubjectsForPreview = useCallback(
+    (
+      templateSubjects: ReportSettingSubjectDraft[],
+      preset: ReportYearDimensionPreset | null,
+      courses: Course[],
+    ): ReportSettingSubjectDraft[] => {
+      const fromPreset = mergeYearPresetSubjectsWithCourses(preset, courses);
+      const byCourse = new Map<string, ReportSettingSubjectDraft>();
+      const byKey = new Map<string, ReportSettingSubjectDraft>();
+      for (const sub of templateSubjects) {
+        const cid = String(sub.courseId ?? '').trim();
+        if (cid) byCourse.set(cid, sub);
+        const sk = String(sub.subjectKey ?? '').trim();
+        if (sk) byKey.set(sk, sub);
+      }
+      return fromPreset.map((row) => {
+        const cid = String(row.courseId ?? '').trim();
+        const sk = String(row.subjectKey ?? '').trim();
+        const saved = (cid && byCourse.get(cid)) ?? (sk && byKey.get(sk));
+        if (!saved) return row;
+        return {
+          ...row,
+          enableScore: saved.enableScore,
+          enableLearningQuality: saved.enableLearningQuality,
+          scoreVisibility: saved.scoreVisibility,
+          moduleType: saved.moduleType,
+        };
+      });
+    },
+    [mergeYearPresetSubjectsWithCourses],
+  );
+
   /** 学科目标设置 / 新建报告（有学年预设）：学科行与课程管理同步，课程列表异步到达后自动合并 */
   useEffect(() => {
     if (!createEvaluationOpen || !USE_CLOUD_STORAGE) return;
@@ -2356,19 +2557,19 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       });
     };
     if (createEvaluationMode === 'edit') {
-      setReportSettingSubjects((prev) => resolveEnableScoreFromExam(prev));
+      setReportSettingSubjects((prev) => {
+        const merged = mergeReportTemplateSubjectsForPreview(
+          prev,
+          reportYearDimensionPreset,
+          evaluationDesignerCourses,
+        );
+        return resolveEnableScoreFromExam(merged);
+      });
       return;
     }
     const merged = mergeYearPresetSubjectsWithCourses(reportYearDimensionPreset, evaluationDesignerCourses);
     const withExamDefaults = resolveEnableScoreFromExam(merged);
     setReportSettingSubjects(withExamDefaults);
-    setPresetEditingSubjectKey((prev) => {
-      if (createEvaluationMode !== 'preset') return prev;
-      if (withExamDefaults.length === 0) return '';
-      const idx = prev.startsWith('idx-') ? Number(prev.slice(4)) : NaN;
-      if (Number.isFinite(idx) && idx >= 0 && idx < withExamDefaults.length) return prev;
-      return 'idx-0';
-    });
   }, [
     createEvaluationOpen,
     createEvaluationMode,
@@ -2377,14 +2578,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     reportYearDimensionPreset,
     evaluationDesignerCourses,
     mergeYearPresetSubjectsWithCourses,
+    mergeReportTemplateSubjectsForPreview,
     newReportPreviewGradeId,
     reportTargetSegments,
+    editTemplateSubjectsVersion,
   ]);
 
   useEffect(() => {
     if (!createEvaluationOpen || createEvaluationMode !== 'preset') return;
-    const firstStageId = reportTargetSegments[0]?.id ?? '';
-    setReportTargetStageId((prev) => prev || firstStageId);
     const persisted = (reportYearDimensionPreset?.subjects ?? []) as ReportYearDimensionPresetSubject[];
     setReportTargetPersistedSubjects(persisted);
     setReportTargetDirtySubjectKeys(new Set());
@@ -2409,12 +2610,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     });
     setReportTargetGradeConfigBySubject(nextGradeConfigBySubject);
   }, [createEvaluationOpen, createEvaluationMode, reportYearDimensionPreset, reportTargetSegments]);
-
-  useEffect(() => {
-    if (!createEvaluationOpen || createEvaluationMode !== 'exam') return;
-    const firstStageId = reportTargetSegments[0]?.id ?? '';
-    setReportTargetStageId((prev) => prev || firstStageId);
-  }, [createEvaluationOpen, createEvaluationMode, reportTargetSegments]);
 
   useEffect(() => {
     if (!createEvaluationOpen || createEvaluationMode !== 'exam' || !reportTargetCurrentSegment) return;
@@ -2524,18 +2719,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       (s.gradeConfigs ?? []).forEach((g) => {
         const gid = String(g.gradeId ?? '').trim();
         if (!gid) return;
-        const draft = createEmptyExamGradeDraft();
+        const draft = createEmptyExamGradeDraft(reportTargetCurrentSegment);
+        const fs = examFullScoreFromGradeConfig(g.fullScore, g.percentBands);
+        draft.fullScore = String(fs);
+        const parsedBands = parseConfiguredExamPercentBands(g.percentBands ?? {});
         for (const rg of REPORT_SCORE_LETTER_GRADES) {
-          const val = (g.percentBands ?? {})[rg as ReportGrade];
-          if (Number.isFinite(Number(val))) {
+          const val = parsedBands[rg as ReportGrade];
+          if (val != null && Number.isFinite(val)) {
             draft.percentBands[rg as ReportGrade] = String(val);
           }
         }
-        draft.dimensionScores = (g.dimensionScores ?? []).map((d) => ({
-          dimensionLabelZh: d.dimensionLabelZh ?? '',
-          dimensionLabelEn: d.dimensionLabelEn ?? '',
-          score: Number.isFinite(Number(d.score)) ? String(d.score) : '',
-        }));
         gradeConfigs[gid] = draft;
       });
       draftsByCourse[cid] = {
@@ -2699,14 +2892,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     });
   };
 
-  const addModuleToDesigner = (moduleKey: EvaluationDesignerModule) => {
-    setEnabledEvaluationModules((prev) => ({ ...prev, [moduleKey]: true }));
-    setEvaluationModuleOrder((prev) => (prev.includes(moduleKey) ? prev : [...prev, moduleKey]));
-    if (moduleKey === 'subject_evaluation') {
-      setReportSettingSubjects((prev) => (prev.length > 0 ? prev : [createEmptySubject()]));
-    }
-  };
-
   const removeModuleFromDesigner = (moduleKey: EvaluationDesignerModule) => {
     setEnabledEvaluationModules((prev) => ({ ...prev, [moduleKey]: false }));
     setEvaluationModuleOrder((prev) => prev.filter((k) => k !== moduleKey));
@@ -2829,7 +3014,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           dimensionLabelEn: (d.dimensionLabelEn || d.dimensionLabelZh).trim(),
           levelDescriptions: {} as Partial<Record<TargetLevel, string>>,
         }))
-        .filter((d) => d.dimensionLabelZh && d.dimensionLabelEn),
+        .filter((d) => d.dimensionLabelZh || d.dimensionLabelEn),
     }));
     const gradeDimensionsForSave = gradeDimensions.filter((row) => evalGradeIds.includes(row.gradeId));
     const gc = normalizeGradeConfig(loadGradeConfigSync());
@@ -2848,6 +3033,19 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     const dimensionsForReportFallback =
       gradeDimensionsForSave.find((g) => g.dimensions.length > 0)
       ?? gradeDimensions.find((g) => g.dimensions.length > 0);
+    const baseSubjects = mergeYearPresetSubjectsForSave(
+      reportYearDimensionPreset?.subjects ?? [],
+      reportTargetPersistedSubjects,
+    );
+    const existingSubject = baseSubjects.find(
+      (s) =>
+        (courseId && String(s.courseId ?? '').trim() === courseId)
+        || String(s.subjectKey ?? '').trim() === subjectKey,
+    );
+    const otherGradeDims = (existingSubject?.gradeDimensions ?? []).filter(
+      (row) => !stageGradeIds.includes(String(row.gradeId ?? '').trim()),
+    );
+    const mergedGradeDimensions = [...otherGradeDims, ...gradeDimensions];
     const subjectPayload: ReportYearDimensionPresetSubject = {
       courseId: subject.courseId,
       subjectKey: subject.subjectKey,
@@ -2855,12 +3053,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       subjectNameEn: subject.subjectNameEn,
       enableScore: false,
       enableTeacherComment: false,
-      enableTarget: gradeDimensions.some((g) => g.dimensions.length > 0),
+      enableTarget: mergedGradeDimensions.some((g) => g.dimensions.length > 0),
       /** 保留各年级维度草稿；是否纳入学业报告由 evaluationGradeInclusion 控制 */
-      gradeDimensions,
+      gradeDimensions: mergedGradeDimensions,
       dimensions: dimensionsForReportFallback?.dimensions ?? [],
     };
-    const withoutCurrent = reportTargetPersistedSubjects.filter((s) => s.subjectKey !== subjectPayload.subjectKey);
+    const payloadKey = presetSubjectMergeKey(subjectPayload);
+    const withoutCurrent = baseSubjects.filter((s) => presetSubjectMergeKey(s) !== payloadKey);
     const nextSubjects = [...withoutCurrent, subjectPayload];
     const evaluationGradesForCourse = [...evalGradeIds];
     const nextEvaluationGradeInclusion = {
@@ -2924,6 +3123,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     getPresetStageGradeIds,
     ensurePresetSubjectGradeConfig,
     reportTargetPersistedSubjects,
+    reportYearDimensionPreset,
     reportTargetUnifiedLevel,
     reportYearDimensionPreset?.stageInclusion,
     reportTargetStageId,
@@ -2953,14 +3153,19 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         ...(reportYearDimensionPreset?.evaluationGradeInclusion ?? {}),
         [reportTargetStageId]: gradeMap,
       };
+      const subjectsForSave = mergeYearPresetSubjectsForSave(
+        reportYearDimensionPreset?.subjects ?? [],
+        reportTargetPersistedSubjects,
+      );
       await api.upsertAdminReportYearDimensionPreset({
         academicYearId: reportSettingYearId,
         homeroomCommentMode: 'disabled',
-        subjects: reportTargetPersistedSubjects,
+        subjects: subjectsForSave,
         stageInclusion: nextInclusion,
         evaluationGradeInclusion: nextEvaluationGradeInclusion,
         unifiedLevelDescriptions: unifiedLevelToApiPayload(reportTargetUnifiedLevel),
       });
+      setReportTargetPersistedSubjects(subjectsForSave);
       await loadReportYearDimensionPreset(reportSettingYearId);
       setEvaluationDesignerError(isZh ? '已保存参与学业报告的学科。' : 'Saved subjects included in the academic report.');
     } catch (e: unknown) {
@@ -2988,12 +3193,17 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     setReportTargetUnifiedDialogSaving(true);
     setEvaluationDesignerError(null);
     try {
+      const subjectsForSave = mergeYearPresetSubjectsForSave(
+        reportYearDimensionPreset?.subjects ?? [],
+        reportTargetPersistedSubjects,
+      );
       await api.upsertAdminReportYearDimensionPreset({
         academicYearId: reportSettingYearId,
         homeroomCommentMode: 'disabled',
-        subjects: reportTargetPersistedSubjects,
+        subjects: subjectsForSave,
         unifiedLevelDescriptions: unifiedLevelToApiPayload(reportTargetUnifiedDraft),
       });
+      setReportTargetPersistedSubjects(subjectsForSave);
       setReportTargetUnifiedLevel({ ...reportTargetUnifiedDraft });
       setReportYearDimensionPreset((prev) =>
         prev
@@ -3053,6 +3263,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           courses: evaluationDesignerCourses,
           examGradeByCourse: reportExamGradeByCourse,
         });
+        for (const sub of scopeSubjects) {
+          for (const gc of sub.gradeConfigs) {
+            const fullScore = examFullScoreFromGradeConfig(gc.fullScore, gc.percentBands);
+            if (!Number.isFinite(fullScore) || fullScore <= 0) {
+              setEvaluationDesignerError(isZh ? '考试总分须为正数。' : 'Exam full score must be a positive number.');
+              return;
+            }
+            const mins = configuredReportScoreGradeMins(gc.percentBands);
+            const err = validateConfiguredScoreGradeMinOrder(mins, isZh, true);
+            if (err) {
+              setEvaluationDesignerError(err);
+              return;
+            }
+          }
+        }
         const nextExamConfigs: Record<string, ReportExamConfigScope> = {
           ...(reportYearDimensionPreset?.examConfigs ?? {}),
           [key]: {
@@ -3060,15 +3285,20 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             subjects: scopeSubjects,
           },
         };
+        const subjectsForSave = mergeYearPresetSubjectsForSave(
+          reportYearDimensionPreset?.subjects ?? [],
+          reportTargetPersistedSubjects,
+        );
         await api.upsertAdminReportYearDimensionPreset({
           academicYearId: reportSettingYearId,
           homeroomCommentMode: 'disabled',
-          subjects: reportTargetPersistedSubjects,
+          subjects: subjectsForSave,
           stageInclusion: reportYearDimensionPreset?.stageInclusion,
           examGradeInclusion: nextExamGradeInclusion,
           examConfigs: nextExamConfigs,
           unifiedLevelDescriptions: unifiedLevelToApiPayload(reportTargetUnifiedLevel),
         });
+        setReportTargetPersistedSubjects(subjectsForSave);
         setReportYearDimensionPreset((prev) =>
           prev
             ? { ...prev, examConfigs: nextExamConfigs, examGradeInclusion: nextExamGradeInclusion }
@@ -3174,6 +3404,72 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [reportSettingSubjectEntries],
   );
 
+  /** 新建报告：按学段汇总各年级学科为考查(○)或考试(✓) */
+  const newReportInclusionMatrix = useMemo(() => {
+    const seg = newReportPreviewSegment;
+    const preset = reportYearDimensionPreset;
+    if (!seg || !preset) return null;
+    const gc = normalizeGradeConfig(loadGradeConfigSync());
+    const term = reportSettingTerm;
+    const stageCourseIds = preset.stageInclusion?.[seg.id];
+    const courses = evaluationCoursesSorted
+      .filter((course) =>
+        seg.gradeIds.some((gid) => courseAppliesToGrade(course, getGradeLevelById(gc, gid), gc)),
+      )
+      .filter((course) => {
+        if (stageCourseIds === undefined) return true;
+        return stageCourseIds.includes(course.id);
+      });
+    const gradeRows = seg.gradeIds.map((gid) => ({
+      gradeId: gid,
+      label: getGradeLabelByLevel(gc, getGradeLevelById(gc, gid)),
+    }));
+    type CellKind = 'none' | 'evaluation' | 'exam';
+    const cells: Record<string, Record<string, CellKind>> = {};
+    for (const course of courses) {
+      const row: Record<string, CellKind> = {};
+      for (const { gradeId } of gradeRows) {
+        const inEval = isEvaluationGradeIncluded(
+          seg.id,
+          course.id,
+          gradeId,
+          seg.gradeIds,
+          preset.stageInclusion,
+          preset.evaluationGradeInclusion,
+        );
+        if (!inEval) {
+          row[gradeId] = 'none';
+          continue;
+        }
+        const inExam = isExamGradeIncluded(
+          term,
+          seg.id,
+          course.id,
+          gradeId,
+          seg.gradeIds,
+          preset.stageInclusion,
+          preset.evaluationGradeInclusion,
+          preset.examGradeInclusion,
+          preset.examConfigs,
+        );
+        row[gradeId] = inExam ? 'exam' : 'evaluation';
+      }
+      cells[course.id] = row;
+    }
+    const activeCourses = courses.filter((c) =>
+      gradeRows.some(({ gradeId }) => cells[c.id]?.[gradeId] !== 'none'),
+    );
+    const displayColumns = groupCoursesByRoadmapDisplayKey(activeCourses, isZh ? 'zh' : 'en');
+    return { segLabel: seg.label, gradeRows, courses: activeCourses, displayColumns, cells };
+  }, [
+    newReportPreviewSegment,
+    reportYearDimensionPreset,
+    reportSettingTerm,
+    evaluationCoursesSorted,
+    reportTargetGradeConfigSyncKey,
+    isZh,
+  ]);
+
   useEffect(() => {
     if (!createEvaluationOpen || createEvaluationMode !== 'create' || !useSimplifiedAcademicTargetPreview) {
       homeroomPreviewLastSegmentIdRef.current = null;
@@ -3230,8 +3526,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const activeEvaluationModules = evaluationModuleOrder.filter((m) => enabledEvaluationModules[m]);
 
-  const inactiveEvaluationModules = evaluationModuleOptions.filter((m) => !enabledEvaluationModules[m.key]);
-
   const buildTemplateSubjectsByModules = () => {
     if (!hasSubjectEvaluationEnabled) return [];
     const source = useSimplifiedAcademicTargetPreview
@@ -3240,7 +3534,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     return source.map((s) => {
       const normalizedModuleType: 'subject_score' | 'subject_comment' | 'non_score_comment' = s.enableScore
         ? 'subject_score'
-        : (s.enableTeacherComment ? 'subject_comment' : 'non_score_comment');
+        : 'non_score_comment';
       const subjectKey =
         String(s.subjectKey ?? '').trim()
         || (s.courseId ? staffingSubjectKeyFromCourse(s.courseId, s.subjectNameEn || s.subjectNameZh || '') : '');
@@ -3251,7 +3545,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         moduleType: normalizedModuleType,
         enableScore: s.enableScore,
         enableLearningQuality: s.enableLearningQuality,
-        enableTeacherComment: s.enableTeacherComment,
+        enableTeacherComment: false,
         scoreVisibility: s.scoreVisibility,
         dimensions: s.enableTarget ? s.dimensions : [],
       };
@@ -3339,8 +3633,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setEvaluationDesignerError(validationError);
       return false;
     }
-    if (reportTargetSegments.length > 0 && !newReportSchoolSegmentId.trim()) {
-      setEvaluationDesignerError(isZh ? '请选择学段后再新建学业报告。' : 'Select a school segment before creating the report.');
+    if (reportSettingRequiresSegment && !reportSettingSegmentId.trim()) {
+      setEvaluationDesignerError(isZh ? '请先在页面上方选择学段。' : 'Select a school segment at the top of the page first.');
       return false;
     }
     setReportSettingSaving(true);
@@ -3351,7 +3645,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         term: reportSettingTerm,
         title: createEvaluationTitle.trim() || null,
         sourceTemplateId: createEvaluationFromTemplateId || null,
-        schoolSegmentId: newReportSchoolSegmentId.trim() || null,
+        schoolSegmentId: reportSettingSegmentId.trim() || newReportSchoolSegmentId.trim() || null,
       });
       if (created.id) {
         await api.upsertAdminReportTemplate({
@@ -3381,6 +3675,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   };
 
   const openCreateEvaluationDesigner = async () => {
+    if (!reportSettingSegmentReady) {
+      setError(isZh ? '请先选择学段。' : 'Select a school segment first.');
+      return;
+    }
     setCreateEvaluationMode('create');
     setEvaluationDesignerError(null);
     setReportSettingSubjects([]);
@@ -3388,7 +3686,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     setCreateEvaluationTitle('');
     setReportSettingTitle('');
     setCreateEvaluationFromTemplateId('');
-    setNewReportSchoolSegmentId(reportTargetSegments[0]?.id ?? '');
     setReportSettingHomeroomCommentMode('optional');
     const defaultModules = {
       homeroom_comment: true,
@@ -3401,14 +3698,17 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const openSubjectEvaluationSettings = async () => {
     if (!reportSettingYearId) return;
+    if (!reportSettingSegmentReady) {
+      setError(isZh ? '请先选择学段。' : 'Select a school segment first.');
+      return;
+    }
     setCreateEvaluationMode('preset');
     setEvaluationDesignerError(null);
-    setReportTargetStageId('');
     setReportTargetCheckedCourseIds([]);
     setReportTargetActiveSubjectKey('');
     setReportTargetGradeConfigBySubject({});
     setReportTargetDirtySubjectKeys(new Set());
-    setReportTargetPersistedSubjects([]);
+    setReportTargetPersistedSubjects(reportYearDimensionPreset?.subjects ?? []);
     setReportSettingSubjects([]);
     setPresetEditingSubjectKey('');
     setCreateEvaluationOpen(true);
@@ -3426,12 +3726,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const openExamSubjectSettings = async () => {
     if (!reportSettingYearId) return;
+    if (!reportSettingSegmentReady) {
+      setError(isZh ? '请先选择学段。' : 'Select a school segment first.');
+      return;
+    }
     setCreateEvaluationMode('exam');
     setEvaluationDesignerError(null);
-    setReportTargetStageId(reportTargetSegments[0]?.id ?? '');
     setReportExamCheckedCourseIds([]);
     setReportExamActiveCourseId('');
     setReportExamConfigByCourse({});
+    setReportTargetPersistedSubjects(reportYearDimensionPreset?.subjects ?? []);
     setCreateEvaluationOpen(true);
   };
 
@@ -3546,7 +3850,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             moduleType: s.moduleType,
             enableScore: s.enableScore,
             enableLearningQuality: s.enableLearningQuality !== false,
-            enableTeacherComment: s.enableTeacherComment,
+            enableTeacherComment: false,
             scoreVisibility: s.scoreVisibility,
             dimensions: (s.dimensions ?? []).map((d) => ({
               dimensionLabelZh: d.dimensionLabelZh || d.dimensionLabel,
@@ -3602,38 +3906,44 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   };
 
   useEffect(() => {
-    if (!USE_CLOUD_STORAGE || adminTab !== 'report-settings' || reportSettingPortraitTab !== 'academic' || !reportSettingYearId) {
-      setTermReportOverallRate(null);
-      setTermReportOverallLoading(false);
+    if (!USE_CLOUD_STORAGE || adminTab !== 'report-settings' || !reportSettingYearId) {
+      setReportProgressById({});
+      setReportProgressListLoading(false);
       return;
     }
-    const ids = reportTemplateList.map((t) => t.id).filter(Boolean) as string[];
-    if (ids.length === 0) {
-      setTermReportOverallRate(null);
-      setTermReportOverallLoading(false);
+    if (reportTemplateList.length === 0) {
+      setReportProgressById({});
+      setReportProgressListLoading(false);
       return;
     }
     let cancelled = false;
-    setTermReportOverallLoading(true);
-    Promise.all(ids.map((id) => api.getAdminReportTemplateProgress(id).catch(() => null)))
-      .then((list) => {
-        if (cancelled) return;
-        let tot = 0;
-        let done = 0;
-        for (const p of list) {
-          if (!p) continue;
-          tot += p.totalStudents;
-          done += p.completedStudents;
+    setReportProgressListLoading(true);
+    Promise.all(
+      reportTemplateList.map(async (tpl) => {
+        if (tpl.status === 'draft') return [tpl.id, null] as const;
+        try {
+          const progress = await api.getAdminReportTemplateProgress(tpl.id);
+          return [tpl.id, progress] as const;
+        } catch {
+          return [tpl.id, null] as const;
         }
-        setTermReportOverallRate(tot > 0 ? Number(((done / tot) * 100).toFixed(1)) : 0);
+      }),
+    )
+      .then((pairs) => {
+        if (cancelled) return;
+        const next: Record<string, ReportTemplateProgress> = {};
+        for (const [id, progress] of pairs) {
+          if (progress) next[id] = progress;
+        }
+        setReportProgressById(next);
       })
       .finally(() => {
-        if (!cancelled) setTermReportOverallLoading(false);
+        if (!cancelled) setReportProgressListLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [adminTab, reportSettingPortraitTab, reportSettingYearId, reportSettingTerm, reportTemplateList]);
+  }, [adminTab, reportSettingYearId, reportSettingTerm, reportTemplateList]);
 
   const remindTeachers = async (message: string) => {
     const text = String(message ?? '').trim();
@@ -3749,17 +4059,32 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [allClasses, staffingYearId],
   );
 
-  /** 与课程管理 / 课程河流整体视图一致：按全局 categoryOrder + 学科分组展开为列 */
-  const curriculumCategoryOrderKey =
-    adminTab === 'staffing' ? JSON.stringify(loadCategoryOrder()) : '';
-  const staffingCourseColumns = useMemo(() => {
-    const sorted = sortCoursesLikeCurriculumRoadmap(staffingCourses, loadCategoryOrder());
+  /** 扁平任课列（Excel / 岗位匹配 subjectKey）；顺序与课程设置一致 */
+  const staffingCoursesSortedFlat = useMemo(() => {
+    const sorted = sortCoursesLikeCurriculumRoadmap(
+      staffingCourses,
+      loadCategoryOrder(),
+      loadCourseDomainsSync(),
+    );
     return sorted.map((course) => ({
       course,
       key: normalizeSubjectKey(course.id || course.name),
       name: getSubjectCategoryText(course.subjectCategory, language) || course.name,
     }));
-  }, [staffingCourses, curriculumCategoryOrderKey, staffingCategoryOrderNonce, language]);
+  }, [staffingCourses, courseLayoutOrderKey, staffingCategoryOrderNonce, language]);
+
+  /** 同显示名合并为一列（如小学苏教数学 + 中学沪科数学 → 「数学」） */
+  const staffingCourseColumnGroups = useMemo(() => {
+    const lang = language === 'zh' ? 'zh' : 'en';
+    return groupCoursesByRoadmapDisplayKey(
+      staffingCoursesSortedFlat.map((c) => c.course),
+      lang,
+    ).map((g) => ({
+      key: g.displayKey,
+      name: g.displayKey,
+      courses: g.courses,
+    }));
+  }, [staffingCoursesSortedFlat, language]);
 
   const staffingAssignmentsMap = useMemo(() => {
     const map = new Map<string, StaffingAssignment>();
@@ -3785,13 +4110,20 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       name: isZh ? '班主任' : 'Homeroom',
     };
 
-    const buildColumnsForGradeIds = (gradeIds: string[]) =>
-      staffingCourseColumns.filter((col) =>
+    const buildMergedColumnsForGradeIds = (gradeIds: string[]) =>
+      staffingCourseColumnGroups.filter((col) =>
         gradeIds.some((gid) => {
           const lv = getGradeLevelById(norm, gid);
-          return courseAppliesToGrade(col.course, lv, norm);
+          return col.courses.some((course) => courseAppliesToGrade(course, lv, norm));
         }),
       );
+
+    const mapMergedCourseCol = (c: (typeof staffingCourseColumnGroups)[number]) => ({
+      kind: 'course' as const,
+      key: c.key,
+      name: c.name,
+      courses: c.courses,
+    });
 
     if (!hasSeg || segmentsOrdered.length === 0) {
       return [
@@ -3801,7 +4133,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           classes: staffingClassList,
           columns: [
             homeroomCol,
-            ...staffingCourseColumns.map((c) => ({ kind: 'course' as const, course: c.course, key: c.key, name: c.name })),
+            ...staffingCourseColumnGroups.map(mapMergedCourseCol),
           ],
         },
       ];
@@ -3811,27 +4143,76 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       key: seg.id,
       title: seg.label,
       classes: staffingClassList.filter((cls) => {
-        const gid = getGradeIdByLevel(norm, cls.grade);
+        const gid = getGradeCatalogIdForClass(norm, cls.grade, { className: cls.name });
         return seg.gradeIds.includes(gid);
       }),
       columns: [
         homeroomCol,
-        ...buildColumnsForGradeIds(seg.gradeIds).map((c) => ({ kind: 'course' as const, course: c.course, key: c.key, name: c.name })),
+        ...buildMergedColumnsForGradeIds(seg.gradeIds).map(mapMergedCourseCol),
       ],
     }));
   }, [
     staffingClassList,
-    staffingCourseColumns,
+    staffingCourseColumnGroups,
     staffingGradeConfigSyncKey,
-    curriculumCategoryOrderKey,
+    courseLayoutOrderKey,
     staffingCategoryOrderNonce,
     isZh,
   ]);
 
-  const staffingRosterSheetsForExcel = useMemo(
-    () => buildStaffingRosterSheetsFromBlocks(staffingSegmentBlocks, isZh),
-    [staffingSegmentBlocks, isZh],
-  );
+  const staffingRosterSheetsForExcel = useMemo(() => {
+    const norm = normalizeGradeConfig(loadGradeConfigSync());
+    const hasSeg = gradeConfigHasSegments(norm);
+    const segmentsOrdered = getRoadmapSegmentsInDisplayOrder(norm);
+    const homeroomCol = {
+      kind: 'homeroom' as const,
+      key: STAFFING_HOMEROOM_SUBJECT_KEY,
+      name: isZh ? '班主任' : 'Homeroom',
+    };
+    const buildFlatColumnsForGradeIds = (gradeIds: string[]) =>
+      staffingCoursesSortedFlat.filter((col) =>
+        gradeIds.some((gid) => {
+          const lv = getGradeLevelById(norm, gid);
+          return courseAppliesToGrade(col.course, lv, norm);
+        }),
+      );
+    const mapFlatCourseCol = (c: (typeof staffingCoursesSortedFlat)[number]) => ({
+      kind: 'course' as const,
+      course: c.course,
+      key: c.key,
+      name: c.name,
+    });
+    const flatBlocks =
+      !hasSeg || segmentsOrdered.length === 0
+        ? [
+            {
+              key: '__all__' as const,
+              title: '',
+              classes: staffingClassList,
+              columns: [homeroomCol, ...staffingCoursesSortedFlat.map(mapFlatCourseCol)],
+            },
+          ]
+        : segmentsOrdered.map((seg) => ({
+            key: seg.id,
+            title: seg.label,
+            classes: staffingClassList.filter((cls) => {
+              const gid = getGradeCatalogIdForClass(norm, cls.grade, { className: cls.name });
+              return seg.gradeIds.includes(gid);
+            }),
+            columns: [
+              homeroomCol,
+              ...buildFlatColumnsForGradeIds(seg.gradeIds).map(mapFlatCourseCol),
+            ],
+          }));
+    return buildStaffingRosterSheetsFromBlocks(flatBlocks, isZh);
+  }, [
+    staffingClassList,
+    staffingCoursesSortedFlat,
+    staffingGradeConfigSyncKey,
+    courseLayoutOrderKey,
+    staffingCategoryOrderNonce,
+    isZh,
+  ]);
 
   const staffingAssignmentsForExcel = useMemo(() => {
     const m = new Map<string, { teacherId: string }>();
@@ -3947,12 +4328,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     for (const a of staffingAssignments) {
       if (!a.teacherId || a.academicYearId !== staffingYearId) continue;
       const cls = staffingClassList.find((c) => c.id === a.classId);
-      const col = staffingCourseColumns.find((c) => c.key === a.subjectKey);
+      const col = staffingCoursesSortedFlat.find((c) => c.key === a.subjectKey);
       if (!cls || !col) continue;
       const slot = a.teacherSlot === 1 ? 1 : 0;
       if (slot === 1 && !col.course.coTeaching) continue;
-      if (!courseAppliesToGrade(col.course, cls.grade, gc)) continue;
-      const periods = getWeeklyPeriodsForGrade(col.course, cls.grade, gc);
+      const curriculumLevel = getCurriculumGradeLevelForClass(gc, cls);
+      if (!courseAppliesToGrade(col.course, curriculumLevel, gc)) continue;
+      const periods = getWeeklyPeriodsForGrade(col.course, curriculumLevel, gc);
       if (periods <= 0) continue;
       const subjectCategoryKey = getCategoryCanonicalKey(col.course.subjectCategory) || col.course.name;
       const subjectCategoryLabel = getSubjectCategoryText(col.course.subjectCategory, language) || subjectCategoryKey;
@@ -3979,9 +4361,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     staffingAssignments,
     staffingYearId,
     staffingClassList,
-    staffingCourseColumns,
+    staffingCoursesSortedFlat,
     staffingGradeConfigSyncKey,
-    curriculumCategoryOrderKey,
+    courseLayoutOrderKey,
     staffingCategoryOrderNonce,
     language,
   ]);
@@ -4064,24 +4446,26 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         role: 'system-admin' as const,
         panel: true,
         users: L('全管', 'Full'),
-        foundation: L('全管', 'Full'),
-        classes: L('全管', 'Full'),
+        foundation: L('全管（含班级）', 'Full incl. classes'),
+        classes: L('—', '—'),
         courses: L('新建/维护', 'Create/edit'),
         staffing: L('全管', 'Full'),
         students: L('增删改', 'Full'),
         portrait: L('创建与管理', 'Create & manage'),
+        teacherPortrait: L('创建与管理', 'Create & manage'),
         database: L('只读', 'Read'),
       },
       {
         role: 'admin' as const,
         panel: true,
         users: L('可管教师', 'Manage teachers'),
-        foundation: L('学年只读；学段可编', 'Years view; stages edit'),
-        classes: L('全管', 'Full'),
+        foundation: L('学年只读；学段/班级可编', 'Years view; stages & classes edit'),
+        classes: L('—', '—'),
         courses: L('无新建；可编单元', 'No new course; units'),
         staffing: L('全管', 'Full'),
         students: L('可增不可删', 'Add, not delete'),
         portrait: L('创建与管理', 'Create & manage'),
+        teacherPortrait: L('创建与管理', 'Create & manage'),
         database: L('—', '—'),
       },
       {
@@ -4094,6 +4478,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         staffing: L('—', '—'),
         students: L('关联班级', 'Linked classes'),
         portrait: L('任课范围', 'Teaching scope'),
+        teacherPortrait: L('—', '—'),
         database: L('—', '—'),
       },
     ];
@@ -4130,13 +4515,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           </button>
           <button
             type="button"
-            onClick={() => { setAdminTab('classes'); setError(null); }}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'classes' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
-          >
-            {isZh ? '班级管理' : 'Classes'}
-          </button>
-          <button
-            type="button"
             onClick={() => { setAdminTab('courses'); setError(null); }}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'courses' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
@@ -4161,7 +4539,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             onClick={() => { setAdminTab('report-settings'); setError(null); }}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'report-settings' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            {isZh ? '学生画像' : 'Portrait'}
+            {isZh ? '学生画像' : 'Student portrait'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setAdminTab('teacher-portrait-settings'); setError(null); }}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'teacher-portrait-settings' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            {isZh ? '教师画像' : 'Teacher portrait'}
           </button>
           {isSystemAdmin && (
             <button
@@ -4211,11 +4596,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '后台' : 'Panel'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '用户管理' : 'Users'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '基础设置' : 'Foundation'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '班级管理' : 'Classes'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '课程管理' : 'Courses'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '岗位与课时' : 'Staffing'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生管理' : 'Students'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生画像' : 'Portrait'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生画像' : 'Student portrait'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '教师画像' : 'Teacher portrait'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '数据库' : 'Database'}</th>
                 </tr>
               </thead>
@@ -4226,11 +4611,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <td className="py-2 px-2 whitespace-nowrap">{row.panel ? (isZh ? '✓' : 'Yes') : '—'}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.users}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.foundation}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.classes}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.courses}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.staffing}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.students}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.portrait}</td>
+                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.teacherPortrait}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[5rem]">{row.database}</td>
                   </tr>
                 ))}
@@ -4858,17 +5243,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           />
         )}
 
-        {adminTab === 'classes' && (
-          <div className="mt-4 w-full min-w-0">
-            <ClassManagement
-              onBackToHub={() => {}}
-              embedded
-              hideYearGear={false}
-              pageTitle={isZh ? '班级管理' : 'Classes'}
-            />
-          </div>
-        )}
-
         {adminTab === 'staffing' && (
           <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
             <div className="flex flex-row items-center justify-between gap-3">
@@ -4877,20 +5251,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               </h2>
               <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
                 <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
-                <select
+                <AcademicYearSelect
+                  isZh={isZh}
+                  years={allYears}
                   value={staffingYearId}
-                  onChange={(e) => setStaffingYearId(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[140px] sm:min-w-[180px]"
+                  onChange={setStaffingYearId}
+                  allowEmpty={allYears.length === 0}
+                  emptyLabel={isZh ? '暂无学年' : 'No years'}
                   disabled={staffingLoading || allYears.length === 0}
-                >
-                  {allYears.length === 0 ? (
-                    <option value="">{isZh ? '暂无学年' : 'No years'}</option>
-                  ) : (
-                    allYears.map((y) => (
-                      <option key={y.id} value={y.id}>{y.name}</option>
-                    ))
-                  )}
-                </select>
+                />
                 {USE_CLOUD_STORAGE && staffingYearId ? (
                   <>
                     <Button
@@ -4970,7 +5339,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                       <div className="space-y-8 pt-2">
                         {staffingSegmentBlocks.map((block) => {
                           const gradeNorm = normalizeGradeConfig(loadGradeConfigSync());
-                          const gradeGroups = groupStaffingClassesByGrade(block.classes);
+                          const gradeSections = groupClassesForClassManagement(gradeNorm, block.classes);
                           return (
                             <div key={String(block.key)} className="space-y-2">
                               {block.title ? (
@@ -5013,7 +5382,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                             <th
                                               key={col.key}
                                               className={
-                                                col.course.coTeaching
+                                                col.courses.some((c) => c.coTeaching)
                                                   ? 'border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[13rem] max-w-[22rem]'
                                                   : 'border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[96px] max-w-[144px]'
                                               }
@@ -5027,16 +5396,24 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                       </tr>
                                     </thead>
                                     <tbody>
-                                      {gradeGroups.flatMap(({ grade, items }) =>
-                                        items.map((cls, idxInGrade) => (
+                                      {gradeSections.flatMap((section) => {
+                                        const sectionRows = section.tracks
+                                          ? [
+                                              ...section.tracks.flatMap((track) => track.classes.map((cls) => ({ cls }))),
+                                              ...section.classList.map((cls) => ({ cls })),
+                                            ]
+                                          : section.classList.map((cls) => ({ cls }));
+                                        return sectionRows.map(({ cls }, idxInSection) => {
+                                          const curriculumLevel = getCurriculumGradeLevelForClass(gradeNorm, cls);
+                                          return (
                                           <tr key={cls.id} className="border-t border-slate-100">
-                                            {idxInGrade === 0 ? (
+                                            {idxInSection === 0 ? (
                                               <th
-                                                rowSpan={items.length}
+                                                rowSpan={sectionRows.length}
                                                 scope="row"
                                                 className="sticky left-0 z-[1] bg-white border-r border-slate-100 px-2 py-2 align-top text-center text-sm font-semibold text-slate-800 whitespace-nowrap"
                                               >
-                                                {getGradeLabel(grade)}
+                                                {section.parentLabel}
                                               </th>
                                             ) : null}
                                             <td className="sticky left-[4.5rem] z-[1] bg-white border-r border-slate-100 px-2 py-2 align-top font-medium text-slate-800 text-center">
@@ -5088,17 +5465,28 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                   </td>
                                                 );
                                               }
-                                              const applies = courseAppliesToGrade(col.course, cls.grade, gradeNorm);
-                                              if (!applies) {
+                                              const activeCourse =
+                                                col.courses.find((c) =>
+                                                  courseAppliesToGrade(c, curriculumLevel, gradeNorm),
+                                                ) ?? null;
+                                              if (!activeCourse) {
                                                 return (
                                                   <td key={`${cls.id}-${col.key}`} className="px-1.5 py-2 align-top bg-slate-50/60 text-center text-slate-300 text-xs">
                                                     —
                                                   </td>
                                                 );
                                               }
-                                              const coTeaching = Boolean(col.course.coTeaching);
+                                              const activeSubjectKey = staffingSubjectKeyFromCourse(
+                                                activeCourse.id,
+                                                activeCourse.name,
+                                              );
+                                              const coTeaching = Boolean(activeCourse.coTeaching);
                                               const teacherSlots: (0 | 1)[] = coTeaching ? [0, 1] : [0];
-                                              const weeklyP = getWeeklyPeriodsForGrade(col.course, cls.grade, gradeNorm);
+                                              const weeklyP = getWeeklyPeriodsForGrade(
+                                                activeCourse,
+                                                curriculumLevel,
+                                                gradeNorm,
+                                              );
                                               const weeklyPeriodsBadge =
                                                 weeklyP > 0 ? (
                                                   <span
@@ -5114,7 +5502,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                 backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
                                               };
                                               const coTeachingSaving = teacherSlots.some((slot) =>
-                                                staffingSavingKeys.has(`${cls.id}::${col.key}::${slot}`),
+                                                staffingSavingKeys.has(`${cls.id}::${activeSubjectKey}::${slot}`),
                                               );
                                               return (
                                                 <td
@@ -5125,7 +5513,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                     <div className="mx-auto flex w-full min-w-[11rem] max-w-[14rem] flex-col items-center">
                                                       <div className="flex w-full items-center justify-center gap-1 min-w-0">
                                                         {teacherSlots.map((slot) => {
-                                                          const rowKey = `${cls.id}::${col.key}::${slot}`;
+                                                          const rowKey = `${cls.id}::${activeSubjectKey}::${slot}`;
                                                           const assigned = staffingAssignmentsMap.get(rowKey);
                                                           const currentTeacherId = assigned?.teacherId ?? '';
                                                           const isSaving = staffingSavingKeys.has(rowKey);
@@ -5137,7 +5525,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                                 void upsertStaffingAssignment({
                                                                   academicYearId: staffingYearId,
                                                                   classId: cls.id,
-                                                                  subjectKey: col.key,
+                                                                  subjectKey: activeSubjectKey,
                                                                   subjectName: col.name,
                                                                   teacherId: e.target.value || null,
                                                                   teacherSlot: slot,
@@ -5168,7 +5556,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                     <div className="mx-auto flex w-full max-w-[10.5rem] flex-col items-center">
                                                       {(() => {
                                                         const slot = 0;
-                                                        const rowKey = `${cls.id}::${col.key}::${slot}`;
+                                                        const rowKey = `${cls.id}::${activeSubjectKey}::${slot}`;
                                                         const assigned = staffingAssignmentsMap.get(rowKey);
                                                         const currentTeacherId = assigned?.teacherId ?? '';
                                                         const isSaving = staffingSavingKeys.has(rowKey);
@@ -5181,7 +5569,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                                   void upsertStaffingAssignment({
                                                                     academicYearId: staffingYearId,
                                                                     classId: cls.id,
-                                                                    subjectKey: col.key,
+                                                                    subjectKey: activeSubjectKey,
                                                                     subjectName: col.name,
                                                                     teacherId: e.target.value || null,
                                                                     teacherSlot: slot,
@@ -5214,8 +5602,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                               );
                                             })}
                                           </tr>
-                                        )),
-                                      )}
+                                          );
+                                        });
+                                      })}
                                     </tbody>
                                   </table>
                                 </div>
@@ -5230,7 +5619,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
                 {staffingSubTab === 'load' && (
                   <div className="space-y-6 pt-2">
-                    {staffingCourseColumns.length === 0 ? (
+                    {staffingCourseColumnGroups.length === 0 ? (
                       <p className="text-sm text-slate-500">
                         {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
                       </p>
@@ -5590,63 +5979,79 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               </div>
             )}
 
-            {reportSettingPortraitTab === 'academic' && (
-              <>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">{isZh ? '学年' : 'Academic year'}</label>
-                    <select
-                      value={reportSettingYearId}
-                      onChange={(e) => setReportSettingYearId(e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-                    >
-                      <option value="">{isZh ? '请选择' : 'Select'}</option>
-                      {years.map((y) => (
-                        <option key={y.id} value={y.id}>{y.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">{isZh ? '学期' : 'Term'}</label>
-                    <select
-                      value={reportSettingTerm}
-                      onChange={(e) => setReportSettingTerm(e.target.value as Term)}
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-                    >
-                      <option value="Semester 1">{isZh ? '上学期' : 'Semester 1'}</option>
-                      <option value="Semester 2">{isZh ? '下学期' : 'Semester 2'}</option>
-                    </select>
-                  </div>
-                  <div className="flex items-end justify-end">
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-1 inline-flex gap-1">
-                      <Button size="sm" variant="default" onClick={() => setReportSettingPortraitTab('academic')}>
-                        {isZh ? '学业报告' : 'Academic report'}
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-                {reportSettingLoading && <div className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</div>}
+            <FilterToolbar>
+              <AcademicYearSelectField
+                isZh={isZh}
+                years={years}
+                value={reportSettingYearId}
+                onChange={setReportSettingYearId}
+                allowEmpty
+                emptyLabel={isZh ? '选择学年' : 'Select year'}
+              />
+              <TermSelectField
+                isZh={isZh}
+                value={reportSettingTerm}
+                onChange={setReportSettingTerm}
+              />
+              {reportSettingRequiresSegment ? (
+                <FilterField label={isZh ? '学段' : 'School segment'} htmlFor="report-setting-segment">
+                  <FilterSelect
+                    id="report-setting-segment"
+                    width="md"
+                    value={reportSettingSegmentId}
+                    onChange={(e) => setReportSettingSegmentId(e.target.value)}
+                    disabled={!reportSettingYearId || reportTargetSegments.length === 0}
+                  >
+                    {reportTargetSegments.length === 0 ? (
+                      <option value="">
+                        {isZh ? '尚未配置学段' : 'No segment configured'}
+                      </option>
+                    ) : null}
+                    {reportTargetSegments.map((seg) => (
+                      <option key={seg.id} value={seg.id}>
+                        {seg.label}
+                      </option>
+                    ))}
+                  </FilterSelect>
+                </FilterField>
+              ) : null}
+            </FilterToolbar>
+
+            {reportSettingLoading && <div className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</div>}
                 {reportYearPresetLoading && (
                   <div className="text-xs text-slate-500">{isZh ? '加载学科评价设置中…' : 'Loading subject evaluation settings...'}</div>
                 )}
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
-                  <div className="text-sm font-semibold text-slate-800">{isZh ? '学业报告配置流程' : 'Academic report configuration flow'}</div>
+                  <div className="text-sm font-semibold text-slate-800">
+                    {reportSettingSegmentLabel
+                      ? isZh
+                        ? `学业报告配置流程 · ${reportSettingSegmentLabel}`
+                        : `Academic report setup · ${reportSettingSegmentLabel}`
+                      : isZh
+                        ? '学业报告配置流程'
+                        : 'Academic report configuration flow'}
+                  </div>
+                  {!reportSettingSegmentReady && reportSettingRequiresSegment ? (
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                      {isZh ? '请先在上方选择学段，再进入本学段的报告配置。' : 'Select a school segment above before configuring reports for that segment.'}
+                    </p>
+                  ) : null}
                   <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr_auto_1fr] gap-2 items-center">
                     <div className="rounded-lg border border-slate-200 bg-white p-3">
-                      <Button type="button" size="sm" variant="outline" className="w-full justify-start" onClick={() => void openSubjectEvaluationSettings()} disabled={!reportSettingYearId}>
+                      <Button type="button" size="sm" variant="outline" className="w-full justify-start" onClick={() => void openSubjectEvaluationSettings()} disabled={!reportSettingYearId || !reportSettingSegmentReady}>
                         {isZh ? '第一步 设置评价学科' : 'Step 1 Evaluation subjects'}
                       </Button>
                     </div>
                     <div className="hidden lg:flex items-center justify-center text-slate-400">→</div>
                     <div className="rounded-lg border border-slate-200 bg-white p-3">
-                      <Button type="button" size="sm" variant="outline" className="w-full justify-start" onClick={() => void openExamSubjectSettings()} disabled={!reportSettingYearId}>
+                      <Button type="button" size="sm" variant="outline" className="w-full justify-start" onClick={() => void openExamSubjectSettings()} disabled={!reportSettingYearId || !reportSettingSegmentReady}>
                         {isZh ? '第二步 设置考试学科' : 'Step 2 Exam subjects'}
                       </Button>
                     </div>
                     <div className="hidden lg:flex items-center justify-center text-slate-400">→</div>
                     <div className="rounded-lg border border-slate-200 bg-white p-3">
-                      <Button type="button" size="sm" variant="outline" className="w-full justify-start" onClick={() => void openCreateEvaluationDesigner()} disabled={!reportSettingYearId}>
-                        {isZh ? '第三步 新建学业报告' : 'Step 3 New academic report'}
+                      <Button type="button" size="sm" variant="outline" className="w-full justify-start" onClick={() => void openCreateEvaluationDesigner()} disabled={!reportSettingYearId || !reportSettingSegmentReady}>
+                        {isZh ? '第三步 创建学业报告' : 'Step 3 Create academic report'}
                       </Button>
                     </div>
                   </div>
@@ -5657,90 +6062,137 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <div className="text-xs font-semibold text-slate-700">
                       {isZh ? '本学期报告' : 'Reports this term'}
                     </div>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">
-                      {isZh
-                        ? '建议先按流程完成学科目标与考试学科设置，再为各学段新建学期报告并发布；下列为逐条独立管理的报告。'
-                        : 'Complete subject targets and exam subject settings first, then create and publish term reports per segment. Each item is managed independently.'}
-                    </p>
                   </div>
-                  {USE_CLOUD_STORAGE && reportSettingYearId && reportTemplateList.length > 0 && (
-                    <div
-                      className={`h-2 w-full rounded-full overflow-hidden ${
-                        termReportOverallLoading ? 'bg-slate-200 animate-pulse' : 'bg-slate-200'
-                      }`}
-                      aria-hidden
-                    >
-                      {!termReportOverallLoading && termReportOverallRate != null && (
-                        <div
-                          className="h-full bg-emerald-600 transition-[width] duration-500 ease-out"
-                          style={{ width: `${Math.min(Math.max(termReportOverallRate, 0), 100)}%` }}
-                        />
-                      )}
-                    </div>
-                  )}
                   {reportTemplateList.length === 0 ? (
                     <p className="text-xs text-slate-500">
                       {isZh
-                        ? '当前暂无报告。请先在上方完成前两步配置，再点击「新建学业报告」。'
-                        : 'No reports yet. Complete the first two setup steps above, then use “New academic report”.'}
+                        ? '当前暂无报告。请先在上方完成前两步配置，再点击「第三步 创建学业报告」。'
+                        : 'No reports yet. Complete the first two setup steps above, then create a report.'}
                     </p>
                   ) : (
                     <div className="space-y-2">
-                      {reportTemplateList.map((tpl) => (
-                        <div
-                          key={tpl.id}
-                          className={`rounded border px-2 py-2 flex items-center justify-between gap-2 ${tpl.id === selectedReportTemplateId ? 'border-slate-400 bg-slate-50' : 'border-slate-200'}`}
-                        >
-                          <button
-                            type="button"
-                            className="text-left flex-1 min-w-0"
-                            onClick={() => setSelectedReportTemplateId(tpl.id)}
+                      {reportTemplateList.map((tpl) => {
+                        const progress = reportProgressById[tpl.id];
+                        const showProgress = tpl.status !== 'draft';
+                        const rate = progress?.completionRate ?? 0;
+                        return (
+                          <div
+                            key={tpl.id}
+                            className={`rounded border px-3 py-2.5 space-y-2 ${tpl.id === selectedReportTemplateId ? 'border-slate-400 bg-slate-50' : 'border-slate-200'}`}
                           >
-                            <div className="text-sm font-medium text-slate-800 truncate">
-                              {tpl.title || (isZh ? '未命名报告' : 'Untitled report')}
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <button
+                                type="button"
+                                className="text-left min-w-0 flex-1"
+                                onClick={() => setSelectedReportTemplateId(tpl.id)}
+                              >
+                                <div className="text-sm font-medium text-slate-800 truncate">
+                                  {tpl.title || (isZh ? '未命名报告' : 'Untitled report')}
+                                </div>
+                                <div className="text-[11px] text-slate-500 mt-0.5">
+                                  {(tpl.schoolSegmentId
+                                    ? `${isZh ? '学段' : 'Segment'}: ${reportSegmentLabelById.get(tpl.schoolSegmentId) ?? tpl.schoolSegmentId} · `
+                                    : '') +
+                                    (isZh
+                                      ? `状态：${tpl.releasedAt ? '已正式推送' : tpl.status === 'published' ? '已发布待填写' : tpl.status === 'closed' ? '已关闭待推送' : '草稿'}`
+                                      : `Status: ${tpl.releasedAt ? 'released' : tpl.status}`)}
+                                </div>
+                              </button>
+                              <div className="flex flex-wrap items-center gap-1 shrink-0 justify-end">
+                                <Button size="sm" variant="outline" onClick={() => void openEditEvaluationDesigner(tpl.id)}>
+                                  {isZh ? '编辑' : 'Edit'}
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => void setTemplateStatus(tpl.id, 'published')}>
+                                  {isZh ? '发布' : 'Publish'}
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => void setTemplateStatus(tpl.id, 'closed')}>
+                                  {isZh ? '停发' : 'Stop'}
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => void openProgressConfirm(tpl.id, tpl.title)}>
+                                  {isZh ? '进度确认' : 'Progress'}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="default"
+                                  onClick={() => void releaseTemplateToStudents(tpl.id)}
+                                  disabled={tpl.status !== 'closed' || !!tpl.releasedAt}
+                                  className="bg-amber-600 text-white hover:bg-amber-700"
+                                >
+                                  {isZh ? '正式推送' : 'Release'}
+                                </Button>
+                                <Button size="sm" variant="outline" className="text-red-600 border-red-200 hover:bg-red-50" onClick={() => void deleteEvaluationTemplate(tpl.id)}>
+                                  {isZh ? '删除' : 'Delete'}
+                                </Button>
+                              </div>
                             </div>
-                            <div className="text-[11px] text-slate-500">
-                              {(tpl.schoolSegmentId
-                                ? `${isZh ? '学段' : 'Segment'}: ${reportSegmentLabelById.get(tpl.schoolSegmentId) ?? tpl.schoolSegmentId} · `
-                                : '') +
-                                (isZh
-                                  ? `状态：${tpl.releasedAt ? '已正式推送' : tpl.status === 'published' ? '已发布待填写' : tpl.status === 'closed' ? '已关闭待推送' : '草稿'}`
-                                  : `Status: ${tpl.releasedAt ? 'released' : tpl.status}`)}
-                            </div>
-                          </button>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <Button size="sm" variant="outline" onClick={() => void openEditEvaluationDesigner(tpl.id)}>
-                              {isZh ? '编辑' : 'Edit'}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => void setTemplateStatus(tpl.id, 'published')}>
-                              {isZh ? '发布' : 'Publish'}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => void setTemplateStatus(tpl.id, 'closed')}>
-                              {isZh ? '停发' : 'Stop'}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => void openProgressConfirm(tpl.id, tpl.title)}>
-                              {isZh ? '进度确认' : 'Progress'}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="default"
-                              onClick={() => void releaseTemplateToStudents(tpl.id)}
-                              disabled={tpl.status !== 'closed' || !!tpl.releasedAt}
-                              className="bg-amber-600 text-white hover:bg-amber-700"
-                            >
-                              {isZh ? '正式推送' : 'Release'}
-                            </Button>
-                            <Button size="sm" variant="outline" className="text-red-600 border-red-200 hover:bg-red-50" onClick={() => void deleteEvaluationTemplate(tpl.id)}>
-                              {isZh ? '删除' : 'Delete'}
-                            </Button>
+                            {showProgress && (
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between text-[11px] text-slate-500 tabular-nums">
+                                  <span>
+                                    {reportProgressListLoading && !progress
+                                      ? isZh
+                                        ? '加载进度…'
+                                        : 'Loading…'
+                                      : progress
+                                        ? isZh
+                                          ? `已完成 ${progress.completedStudents}/${progress.totalStudents} 名学生`
+                                          : `${progress.completedStudents}/${progress.totalStudents} students complete`
+                                        : isZh
+                                          ? '进度暂不可用'
+                                          : 'Progress unavailable'}
+                                  </span>
+                                  {progress ? <span>{progress.completionRate}%</span> : null}
+                                </div>
+                                <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+                                  {progress ? (
+                                    <div
+                                      className="h-full rounded-full bg-emerald-600 transition-[width] duration-500 ease-out"
+                                      style={{ width: `${Math.min(100, rate)}%` }}
+                                    />
+                                  ) : (
+                                    <div
+                                      className={`h-full w-full ${reportProgressListLoading ? 'bg-slate-300 animate-pulse' : 'bg-slate-200'}`}
+                                    />
+                                  )}
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
-              </>
+          </section>
+        )}
+
+        {adminTab === 'teacher-portrait-settings' && (
+          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
+            {!USE_CLOUD_STORAGE && (
+              <div className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                {isZh
+                  ? '当前为本地模式。请在 apps/web/.env 启用 VITE_USE_CLOUD_STORAGE=true，并配置 VITE_API_URL 后刷新，即可管理教师画像采集任务。'
+                  : 'Enable VITE_USE_CLOUD_STORAGE=true and VITE_API_URL to manage teacher portrait collections.'}
+              </div>
             )}
+            <AcademicYearTermFields
+              isZh={isZh}
+              years={years}
+              yearId={teacherPortraitSettingYearId}
+              term={teacherPortraitSettingTerm}
+              onYearIdChange={setTeacherPortraitSettingYearId}
+              onTermChange={setTeacherPortraitSettingTerm}
+              allowEmptyYear
+              yearDisabled={teacherPortraitSettingLoading}
+            />
+            {teacherPortraitSettingLoading && (
+              <div className="text-xs text-slate-500">{isZh ? '加载中…' : 'Loading…'}</div>
+            )}
+            <TeacherPortraitCollectionsAdmin
+              isZh={isZh}
+              yearId={teacherPortraitSettingYearId}
+              term={teacherPortraitSettingTerm}
+            />
           </section>
         )}
 
@@ -6051,9 +6503,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           if (!open) {
             setCreateEvaluationTitle('');
             setCreateEvaluationFromTemplateId('');
-            setAddModuleMenuOpen(false);
             setEvaluationDesignerError(null);
-            setReportTargetStageId('');
+            setReportTargetStageId(reportSettingSegmentId.trim());
             setReportTargetCheckedCourseIds([]);
             setReportTargetActiveSubjectKey('');
             setReportTargetGradeConfigBySubject({});
@@ -6063,7 +6514,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             lastPresetTargetDimNavKeyRef.current = { nav: '', preset: '' };
             setAcademicPreviewTargetLevels({});
             setAcademicPreviewLearningQuality({});
-            setNewReportSchoolSegmentId('');
+            if (createEvaluationMode !== 'edit') {
+              setNewReportSchoolSegmentId(reportSettingSegmentId.trim());
+            }
             setNewReportPreviewGradeId('');
             setDesignerScoreMinScores(null);
             setScoreBandDialogOpen(false);
@@ -6090,14 +6543,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             {createEvaluationMode === 'preset' ? (
               <DialogDescription>
                 {isZh
-                  ? '按课程配置本学年可选的课程目标维度及 ABCD 说明；保存后各科学期报告可复用。成绩与学科评语在「新建/编辑学业报告」中配置。'
+                  ? '按课程配置本学年可选的课程目标维度及 ABCD 说明；保存后各科学期报告可复用。测评成绩在「设置考试学科」与「新建/编辑学业报告」中配置。'
                   : 'Optional target dimensions per course for this year. Configure scores and comments in each term report.'}
-              </DialogDescription>
-            ) : createEvaluationMode === 'exam' ? (
-              <DialogDescription>
-                {isZh
-                  ? '先勾选本次需要考试评价的学科，再按年级配置百分比等第与维度分值。'
-                  : 'Select exam subjects first, then configure grade percent bands and dimension scores by grade.'}
               </DialogDescription>
             ) : createEvaluationMode === 'edit' ? (
               <DialogDescription>
@@ -6116,58 +6563,26 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     : `${years.find((y) => y.id === reportSettingYearId)?.name || '-'} · ${reportSettingTerm}`}
                 </div>
               </div>
-              {createEvaluationMode === 'preset' || createEvaluationMode === 'exam' ? (
-                <div className="lg:col-span-9">
-                  <label className="block text-xs text-slate-500 mb-1">{isZh ? '学段（来自课程设置）' : 'Stage (from curriculum)'}</label>
-                  <select
-                    value={reportTargetStageId}
-                    onChange={(e) => setReportTargetStageId(e.target.value)}
-                    className="w-full h-10 rounded-lg border border-slate-300 px-3 text-sm bg-white"
-                  >
-                    {reportTargetSegments.length === 0 && (
-                      <option value="">
-                        {isZh ? '尚未配置学段，请先在课程管理里设置年级学段。' : 'No stage found. Configure grade segments in curriculum first.'}
-                      </option>
-                    )}
-                    {reportTargetSegments.map((seg) => (
-                      <option key={seg.id} value={seg.id}>{seg.label}</option>
-                    ))}
-                  </select>
+              <div className="lg:col-span-3">
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '学段' : 'School segment'}</label>
+                <div className="h-10 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 flex items-center">
+                  {evaluationDialogSegmentLabel}
                 </div>
-              ) : (
-                <>
-                  <div className="lg:col-span-3">
-                    <label className="block text-xs text-slate-500 mb-1">{isZh ? '学段' : 'School segment'}</label>
-                    <select
-                      value={newReportSchoolSegmentId}
-                      onChange={(e) => setNewReportSchoolSegmentId(e.target.value)}
-                      disabled={createEvaluationMode === 'edit'}
-                      className="w-full h-10 rounded-lg border border-slate-300 px-3 text-sm bg-white disabled:bg-slate-100 disabled:text-slate-600"
-                    >
-                      {reportTargetSegments.length === 0 && (
-                        <option value="">
-                          {isZh ? '未配置学段' : 'No segment'}
-                        </option>
-                      )}
-                      {reportTargetSegments.map((seg) => (
-                        <option key={seg.id} value={seg.id}>{seg.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="lg:col-span-6">
-                    <label className="block text-xs text-slate-500 mb-1">{isZh ? '报告名称' : 'Report name'}</label>
-                    <input
-                      value={createEvaluationTitle}
-                      onChange={(e) => {
-                        setCreateEvaluationTitle(e.target.value);
-                        setReportSettingTitle(e.target.value);
-                      }}
-                      className="w-full h-10 rounded-lg border border-slate-300 px-3 text-sm"
-                      placeholder={isZh ? '如：初中期末学业报告' : 'e.g. Middle school final report'}
-                    />
-                  </div>
-                </>
-              )}
+              </div>
+              {createEvaluationMode !== 'preset' && createEvaluationMode !== 'exam' ? (
+                <div className="lg:col-span-6">
+                  <label className="block text-xs text-slate-500 mb-1">{isZh ? '报告名称' : 'Report name'}</label>
+                  <input
+                    value={createEvaluationTitle}
+                    onChange={(e) => {
+                      setCreateEvaluationTitle(e.target.value);
+                      setReportSettingTitle(e.target.value);
+                    }}
+                    className="w-full h-10 rounded-lg border border-slate-300 px-3 text-sm"
+                    placeholder={isZh ? '如：初中期末学业报告' : 'e.g. Middle school final report'}
+                  />
+                </div>
+              ) : null}
             </div>
             {createEvaluationMode === 'preset' && (
               <>
@@ -6581,7 +6996,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                       const updateGrade = (gid: string, updater: (g: ExamGradeConfigDraft) => ExamGradeConfigDraft) => {
                         setReportExamConfigByCourse((prev) => {
                           const current = prev[activeCourse.id] ?? byCourse;
-                          const base = current.gradeConfigs[gid] ?? createEmptyExamGradeDraft();
+                          const base = current.gradeConfigs[gid] ?? createEmptyExamGradeDraft(reportTargetCurrentSegment);
                           return {
                             ...prev,
                             [activeCourse.id]: {
@@ -6596,15 +7011,23 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                       };
                       return (
                         <div className="space-y-3">
-                          <div className="text-sm font-semibold text-slate-800">{isZh ? '等第标准（百分比）' : 'Percent grade bands'}</div>
+                          <div className="text-sm font-semibold text-slate-800">{isZh ? '等第标准（得分率 %，含）' : 'Grade bands (score rate %, inclusive)'}</div>
+                          <p className="text-xs text-slate-500">
+                            {isZh
+                              ? '先填写本学科本年级总分；各等第填写占总分的百分比。例如总分 100、A+ 填 95 表示 ≥95 分为 A+；总分 50、A+ 填 90 表示 ≥45 分为 A+。'
+                              : 'Set the full score per grade, then percent thresholds. E.g. full 100 with A+ at 95 means ≥95 points is A+; full 50 with A+ at 90 means ≥45 points is A+.'}
+                          </p>
                           <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className="w-full min-w-[720px] border-collapse text-xs">
+                            <table className="w-full min-w-[780px] border-collapse text-xs">
                               <thead>
                                 <tr className="bg-slate-100 text-slate-700">
                                   <th className="border border-slate-200 px-1 py-1.5 text-center font-semibold w-10">{isZh ? '考试' : 'Exam'}</th>
                                   <th className="border border-slate-200 px-2 py-1.5 text-left font-semibold">{isZh ? '年级' : 'Grade'}</th>
+                                  <th className="border border-slate-200 px-2 py-1.5 text-left font-semibold whitespace-nowrap">{isZh ? '总分' : 'Full score'}</th>
                                   {REPORT_SCORE_LETTER_GRADES.map((rg) => (
-                                    <th key={rg} className="border border-slate-200 px-2 py-1.5 text-left font-semibold">{rg}%</th>
+                                    <th key={rg} className="border border-slate-200 px-2 py-1.5 text-left font-semibold whitespace-nowrap">
+                                      {examGradeLabelForBand(rg, isZh)}
+                                    </th>
                                   ))}
                                 </tr>
                               </thead>
@@ -6612,7 +7035,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                 {reportTargetCurrentSegment.gradeIds.map((gid) => {
                                   const gc = normalizeGradeConfig(loadGradeConfigSync());
                                   const gradeLabel = getGradeLabelByLevel(gc, getGradeLevelById(gc, gid));
-                                  const g = byCourse.gradeConfigs[gid] ?? createEmptyExamGradeDraft();
+                                  const g = byCourse.gradeConfigs[gid] ?? createEmptyExamGradeDraft(reportTargetCurrentSegment);
                                   const evalGrades = resolveEvaluationGradesForCourse(
                                     reportTargetStageId,
                                     activeCourse.id,
@@ -6642,6 +7065,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                         />
                                       </td>
                                       <td className="border border-slate-200 px-2 py-1.5 font-semibold">{gradeLabel}</td>
+                                      <td className="border border-slate-200 p-1">
+                                        <input
+                                          value={g.fullScore ?? ''}
+                                          disabled={!examOn}
+                                          onChange={(e) => updateGrade(gid, (prev) => ({ ...prev, fullScore: e.target.value }))}
+                                          className="w-full min-w-[3.5rem] rounded border border-slate-300 px-2 py-1 text-xs disabled:bg-slate-100"
+                                          placeholder={String(DEFAULT_EXAM_GRADE_FULL_SCORE)}
+                                        />
+                                      </td>
                                       {REPORT_SCORE_LETTER_GRADES.map((rg) => (
                                         <td key={`${gid}-${rg}`} className="border border-slate-200 p-1">
                                           <input
@@ -6649,130 +7081,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                             disabled={!examOn}
                                             onChange={(e) => updateGrade(gid, (prev) => ({ ...prev, percentBands: { ...prev.percentBands, [rg as ReportGrade]: e.target.value } }))}
                                             className="w-full rounded border border-slate-300 px-2 py-1 text-xs disabled:bg-slate-100"
-                                            placeholder="0-100"
+                                            placeholder=""
                                           />
                                         </td>
                                       ))}
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                          <div className="text-sm font-semibold text-slate-800">{isZh ? '目标维度分值配置' : 'Dimension score allocation'}</div>
-                          {reportExamActiveCourseMissingPresetDimensions ? (
-                            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                              <p className="text-xs text-amber-950 leading-snug flex-1 min-w-0">
-                                {isZh
-                                  ? '当前学科在「设置学科目标」中尚未为本学段年级配置目标维度。请先到第一步「设置学科目标」中勾选该课程并填写各年级维度，保存后再回到此处配置分值。'
-                                  : 'This subject has no target dimensions for this stage’s grades in Subject target settings. Open Step 1, include this course, add dimensions per grade, save, then return here.'}
-                              </p>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="shrink-0 border-amber-300 bg-white hover:bg-amber-100/80 text-amber-950"
-                                onClick={() => {
-                                  pendingOpenPresetFocusCourseIdRef.current = activeCourse.id;
-                                  setCreateEvaluationMode('preset');
-                                  setCreateEvaluationTitle(
-                                    isZh ? '本学年学科目标维度框架' : 'Yearly subject target framework',
-                                  );
-                                  const subjectOnly = {
-                                    homeroom_comment: false,
-                                    subject_evaluation: true,
-                                  } as Record<EvaluationDesignerModule, boolean>;
-                                  setEnabledEvaluationModules(subjectOnly);
-                                  setEvaluationModuleOrder(deriveModuleOrderFromEnabled(subjectOnly));
-                                }}
-                              >
-                                {isZh ? '前往学科目标设置' : 'Open subject target settings'}
-                              </Button>
-                            </div>
-                          ) : null}
-                          <div className="overflow-x-auto rounded-lg border border-slate-200">
-                            <table className="w-full min-w-[860px] border-collapse text-xs">
-                              <thead>
-                                <tr className="bg-slate-100 text-slate-700">
-                                  <th className="border border-slate-200 px-2 py-1.5 text-left font-semibold">{isZh ? '年级' : 'Grade'}</th>
-                                  {(() => {
-                                    const dimColCount = reportTargetCurrentSegment.gradeIds.reduce((m, gid) => {
-                                      const dims = getPresetDimensionsForReportPreviewGrade(reportYearDimensionPreset, activeCourse.id, activeKey, gid);
-                                      return Math.max(m, dims.length);
-                                    }, 0);
-                                    return Array.from({ length: dimColCount }, (_, idx) => (
-                                      <th key={`dim-col-${idx}`} className="border border-slate-200 px-2 py-1.5 text-left font-semibold min-w-[180px]">
-                                        {isZh ? `维度${idx + 1}` : `Dimension ${idx + 1}`}
-                                      </th>
-                                    ));
-                                  })()}
-                                  <th className="border border-slate-200 px-2 py-1.5 text-left font-semibold w-24">{isZh ? '总分' : 'Total'}</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {reportTargetCurrentSegment.gradeIds.map((gid) => {
-                                  const gc = normalizeGradeConfig(loadGradeConfigSync());
-                                  const gradeLabel = getGradeLabelByLevel(gc, getGradeLevelById(gc, gid));
-                                  const evalGrades = resolveEvaluationGradesForCourse(
-                                    reportTargetStageId,
-                                    activeCourse.id,
-                                    reportTargetCurrentSegment.gradeIds,
-                                    reportYearDimensionPreset?.stageInclusion,
-                                    reportYearDimensionPreset?.evaluationGradeInclusion,
-                                  );
-                                  if (!evalGrades.includes(gid)) return null;
-                                  const examGrades = reportExamGradeByCourse[activeCourse.id] ?? evalGrades;
-                                  const examOn = examGrades.includes(gid);
-                                  const dims = getPresetDimensionsForReportPreviewGrade(reportYearDimensionPreset, activeCourse.id, activeKey, gid);
-                                  const g = byCourse.gradeConfigs[gid] ?? createEmptyExamGradeDraft();
-                                  const scoreByLabel = new Map(g.dimensionScores.map((d) => [`${d.dimensionLabelZh}\u0001${d.dimensionLabelEn}`, d.score] as const));
-                                  const rows = dims.map((d) => ({
-                                    dimensionLabelZh: d.dimensionLabelZh,
-                                    dimensionLabelEn: d.dimensionLabelEn,
-                                    score: scoreByLabel.get(`${d.dimensionLabelZh}\u0001${d.dimensionLabelEn}`) ?? '',
-                                  }));
-                                  const dimColCount = reportTargetCurrentSegment.gradeIds.reduce((m, gid2) => {
-                                    const dims2 = getPresetDimensionsForReportPreviewGrade(reportYearDimensionPreset, activeCourse.id, activeKey, gid2);
-                                    return Math.max(m, dims2.length);
-                                  }, 0);
-                                  const total = rows.reduce((sum, r) => sum + (Number(r.score) || 0), 0);
-                                  return (
-                                    <tr key={`exam-dim-${gid}`} className={examOn ? 'bg-white' : 'bg-slate-100 text-slate-400'}>
-                                      <td className="border border-slate-200 px-2 py-1.5 font-semibold align-top">{gradeLabel}</td>
-                                      {Array.from({ length: dimColCount }, (_, i) => {
-                                        const row = rows[i];
-                                        return (
-                                          <td key={`${gid}-dim-cell-${i}`} className="border border-slate-200 p-1.5 align-top">
-                                            {row ? (
-                                              <div className="space-y-1.5">
-                                                <div className="truncate text-[11px] text-slate-700">
-                                                  {(isZh ? row.dimensionLabelZh : row.dimensionLabelEn) || '—'}
-                                                </div>
-                                                <input
-                                                  value={row.score}
-                                                  disabled={!examOn}
-                                                  onChange={(e) => {
-                                                    const nextRows = rows.map((x, idx) => idx === i ? { ...x, score: e.target.value } : x);
-                                                    updateGrade(gid, (prev) => ({
-                                                      ...prev,
-                                                      dimensionScores: nextRows.map((x) => ({
-                                                        dimensionLabelZh: x.dimensionLabelZh,
-                                                        dimensionLabelEn: x.dimensionLabelEn,
-                                                        score: x.score,
-                                                      })),
-                                                    }));
-                                                  }}
-                                                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs disabled:bg-slate-100"
-                                                  placeholder={isZh ? '分值' : 'Score'}
-                                                />
-                                              </div>
-                                            ) : (
-                                              <div className="text-[11px] text-slate-400">{rows.length === 0 ? (isZh ? '先配置维度' : 'No dims') : '—'}</div>
-                                            )}
-                                          </td>
-                                        );
-                                      })}
-                                      <td className="border border-slate-200 px-2 py-1.5 align-top tabular-nums">{examOn && rows.length > 0 ? total : '—'}</td>
                                     </tr>
                                   );
                                 })}
@@ -6800,6 +7112,93 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
             {(createEvaluationMode === 'create' || createEvaluationMode === 'edit') && (
             <section className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+              {newReportInclusionMatrix && newReportInclusionMatrix.courses.length > 0 ? (
+                <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-slate-800">
+                      {isZh
+                        ? `学业报告学科一览（${newReportInclusionMatrix.segLabel}）`
+                        : `Academic report subjects (${newReportInclusionMatrix.segLabel})`}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="text-sm font-bold leading-none text-slate-800" aria-hidden>✓</span>
+                        {isZh ? '考试学科' : 'Exam'}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span
+                          className="inline-block h-3 w-3 shrink-0 rounded-full border-2 border-slate-600"
+                          aria-hidden
+                        />
+                        {isZh ? '考查学科' : 'Assessment only'}
+                      </span>
+                      <span>{isZh ? '空白：该年级不纳入' : 'Blank: not included'}</span>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+                    <table className="w-full min-w-[480px] border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-700">
+                          <th className="border border-slate-200 px-2 py-1.5 text-left font-semibold sticky left-0 z-[1] bg-slate-100 min-w-[4.5rem]">
+                            {isZh ? '年级' : 'Grade'}
+                          </th>
+                          {newReportInclusionMatrix.displayColumns.map((col) => (
+                            <th
+                              key={col.displayKey}
+                              className="border border-slate-200 px-2 py-1.5 text-center font-semibold min-w-[4.5rem] max-w-[8rem]"
+                              title={col.displayKey}
+                            >
+                              <span className="line-clamp-2 leading-tight">{col.displayKey}</span>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {newReportInclusionMatrix.gradeRows.map(({ gradeId, label }) => {
+                          const reportMatrixGc = normalizeGradeConfig(loadGradeConfigSync());
+                          const gradeLevel = getGradeLevelById(reportMatrixGc, gradeId);
+                          return (
+                          <tr key={gradeId}>
+                            <td className="border border-slate-200 px-2 py-1.5 font-medium text-slate-800 sticky left-0 z-[1] bg-white">
+                              {label}
+                            </td>
+                            {newReportInclusionMatrix.displayColumns.map((col) => {
+                              const courseForGrade =
+                                col.courses.find((c) => courseAppliesToGrade(c, gradeLevel, reportMatrixGc)) ??
+                                null;
+                              const kind = courseForGrade
+                                ? newReportInclusionMatrix.cells[courseForGrade.id]?.[gradeId] ?? 'none'
+                                : 'none';
+                              return (
+                                <td key={`${gradeId}-${col.displayKey}`} className="border border-slate-200 px-2 py-1.5 text-center align-middle">
+                                  {kind === 'exam' ? (
+                                    <span className="text-base font-bold leading-none text-slate-800" title={isZh ? '考试学科' : 'Exam'} aria-label={isZh ? '考试学科' : 'Exam'}>✓</span>
+                                  ) : kind === 'evaluation' ? (
+                                    <span
+                                      className="inline-block h-3.5 w-3.5 rounded-full border-2 border-slate-600"
+                                      title={isZh ? '考查学科' : 'Assessment only'}
+                                      aria-label={isZh ? '考查学科' : 'Assessment only'}
+                                    />
+                                  ) : (
+                                    <span className="text-slate-300">—</span>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : createEvaluationMode === 'create' && newReportSchoolSegmentId.trim() ? (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  {isZh
+                    ? '当前学段尚无已纳入的考查/考试学科。请先在「设置评价学科」与「设置考试学科」中完成配置。'
+                    : 'No assessment or exam subjects configured for this segment. Complete steps 1 and 2 first.'}
+                </p>
+              ) : null}
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                 <div className="text-sm font-semibold text-slate-800 shrink-0">
                   {isZh ? '学业报告预览' : 'Academic report preview'}
@@ -6910,6 +7309,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                 )
                               : ([] as typeof s.dimensions)
                             : s.dimensions;
+                          const previewShowsTarget = useSimplifiedAcademicTargetPreview
+                            ? s.enableTarget || previewDims.length > 0
+                            : s.enableTarget;
                           const lqPreviewKey =
                             useSimplifiedAcademicTargetPreview && previewGid
                               ? `lq:${previewGid}:${s.subjectKey || `i${subjectIdx}`}`
@@ -7029,28 +7431,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                   >
                                     {isZh ? '学习品质' : 'Learning quality'}
                                   </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant={s.enableTeacherComment ? 'default' : 'outline'}
-                                    onClick={() =>
-                                      setReportSettingSubjects((prev) => {
-                                        const next = [...prev];
-                                        next[subjectIdx] = {
-                                          ...next[subjectIdx],
-                                          enableTeacherComment: !next[subjectIdx].enableTeacherComment,
-                                        };
-                                        return next;
-                                      })
-                                    }
-                                  >
-                                    {isZh ? '学科评语' : 'Comment'}
-                                  </Button>
                                 </div>
                               ) : null}
                             </div>
                             {useSimplifiedAcademicTargetPreview &&
-                            (s.enableTarget || s.enableLearningQuality || s.enableScore) && (
+                            (previewShowsTarget || s.enableLearningQuality || s.enableScore) && (
                               <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2 shadow-sm">
                                 <div className="flex items-center justify-between gap-2">
                                   <span className="text-xs font-medium text-slate-600">
@@ -7060,7 +7445,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                 <div className="overflow-x-auto rounded-lg border border-slate-200">
                                   <table className="w-full min-w-[280px] border-collapse text-xs">
                                     <tbody>
-                                      {s.enableTarget && previewDims.length === 0 ? (
+                                      {previewShowsTarget && previewDims.length === 0 ? (
                                         <tr className="bg-white">
                                           <td colSpan={2} className="border border-slate-200 px-2 py-2 text-slate-500">
                                             {previewGid
@@ -7073,7 +7458,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                           </td>
                                         </tr>
                                       ) : null}
-                                      {s.enableTarget &&
+                                      {previewShowsTarget &&
                                         previewDims.map((d, dimIdx) => {
                                           const previewKey = `${previewGid || '_'}:${s.subjectKey || `i${subjectIdx}`}:${dimIdx}`;
                                           const dimLabel = ((isZh ? d.dimensionLabelZh : d.dimensionLabelEn).trim() || '—');
@@ -7107,7 +7492,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                         })}
                                       {s.enableLearningQuality ? (
                                         <tr
-                                          className={`bg-slate-50/95 ${s.enableTarget ? 'border-t-2 border-slate-300' : ''}`}
+                                          className={`bg-slate-50/95 ${previewShowsTarget ? 'border-t-2 border-slate-300' : ''}`}
                                         >
                                           <td className="border border-slate-200 px-2 py-2 align-middle text-slate-800 text-[11px] sm:text-xs font-medium leading-snug">
                                             {isZh ? '学习品质：兴趣、习惯与态度' : 'Learning quality: interest, habits, attitude'}
@@ -7143,7 +7528,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                           className={`bg-slate-100/80 ${
                                             s.enableLearningQuality
                                               ? 'border-t border-slate-300'
-                                              : s.enableTarget
+                                              : previewShowsTarget
                                                 ? 'border-t-2 border-slate-300'
                                                 : ''
                                           }`}
@@ -7333,25 +7718,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                 </div>
                               </div>
                             )}
-                            {s.enableTeacherComment && (
-                              <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2 shadow-sm">
-                                <div className="text-xs font-medium text-slate-600">
-                                  {isZh ? '学科评语预览' : 'Comment preview'}
-                                </div>
-                                <textarea
-                                  value={s.commentPreview}
-                                  onChange={(e) =>
-                                    setReportSettingSubjects((prev) => {
-                                      const next = [...prev];
-                                      next[subjectIdx] = { ...next[subjectIdx], commentPreview: e.target.value };
-                                      return next;
-                                    })
-                                  }
-                                  className="w-full min-h-[78px] rounded border border-slate-300 px-2 py-1.5 text-sm bg-white"
-                                  placeholder={isZh ? '输入该学科评语示例内容' : 'Type a sample comment for this subject'}
-                                />
-                              </div>
-                            )}
                           </div>
                           );
                         })}
@@ -7360,36 +7726,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   </div>
                 );
               })}
-
-              <div className="relative flex justify-center py-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setAddModuleMenuOpen((v) => !v)}
-                    disabled={inactiveEvaluationModules.length === 0}
-                  >
-                    <Plus className="h-4 w-4 mr-1" />
-                    {isZh ? '添加新模块' : 'Add module'}
-                  </Button>
-                  {addModuleMenuOpen && inactiveEvaluationModules.length > 0 && (
-                    <div className="absolute z-20 top-full mt-2 min-w-[200px] rounded-lg border border-slate-200 bg-white shadow-lg p-1">
-                      {inactiveEvaluationModules.map((m) => (
-                        <button
-                          key={m.key}
-                          type="button"
-                          className="w-full text-left rounded-md px-3 py-2 text-sm hover:bg-slate-50"
-                          onClick={() => {
-                            addModuleToDesigner(m.key);
-                            setAddModuleMenuOpen(false);
-                          }}
-                        >
-                          {m.title}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
             </section>
             )}
           </div>
@@ -7424,7 +7760,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     ? (isZh ? '完成并关闭' : 'Done')
                     : createEvaluationMode === 'edit'
                       ? (isZh ? '保存报告' : 'Save report')
-                      : (isZh ? '创建并保存' : 'Create and save')}
+                      : (isZh ? '确认创建' : 'Confirm create')}
               </Button>
             </div>
           </DialogFooter>

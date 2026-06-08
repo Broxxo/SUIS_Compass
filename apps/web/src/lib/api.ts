@@ -16,7 +16,11 @@ import type {
   ReportYearDimensionPreset,
   ReportTemplateProgress,
   ReportClassSubjectInsights,
+  ReportTeachingDiagnosis,
   TeacherReportTemplateProgress,
+  TeacherPortraitCollectionTemplateSummary,
+  TeacherPortraitCollectionProgress,
+  TeacherPortraitCollectionSubmission,
   StaffingAssignment,
   OrgDepartment,
   ReportTemplateStatus,
@@ -640,7 +644,9 @@ export const api = {
     return (data.classes ?? data) as ClassItem[];
   },
 
-  async getMySubjectAssignments(academicYearId: string): Promise<Array<{ classId: string; subjectKey: string }>> {
+  async getMySubjectAssignments(
+    academicYearId: string,
+  ): Promise<Array<{ classId: string; subjectKey: string; subjectName?: string }>> {
     const response = await fetch(
       apiUrl(`/api/classes/me/subject-assignments?academicYearId=${encodeURIComponent(academicYearId)}`),
       { headers: getHeaders() },
@@ -903,7 +909,12 @@ export const api = {
     }>;
   },
 
-  async getStudentTermReportDetail(studentId: string, academicYearId: string, term: Term, templateId: string): Promise<StudentTermReport> {
+  async getStudentTermReportBundle(
+    studentId: string,
+    academicYearId: string,
+    term: Term,
+    templateId: string,
+  ): Promise<{ report: StudentTermReport; template: ReportTemplate | null }> {
     const response = await fetch(
       apiUrl(
         `/api/classes/reports/students/${encodeURIComponent(studentId)}/terms/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}/templates/${encodeURIComponent(templateId)}`
@@ -912,7 +923,15 @@ export const api = {
     );
     if (!response.ok) throw new Error('Failed to fetch report detail');
     const data = await readJsonOrThrow(response, 'Failed to fetch report detail');
-    return data.report as StudentTermReport;
+    return {
+      report: data.report as StudentTermReport,
+      template: (data.template ?? null) as ReportTemplate | null,
+    };
+  },
+
+  async getStudentTermReportDetail(studentId: string, academicYearId: string, term: Term, templateId: string): Promise<StudentTermReport> {
+    const bundle = await this.getStudentTermReportBundle(studentId, academicYearId, term, templateId);
+    return bundle.report;
   },
 
   async getReportTemplatesForTerm(
@@ -967,6 +986,10 @@ export const api = {
     return (data.preset ?? null) as {
       academicYearId: string;
       examConfigs: Record<string, ReportExamConfigScope>;
+      stageInclusion?: Record<string, string[]>;
+      evaluationGradeInclusion?: Record<string, Record<string, string[]>>;
+      examGradeInclusion?: Record<string, Record<string, string[]>>;
+      subjectKeyToCourseId?: Record<string, string>;
       updatedAt: string | null;
     } | null;
   },
@@ -1028,7 +1051,10 @@ export const api = {
     templateId: string,
     classId: string,
     subjectKey: string,
-    payload: { weaknessRows: Array<{ weakPoint: string; errorAnalysis: string; nextPlan: string }>; teachingReflection: string | null }
+    payload: {
+      classOverallAnalysis: string | null;
+      studentAnalysisRows: Array<{ studentId: string; learningAnalysis: string; supportPlan: string }>;
+    }
   ): Promise<void> {
     const response = await fetch(
       apiUrl(
@@ -1547,6 +1573,194 @@ export const api = {
       body: JSON.stringify({ classId, events }),
     });
     if (!response.ok) throw new Error('Failed to save point events');
+  },
+
+  async getAdminTeacherPortraitTemplates(input?: {
+    academicYearId?: string;
+    term?: Term;
+  }): Promise<TeacherPortraitCollectionTemplateSummary[]> {
+    const q = new URLSearchParams();
+    if (input?.academicYearId) q.set('academicYearId', input.academicYearId);
+    if (input?.term) q.set('term', input.term);
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates${q.toString() ? `?${q.toString()}` : ''}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) throw new Error('Failed to fetch teacher portrait templates');
+    const data = await readJsonOrThrow(response, 'Failed to fetch teacher portrait templates');
+    return (data.templates ?? []) as TeacherPortraitCollectionTemplateSummary[];
+  },
+
+  async createAdminTeacherPortraitTemplate(input: {
+    academicYearId: string;
+    term: Term;
+    title?: string | null;
+    collectionType?: string;
+  }): Promise<TeacherPortraitCollectionTemplateSummary> {
+    const response = await fetch(apiUrl('/api/admin/teacher-portrait/templates'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to create teacher portrait template');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to create teacher portrait template');
+    return data.template as TeacherPortraitCollectionTemplateSummary;
+  },
+
+  async putAdminTeacherPortraitTemplate(
+    templateId: string,
+    input: { title?: string | null },
+  ): Promise<TeacherPortraitCollectionTemplateSummary> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}`),
+      { method: 'PUT', headers: getHeaders(), body: JSON.stringify(input) },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to update template');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to update template');
+    return data.template as TeacherPortraitCollectionTemplateSummary;
+  },
+
+  async publishAdminTeacherPortraitTemplate(templateId: string): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/publish`),
+      { method: 'POST', headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to publish');
+    }
+  },
+
+  async closeAdminTeacherPortraitTemplate(templateId: string): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/close`),
+      { method: 'POST', headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to close');
+    }
+  },
+
+  async deleteAdminTeacherPortraitTemplate(templateId: string): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}`),
+      { method: 'DELETE', headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete');
+    }
+  },
+
+  async getAdminTeacherPortraitTemplateSubmissions(
+    templateId: string,
+  ): Promise<TeacherPortraitCollectionSubmission[]> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/submissions`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) throw new Error('Failed to fetch submissions');
+    const data = await readJsonOrThrow(response, 'Failed to fetch submissions');
+    return (data.submissions ?? []) as TeacherPortraitCollectionSubmission[];
+  },
+
+  async getAdminTeacherPortraitTeacherSubmission(
+    templateId: string,
+    teacherId: string,
+  ): Promise<TeacherPortraitCollectionSubmission> {
+    const response = await fetch(
+      apiUrl(
+        `/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/submissions/${encodeURIComponent(teacherId)}`,
+      ),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch teacher submission');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch teacher submission');
+    return data.submission as TeacherPortraitCollectionSubmission;
+  },
+
+  async getAdminTeacherPortraitTemplateProgress(
+    templateId: string,
+  ): Promise<TeacherPortraitCollectionProgress> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/progress`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) throw new Error('Failed to fetch progress');
+    const data = await readJsonOrThrow(response, 'Failed to fetch progress');
+    const progress = data.progress as TeacherPortraitCollectionProgress;
+    return {
+      ...progress,
+      completed: progress.completed ?? [],
+      pending: progress.pending ?? [],
+    };
+  },
+
+  async getTeacherPortraitCollections(input?: {
+    academicYearId?: string;
+    term?: Term;
+  }): Promise<TeacherPortraitCollectionTemplateSummary[]> {
+    const q = new URLSearchParams();
+    if (input?.academicYearId) q.set('academicYearId', input.academicYearId);
+    if (input?.term) q.set('term', input.term);
+    const response = await fetch(
+      apiUrl(`/api/classes/teacher-portrait/collections${q.toString() ? `?${q.toString()}` : ''}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) throw new Error('Failed to fetch teacher portrait collections');
+    const data = await readJsonOrThrow(response, 'Failed to fetch teacher portrait collections');
+    return (data.templates ?? []) as TeacherPortraitCollectionTemplateSummary[];
+  },
+
+  async getTeacherPortraitCollection(templateId: string): Promise<{
+    template: TeacherPortraitCollectionTemplateSummary & { canEdit?: boolean };
+    submission: {
+      diagnosis: ReportTeachingDiagnosis;
+      hasContent: boolean;
+      updatedAt: string | null;
+    };
+  }> {
+    const response = await fetch(
+      apiUrl(`/api/classes/teacher-portrait/collections/${encodeURIComponent(templateId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch collection');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch collection');
+    return data as {
+      template: TeacherPortraitCollectionTemplateSummary & { canEdit?: boolean };
+      submission: {
+        diagnosis: ReportTeachingDiagnosis;
+        hasContent: boolean;
+        updatedAt: string | null;
+      };
+    };
+  },
+
+  async saveTeacherPortraitCollection(
+    templateId: string,
+    payload: { diagnosis: ReportTeachingDiagnosis },
+  ): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/classes/teacher-portrait/collections/${encodeURIComponent(templateId)}`),
+      { method: 'PUT', headers: getHeaders(), body: JSON.stringify(payload) },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save');
+    }
   },
 };
 

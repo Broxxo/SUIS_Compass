@@ -540,6 +540,8 @@ ALTER TABLE student_report_template_subjects
   ADD COLUMN IF NOT EXISTS enable_learning_quality BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE student_report_template_subjects
   ADD COLUMN IF NOT EXISTS score_visibility VARCHAR(40) NOT NULL DEFAULT 'teacher_homeroom_admin';
+ALTER TABLE student_report_template_subjects
+  ADD COLUMN IF NOT EXISTS grade_dimensions JSONB NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_student_report_template_subjects_template
   ON student_report_template_subjects(template_id, sort_order);
 
@@ -631,3 +633,34 @@ CREATE TABLE IF NOT EXISTS org_departments (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_org_departments_parent ON org_departments(parent_id);
+
+-- 教师画像：可配置的教师数据采集（如阶段教学反思 KISS）
+CREATE TABLE IF NOT EXISTS teacher_portrait_collection_templates (
+  id VARCHAR(100) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+  title VARCHAR(200),
+  collection_type VARCHAR(60) NOT NULL DEFAULT 'teaching-diagnosis-kiss',
+  status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'closed')),
+  published_at TIMESTAMP,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_teacher_portrait_collection_templates_year_term
+  ON teacher_portrait_collection_templates(academic_year_id, term, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS teacher_portrait_collection_submissions (
+  id VARCHAR(100) PRIMARY KEY,
+  template_id VARCHAR(100) NOT NULL REFERENCES teacher_portrait_collection_templates(id) ON DELETE CASCADE,
+  teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  diagnosis JSONB NOT NULL DEFAULT '{"keep":"","improve":"","stop":"","start":""}'::jsonb,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(template_id, teacher_id)
+);
+CREATE INDEX IF NOT EXISTS idx_teacher_portrait_collection_submissions_template
+  ON teacher_portrait_collection_submissions(template_id);

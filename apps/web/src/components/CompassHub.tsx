@@ -417,7 +417,7 @@ export default function CompassHub({
         renderLabel: (zh) => (
           <span className="flex flex-col items-center leading-tight">
             <span>{zh ? '教师' : 'Teacher'}</span>
-            <span>{zh ? '画像' : 'Portrait'}</span>
+            <span>{zh ? '中心' : 'Center'}</span>
           </span>
         ),
       },
@@ -489,7 +489,7 @@ export default function CompassHub({
         renderLabel: (zh) => (
           <span className="flex flex-col items-center leading-tight">
             <span>{zh ? '学生' : 'Student'}</span>
-            <span>{zh ? '画像' : 'Portrait'}</span>
+            <span>{zh ? '中心' : 'Center'}</span>
           </span>
         ),
       },

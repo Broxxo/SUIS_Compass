@@ -214,8 +214,8 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'settings.unsavedColumnOrderConfirm': '列顺序已修改但未保存，确定要关闭吗？',
     'settings.exportCourseData': '导出课程数据',
     'settings.importCourseData': '导入课程数据',
-    'settings.exportCourseDataTitle': '导出为 JSON：含 courses（applicableGrades、weeklyPeriodsByGrade）、semesterData、keyConcepts、categoryOrder 等（与「课程设置」内导出一致）',
-    'settings.importCourseDataTitle': '选择由本系统导出的 .json 文件；导入将覆盖当前账号下的课程与相关数据',
+    'settings.exportCourseDataTitle': '导出为 JSON：含 courses、semesterData、keyConcepts、categoryOrder、courseDomains 等全校共享课程数据',
+    'settings.importCourseDataTitle': '选择由本系统导出的 .json 文件；导入将覆盖当前全校课程与相关数据',
     // AI
     'ai.generate': '开始生成',
     'ai.generating': '生成中...',
@@ -362,8 +362,8 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'settings.unsavedColumnOrderConfirm': 'Column order was changed but not saved. Close anyway?',
     'settings.exportCourseData': 'Export course data',
     'settings.importCourseData': 'Import course data',
-    'settings.exportCourseDataTitle': 'Exports JSON with courses (applicableGrades, weeklyPeriodsByGrade), semesterData, keyConcepts, categoryOrder (same as in Course settings)',
-    'settings.importCourseDataTitle': 'Choose a .json file exported by this app; import overwrites data for the current account',
+    'settings.exportCourseDataTitle': 'Exports JSON with school-wide courses, semesterData, keyConcepts, categoryOrder, courseDomains',
+    'settings.importCourseDataTitle': 'Choose a .json file exported by this app; import overwrites school-wide course data',
     // AI
     'ai.generate': 'Generate',
     'ai.generating': 'Generating...',

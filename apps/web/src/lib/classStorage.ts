@@ -331,6 +331,24 @@ export async function createAcademicYear(year: AcademicYear): Promise<AcademicYe
   return year;
 }
 
+export async function promoteAcademicYearToNext(sourceYearId?: string): Promise<{
+  targetYearId: string;
+  targetYearName: string;
+  classesPromoted: number;
+  classesGraduated: number;
+  studentsPromoted: number;
+  studentsGraduated: number;
+}> {
+  if (!USE_CLOUD_STORAGE || !getCurrentUserId()) {
+    throw new Error('Cloud storage required for academic year promotion');
+  }
+  const result = await api.promoteAcademicYearToNext(sourceYearId);
+  await loadAcademicYears();
+  await setCurrentAcademicYearIdAndSync(result.targetYearId);
+  await loadAllClasses();
+  return result;
+}
+
 export async function deleteAcademicYear(academicYearId: string): Promise<void> {
   const years = loadAcademicYearsSync().filter((y) => y.id !== academicYearId);
   await saveAcademicYears(years);

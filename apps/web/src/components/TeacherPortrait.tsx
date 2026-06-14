@@ -342,7 +342,7 @@ export default function TeacherPortrait({
   return (
     <div className="min-h-screen bg-slate-50 pt-14 pb-8">
       <AppTopBar
-        title={isZh ? '教师画像' : 'Teacher portrait'}
+        title={isZh ? '教师中心' : 'Teacher Center'}
         showBack
         onBack={onBackToHub}
       />

@@ -665,8 +665,8 @@ export default function CurriculumRoadmap({
 
       const confirmMsg =
         language === 'zh'
-          ? '导入数据将覆盖当前所有数据（课程、单元、概念等），确定要继续吗？\n\n注意：导入的数据将保存到当前登录账号中。'
-          : 'Importing data will overwrite all current data (courses, units, concepts, etc.). Are you sure you want to continue?\n\nNote: Imported data will be saved to the currently logged-in account.';
+          ? '导入数据将覆盖当前全校课程数据（课程、单元、概念等），确定要继续吗？'
+          : 'Importing will overwrite all school-wide course data (courses, units, concepts, etc.). Continue?';
 
       if (window.confirm(confirmMsg)) {
         const result = await importAllData(data);

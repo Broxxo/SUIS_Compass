@@ -40,6 +40,7 @@ import {
   getCurrentAcademicYearId,
   createAcademicYear,
   deleteAcademicYear,
+  promoteAcademicYearToNext,
   loadStudents,
   loadEnrollmentsSync,
   loadAllClasses,
@@ -47,6 +48,8 @@ import {
   updateStudent,
   deleteStudent,
   addEnrollment,
+  createStudent,
+  removeEnrollment,
 } from '../lib/classStorage';
 import {
   loadCategoryOrder,
@@ -86,15 +89,21 @@ import {
 } from '../lib/staffUserImport';
 import {
   buildStaffingRosterSheetsFromBlocks,
-  downloadStaffingRosterExport,
-  parseStaffingRosterWorkbook,
+  downloadStaffingPackageExport,
+  downloadWeeklyLoadExport,
+  parseStaffingPackageWorkbook,
   type StaffingRosterTeacherRef,
 } from '../lib/staffingRosterExcel';
+import {
+  downloadStudentsExport,
+  parseStudentImportWorkbook,
+} from '../lib/studentRosterExcel';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
-import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, FunctionalRoleAssignment, FunctionalRoleType, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term } from '../types/classManagement';
+import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, FunctionalRoleAssignment, FunctionalRoleType, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term, AcademicYearPromotionPreview } from '../types/classManagement';
 import CurriculumRoadmap from './CurriculumRoadmap';
 import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
+import PromoteAcademicYearPreviewDialog from './admin/PromoteAcademicYearPreviewDialog';
 import StaffingSettingsPanel, { type StaffingSubTab } from './admin/StaffingSettingsPanel';
 import GradeManagementPanel from './admin/GradeManagementPanel';
 import TeachingManagementPanel from './admin/TeachingManagementPanel';
@@ -641,10 +650,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const [adminTab, setAdminTab] = useState<
     | 'users'
+    | 'students'
     | 'foundation'
     | 'courses'
     | 'staffing'
-    | 'students'
+    | 'weekly-load'
     | 'report-settings'
     | 'teacher-portrait-settings'
     | 'database'
@@ -655,8 +665,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [yearLoading, setYearLoading] = useState(false);
   const [dialogCreateYear, setDialogCreateYear] = useState(false);
   const [dialogYearManagement, setDialogYearManagement] = useState(false);
+  const [deleteYearTarget, setDeleteYearTarget] = useState<AcademicYear | null>(null);
+  const [deleteYearConfirmInput, setDeleteYearConfirmInput] = useState('');
+  const [deleteYearSubmitting, setDeleteYearSubmitting] = useState(false);
   const [newYearName, setNewYearName] = useState('');
   const [yearSubmitLoading, setYearSubmitLoading] = useState(false);
+  const [promoteYearLoading, setPromoteYearLoading] = useState(false);
+  const [promotePreviewOpen, setPromotePreviewOpen] = useState(false);
+  const [promotePreviewLoading, setPromotePreviewLoading] = useState(false);
+  const [promotePreview, setPromotePreview] = useState<AcademicYearPromotionPreview | null>(null);
   const [currentYearClassCount, setCurrentYearClassCount] = useState<number | null>(null);
   const [currentYearStudentCount, setCurrentYearStudentCount] = useState<number | null>(null);
   const [currentYearClasses, setCurrentYearClasses] = useState<{ cls: ClassItem; studentCount: number }[]>([]);
@@ -814,7 +831,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   /** 周课时统计·全校表：按主学科筛选、排序 */
   const [staffingLoadGrandFilterPrimary, setStaffingLoadGrandFilterPrimary] = useState<string>('');
   const [staffingExcelImporting, setStaffingExcelImporting] = useState(false);
+  const [studentExcelImporting, setStudentExcelImporting] = useState(false);
   const staffingExcelInputRef = useRef<HTMLInputElement>(null);
+  const studentExcelInputRef = useRef<HTMLInputElement>(null);
   const [staffingLoadGrandSort, setStaffingLoadGrandSort] = useState<
     'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc'
   >('total-desc');
@@ -834,6 +853,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const canEditSchoolStructure =
     currentUser?.role === 'system-admin' || currentUser?.role === 'admin';
   const isSystemAdmin = currentUser?.role === 'system-admin';
+  const staffingDataTabActive = adminTab === 'staffing' || adminTab === 'weekly-load';
 
   /** 当前用户可创建的权限类型：系统管理员可创建管理员+教师，管理员只能创建教师 */
   const assignableRoles = useMemo((): User['role'][] => {
@@ -1153,7 +1173,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [createEvaluationOpen]);
 
   const courseLayoutOrderKey =
-    adminTab === 'report-settings' || adminTab === 'staffing'
+    adminTab === 'report-settings' || staffingDataTabActive
       ? JSON.stringify({ categoryOrder: loadCategoryOrder(), courseDomains: loadCourseDomainsSync() })
       : '';
   const evaluationCoursesSorted = useMemo(
@@ -1774,7 +1794,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [adminTab]);
 
   useEffect(() => {
-    if (adminTab !== 'staffing') return;
+    if (!staffingDataTabActive) return;
     setStaffingLoading(true);
     Promise.all([
       loadAcademicYears(),
@@ -1811,10 +1831,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       })
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing data'))
       .finally(() => setStaffingLoading(false));
-  }, [adminTab]);
+  }, [adminTab, staffingDataTabActive]);
 
   useEffect(() => {
-    if (adminTab !== 'staffing') return;
+    if (!staffingDataTabActive) return;
     if (!USE_CLOUD_STORAGE || !staffingYearId) {
       setStaffingAssignments([]);
       setFunctionalRoleAssignments([]);
@@ -1834,14 +1854,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       })
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing assignments'))
       .finally(() => setStaffingLoading(false));
-  }, [adminTab, staffingYearId]);
+  }, [adminTab, staffingDataTabActive, staffingYearId]);
 
   useEffect(() => {
     setStaffingLoadGrandFilterPrimary('');
   }, [staffingYearId]);
 
   useEffect(() => {
-    if ((adminTab !== 'staffing' && adminTab !== 'report-settings') || !USE_CLOUD_STORAGE) return;
+    if ((adminTab !== 'staffing' && adminTab !== 'weekly-load' && adminTab !== 'report-settings') || !USE_CLOUD_STORAGE) return;
     let cancelled = false;
     void Promise.all([hydrateCategoryOrderFromCloud(), hydrateCourseDomainsFromCloud()]).then(() => {
       if (!cancelled) setStaffingCategoryOrderNonce((n) => n + 1);
@@ -1870,6 +1890,50 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setError((e as Error)?.message || 'Failed to create year');
     } finally {
       setYearSubmitLoading(false);
+    }
+  };
+
+  const handlePromoteToNextYear = async () => {
+    if (!currentYearId || promoteYearLoading || promotePreviewLoading) return;
+    setPromotePreviewOpen(true);
+    setPromotePreviewLoading(true);
+    setPromotePreview(null);
+    setError(null);
+    try {
+      const preview = await api.getAcademicYearPromotePreview(currentYearId);
+      setPromotePreview(preview);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || (isZh ? '加载升学年预览失败' : 'Failed to load preview'));
+      setPromotePreviewOpen(false);
+    } finally {
+      setPromotePreviewLoading(false);
+    }
+  };
+
+  const handleConfirmPromoteToNextYear = async () => {
+    if (!currentYearId || promoteYearLoading || !promotePreview?.canExecute) return;
+    setPromoteYearLoading(true);
+    setError(null);
+    try {
+      const result = await promoteAcademicYearToNext(currentYearId);
+      await refreshYears();
+      setCurrentYearId(result.targetYearId);
+      setStaffingYearId(result.targetYearId);
+      const classes = await loadAllClasses();
+      setAllClasses(classes);
+      const studentList = await loadStudents();
+      setStudents(studentList);
+      setPromotePreviewOpen(false);
+      setPromotePreview(null);
+      window.alert(
+        isZh
+          ? `已升入「${result.targetYearName}」：升班 ${result.classesPromoted} 班 / ${result.studentsPromoted} 人；毕业归档 ${result.classesGraduated} 班 / ${result.studentsGraduated} 人。`
+          : `Promoted to ${result.targetYearName}: ${result.classesPromoted} classes, ${result.studentsPromoted} students; ${result.classesGraduated} classes archived, ${result.studentsGraduated} graduates.`,
+      );
+    } catch (e: unknown) {
+      setError((e as Error)?.message || (isZh ? '升学年失败' : 'Promotion failed'));
+    } finally {
+      setPromoteYearLoading(false);
     }
   };
 
@@ -1998,19 +2062,146 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
   };
 
-  const handleDeleteYear = async (y: AcademicYear) => {
-    const msg = isZh
-      ? `确定删除学年「${y.name}」？该学年下所有班级与学籍将一并删除，学生档案保留。`
-      : `Delete academic year "${y.name}"? All classes and enrollments in this year will be removed; student records kept.`;
-    if (!window.confirm(msg)) return;
+  const handleStudentExcelExport = () => {
+    setError(null);
+    const year = allYears.find((y) => y.id === studentCurrentYearId);
+    downloadStudentsExport({
+      students,
+      enrollments,
+      academicYearId: studentCurrentYearId,
+      academicYearLabel: year?.name ?? '',
+      classes: allClasses,
+      isZh,
+    });
+  };
+
+  const handleStudentExcelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!studentCurrentYearId) {
+      setError(isZh ? '请先选择学年。' : 'Select an academic year first.');
+      return;
+    }
+    setError(null);
+    const year = allYears.find((y) => y.id === studentCurrentYearId);
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = parseStudentImportWorkbook(buf, isZh);
+      if (parsed.errors.length > 0) {
+        const head = parsed.errors.slice(0, 12).join('\n');
+        const tail = parsed.errors.length > 12 ? (isZh ? '\n…' : '\n…') : '';
+        alert((isZh ? '导入失败：\n' : 'Import failed:\n') + head + tail);
+        return;
+      }
+      if (parsed.rows.length === 0) {
+        alert(isZh ? '未解析到可导入的数据行。' : 'No rows to import.');
+        return;
+      }
+      const classesInYear = allClasses.filter((c) => c.academicYearId === studentCurrentYearId);
+      const classByName = new Map(classesInYear.map((c) => [c.name.trim().toLowerCase(), c]));
+      const warnings: string[] = [...parsed.warnings];
+      setStudentExcelImporting(true);
+      for (const row of parsed.rows) {
+        const existing = row.studentNumber
+          ? students.find((s) => (s.studentNumber ?? '').trim().toLowerCase() === row.studentNumber.toLowerCase())
+          : undefined;
+        const patch = {
+          name: row.nameZh || row.nameEn,
+          nameZh: row.nameZh || null,
+          nameEn: row.nameEn || null,
+          gender: row.gender,
+          currentGrade: row.currentGrade,
+          division: row.division || null,
+          status: row.status || 'active',
+          studentNumber: row.studentNumber || null,
+          dateOfBirth: row.dateOfBirth || null,
+        };
+        let studentId: string;
+        if (existing) {
+          await updateStudent(existing.id, patch);
+          studentId = existing.id;
+        } else {
+          studentId =
+            typeof crypto !== 'undefined' && crypto.randomUUID
+              ? `stu-${crypto.randomUUID()}`
+              : `stu-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+          await createStudent({ id: studentId, ...patch });
+        }
+        if (row.className) {
+          const cls = classByName.get(row.className.trim().toLowerCase());
+          if (!cls) {
+            warnings.push(
+              isZh
+                ? `学号/姓名「${row.studentNumber || row.nameZh || row.nameEn}」：未找到班级「${row.className}」（${year?.name ?? studentCurrentYearId}），已跳过分班。`
+                : `Student "${row.studentNumber || row.nameZh || row.nameEn}": class "${row.className}" not found; enrollment skipped.`,
+            );
+            continue;
+          }
+          const currentEnrollments = loadEnrollmentsSync().filter(
+            (en) => en.studentId === studentId && en.academicYearId === studentCurrentYearId,
+          );
+          const alreadyInClass = currentEnrollments.some((en) => en.classId === cls.id);
+          if (!alreadyInClass) {
+            for (const en of currentEnrollments) {
+              await removeEnrollment(en.id);
+            }
+            const enrollmentId =
+              typeof crypto !== 'undefined' && crypto.randomUUID
+                ? `enr-${crypto.randomUUID()}`
+                : `enr-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+            await addEnrollment({
+              id: enrollmentId,
+              studentId,
+              classId: cls.id,
+              academicYearId: studentCurrentYearId,
+            });
+          }
+        }
+      }
+      if (warnings.length > 0) {
+        alert(
+          `${isZh ? '导入完成，但有提示：\n' : 'Import finished with notices:\n'}${warnings.slice(0, 10).join('\n')}${warnings.length > 10 ? '\n…' : ''}`,
+        );
+      }
+      const stList = await loadStudents();
+      setStudents(stList);
+      setEnrollments(loadEnrollmentsSync());
+    } catch (err: unknown) {
+      setError((err as Error)?.message || (isZh ? '导入失败' : 'Import failed'));
+    } finally {
+      setStudentExcelImporting(false);
+    }
+  };
+
+  const handleDeleteYear = async () => {
+    if (!deleteYearTarget) return;
+    const expectedName = deleteYearTarget.name.trim();
+    if (deleteYearConfirmInput.trim() !== expectedName) return;
+    setDeleteYearSubmitting(true);
     setError(null);
     try {
-      await deleteAcademicYear(y.id);
+      await deleteAcademicYear(deleteYearTarget.id);
       await refreshYears();
+      setDeleteYearTarget(null);
+      setDeleteYearConfirmInput('');
       setDialogYearManagement(false);
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Failed to delete year');
+    } finally {
+      setDeleteYearSubmitting(false);
     }
+  };
+
+  const openDeleteYearDialog = (y: AcademicYear) => {
+    setDeleteYearTarget(y);
+    setDeleteYearConfirmInput('');
+  };
+
+  const closeDeleteYearDialog = () => {
+    if (deleteYearSubmitting) return;
+    setDeleteYearTarget(null);
+    setDeleteYearConfirmInput('');
   };
 
   const getGradeLabel = (level: number): string =>
@@ -4158,7 +4349,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const staffingClassList = useMemo(
     () => allClasses
-      .filter((c) => c.academicYearId === staffingYearId)
+      .filter((c) => c.academicYearId === staffingYearId && !c.archivedAt)
       .sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name)),
     [allClasses, staffingYearId],
   );
@@ -4201,7 +4392,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   /** 年级配置变化时岗位学段划分与周课时需重算 */
   const staffingGradeConfigSyncKey =
-    adminTab === 'staffing' ? JSON.stringify(normalizeGradeConfig(loadGradeConfigSync())) : '';
+    staffingDataTabActive ? JSON.stringify(normalizeGradeConfig(loadGradeConfigSync())) : '';
 
   /** 按学段分块；无学段配置时退化为单块「全校」；仅课程岗位列（班主任在职能岗位） */
   const staffingSegmentBlocks = useMemo(() => {
@@ -4377,15 +4568,43 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [staffingTeachers],
   );
 
+  const staffingGradeBlocksForExcel = useMemo(
+    (): import('../lib/staffingRosterExcel').StaffingGradeMgmtBlock[] =>
+      staffingHomeroomBlocks.map((block) => ({
+        sheetName: block.title.trim() || (isZh ? '全校' : 'All'),
+        segmentKey: block.key,
+        classes: block.classes,
+      })),
+    [staffingHomeroomBlocks, isZh],
+  );
+
   const handleStaffingRosterExport = () => {
     const year = allYears.find((y) => y.id === staffingYearId);
-    downloadStaffingRosterExport({
+    const gradeHeadMap = new Map<string, string>();
+    for (const a of functionalRoleAssignments) {
+      if (a.roleType === 'grade-head' && a.teacherId) {
+        gradeHeadMap.set(a.scopeKey, a.teacherId);
+      }
+    }
+    const leadMap = new Map<string, string>();
+    for (const a of functionalRoleAssignments) {
+      if (a.roleType === 'subject-group-head' && a.teacherId) {
+        leadMap.set(a.scopeKey, a.teacherId);
+      }
+    }
+    downloadStaffingPackageExport({
       academicYearLabel: year?.name ?? staffingYearId,
-      sheets: staffingRosterSheetsForExcel,
-      assignments: staffingAssignmentsForExcel,
-      teachers: staffingTeachersForExcel,
-      gradeConfig: normalizeGradeConfig(loadGradeConfigSync()),
       isZh,
+      gradeConfig: normalizeGradeConfig(loadGradeConfigSync()),
+      teachers: staffingTeachersForExcel,
+      gradeBlocks: staffingGradeBlocksForExcel,
+      homeroomByClassId: homeroomTeacherByClassId,
+      gradeHeadByScopeKey: gradeHeadMap,
+      teachingGroups: teachingSubjectGroups,
+      subjectGroupLeadByGroupId: leadMap,
+      membersByGroupId: subjectGroupMembersByGroupId,
+      courseSheets: staffingRosterSheetsForExcel,
+      courseAssignments: staffingAssignmentsForExcel,
     });
   };
 
@@ -4396,9 +4615,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     setError(null);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = parseStaffingRosterWorkbook(buf, {
+      const parsed = parseStaffingPackageWorkbook(buf, {
         academicYearId: staffingYearId,
-        sheets: staffingRosterSheetsForExcel,
+        courseSheets: staffingRosterSheetsForExcel,
+        gradeBlocks: staffingGradeBlocksForExcel,
+        teachingGroups: teachingSubjectGroups,
         allClasses: staffingClassList,
         courses: staffingCourses,
         teachers: staffingTeachersForExcel,
@@ -4411,7 +4632,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         alert((isZh ? '导入失败：\n' : 'Import failed:\n') + head + tail);
         return;
       }
-      if (parsed.operations.length === 0) {
+      if (
+        parsed.operations.length === 0 &&
+        parsed.functionalRoleOps.length === 0 &&
+        parsed.teachingMemberOps.length === 0
+      ) {
         alert(isZh ? '未解析到可导入的数据行。' : 'No rows to import.');
         return;
       }
@@ -4449,18 +4674,51 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           });
         }
       }
-      const refreshed = await api.getAdminStaffingAssignments(staffingYearId);
-      setStaffingAssignments(refreshed);
+      for (const op of parsed.functionalRoleOps) {
+        await api.upsertAdminFunctionalRole({
+          academicYearId: op.academicYearId,
+          roleType: op.roleType,
+          scopeKey: op.scopeKey,
+          scopeLabel: op.scopeLabel,
+          teacherId: op.teacherId,
+        });
+      }
+      for (const op of parsed.teachingMemberOps) {
+        await api.putAdminTeachingSubjectGroupMembers({
+          academicYearId: staffingYearId,
+          groupId: op.groupId,
+          teacherIds: op.teacherIds,
+        });
+      }
+      const [refreshedAssignments, refreshedRoles, refreshedMembers] = await Promise.all([
+        api.getAdminStaffingAssignments(staffingYearId),
+        api.getAdminFunctionalRoles(staffingYearId),
+        api.getAdminTeachingSubjectGroupMembers(staffingYearId),
+      ]);
+      setStaffingAssignments(refreshedAssignments);
+      setFunctionalRoleAssignments(refreshedRoles);
+      setSubjectGroupMembers(refreshedMembers);
+      const total =
+        parsed.operations.length + parsed.functionalRoleOps.length + parsed.teachingMemberOps.length;
       alert(
         isZh
-          ? `已导入 ${parsed.operations.length} 条岗位记录。`
-          : `Imported ${parsed.operations.length} assignment(s).`,
+          ? `已导入 ${total} 条岗位相关记录（任课 ${parsed.operations.length} / 职能 ${parsed.functionalRoleOps.length} / 学科组成员 ${parsed.teachingMemberOps.length}）。`
+          : `Imported ${total} staffing record(s) (assignments ${parsed.operations.length} / roles ${parsed.functionalRoleOps.length} / members ${parsed.teachingMemberOps.length}).`,
       );
     } catch (err: unknown) {
       setError((err as Error)?.message || (isZh ? '导入失败' : 'Import failed'));
     } finally {
       setStaffingExcelImporting(false);
     }
+  };
+
+  const handleWeeklyLoadExport = () => {
+    const year = allYears.find((y) => y.id === staffingYearId);
+    downloadWeeklyLoadExport({
+      academicYearLabel: year?.name ?? staffingYearId,
+      isZh,
+      rows: staffingLoadGrandRows,
+    });
   };
 
   /** 周课时统计：逐条任课单元（用于按学科分组与明细文案） */
@@ -4592,6 +4850,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         classes: L('—', '—'),
         courses: L('新建/维护', 'Create/edit'),
         staffing: L('全管', 'Full'),
+        weeklyLoad: L('查看/导出', 'View & export'),
         students: L('增删改', 'Full'),
         portrait: L('创建与管理', 'Create & manage'),
         teacherPortrait: L('创建与管理', 'Create & manage'),
@@ -4605,6 +4864,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         classes: L('—', '—'),
         courses: L('无新建；可编单元', 'No new course; units'),
         staffing: L('全管', 'Full'),
+        weeklyLoad: L('查看/导出', 'View & export'),
         students: L('可增不可删', 'Add, not delete'),
         portrait: L('创建与管理', 'Create & manage'),
         teacherPortrait: L('创建与管理', 'Create & manage'),
@@ -4618,6 +4878,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         classes: L('仅查看', 'View'),
         courses: L('—', '—'),
         staffing: L('—', '—'),
+        weeklyLoad: L('—', '—'),
         students: L('关联班级', 'Linked classes'),
         portrait: L('任课范围', 'Teaching scope'),
         teacherPortrait: L('—', '—'),
@@ -4650,6 +4911,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           </button>
           <button
             type="button"
+            onClick={() => { setAdminTab('students'); setError(null); }}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'students' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            {isZh ? '学生管理' : 'Students'}
+          </button>
+          <button
+            type="button"
             onClick={() => { setAdminTab('foundation'); setError(null); }}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'foundation' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
@@ -4671,10 +4939,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           </button>
           <button
             type="button"
-            onClick={() => { setAdminTab('students'); setError(null); }}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'students' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            onClick={() => { setAdminTab('weekly-load'); setError(null); }}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'weekly-load' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            {isZh ? '学生管理' : 'Students'}
+            {isZh ? '周课时统计' : 'Weekly load'}
           </button>
           <button
             type="button"
@@ -4737,10 +5005,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '权限' : 'Access level'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '后台' : 'Panel'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '用户管理' : 'Users'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生管理' : 'Students'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '基础设置' : 'Foundation'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '课程管理' : 'Courses'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '岗位安排' : 'Staffing'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生管理' : 'Students'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '周课时统计' : 'Weekly load'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生画像' : 'Student portrait'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '教师画像' : 'Teacher portrait'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '数据库' : 'Database'}</th>
@@ -4752,10 +5021,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <td className="py-2 px-2 font-medium text-slate-800 whitespace-nowrap">{ROLE_LABELS[row.role][isZh ? 'zh' : 'en']}</td>
                     <td className="py-2 px-2 whitespace-nowrap">{row.panel ? (isZh ? '✓' : 'Yes') : '—'}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.users}</td>
+                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.students}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.foundation}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.courses}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.staffing}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.students}</td>
+                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.weeklyLoad}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.portrait}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.teacherPortrait}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[5rem]">{row.database}</td>
@@ -5376,12 +5646,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             setCurrentAcademicYearIdAndSync={setCurrentAcademicYearIdAndSync}
             onOpenCreateYear={() => setDialogCreateYear(true)}
             onOpenYearManagement={() => setDialogYearManagement(true)}
+            onPromoteToNextYear={handlePromoteToNextYear}
+            promoteLoading={promoteYearLoading}
+            promotePreviewLoading={promotePreviewLoading}
             currentYearClassCount={currentYearClassCount}
             currentYearStudentCount={currentYearStudentCount}
             currentYearClasses={currentYearClasses}
             getGradeLabel={getGradeLabel}
             onOrgError={(msg) => setError(msg)}
             onDepartmentsChange={loadOrgDepartmentLabels}
+            onDefaultYearChanged={refreshYears}
           />
         )}
 
@@ -5405,18 +5679,14 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   emptyLabel={isZh ? '暂无学年' : 'No years'}
                   disabled={staffingLoading || allYears.length === 0}
                 />
-                {USE_CLOUD_STORAGE && staffingYearId && staffingSubTab === 'course' ? (
+                {USE_CLOUD_STORAGE && staffingYearId ? (
                   <>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       onClick={handleStaffingRosterExport}
-                      disabled={
-                        staffingLoading ||
-                        staffingClassList.length === 0 ||
-                        staffingRosterSheetsForExcel.length === 0
-                      }
+                      disabled={staffingLoading}
                     >
                       {isZh ? '导出 Excel' : 'Export Excel'}
                     </Button>
@@ -5432,7 +5702,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                       variant="outline"
                       size="sm"
                       onClick={() => staffingExcelInputRef.current?.click()}
-                      disabled={staffingExcelImporting || staffingLoading || staffingClassList.length === 0}
+                      disabled={staffingExcelImporting || staffingLoading}
                     >
                       {staffingExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
                     </Button>
@@ -5743,181 +6013,213 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   </>
                 )}
 
-                {staffingSubTab === 'load' && (
-                  <div className="space-y-6 border-t border-slate-100 pt-4">
-                    {staffingCourseColumnGroups.length === 0 ? (
-                      <p className="text-sm text-slate-500">
-                        {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
-                      </p>
-                    ) : staffingTeachers.length === 0 ? (
-                      <p className="text-sm text-slate-500">{isZh ? '暂无教师账号。' : 'No teacher accounts.'}</p>
-                    ) : (
-                      <>
-                        {staffingLoadLineItems.length === 0 && (
-                          <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-                            {isZh
-                              ? '当前学年在课程岗位中尚未指定任课教师，下方合计均为 0。切换到「课程岗位」进行排课。'
-                              : 'No course staffing for this year yet; totals are zero. Use the Course staffing tab to assign teachers.'}
-                          </p>
-                        )}
-
-                        <div className="rounded-lg border-2 border-slate-300 bg-slate-50/80 overflow-hidden shadow-sm">
-                          <div className="bg-slate-200/90 px-3 py-2 border-b border-slate-300">
-                            <h3 className="text-sm font-semibold text-slate-900">
-                              {isZh ? '全校周课时统计' : 'School-wide weekly load'}
-                            </h3>
-                          </div>
-                          <div className="flex flex-wrap items-end gap-3 px-3 pt-3 text-sm">
-                            <div className="flex flex-col gap-1 min-w-[10rem]">
-                              <label className="text-xs font-medium text-slate-600">
-                                {isZh ? '主学科筛选' : 'Primary subject'}
-                              </label>
-                              <select
-                                value={staffingLoadGrandFilterPrimary}
-                                onChange={(e) => setStaffingLoadGrandFilterPrimary(e.target.value)}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm max-w-[16rem]"
-                              >
-                                <option value="">{isZh ? '全部' : 'All'}</option>
-                                {staffingLoadGrandPrimaryFilterOptions.map((key) => (
-                                  <option key={key} value={key}>
-                                    {key === STAFFING_LOAD_PRIMARY_NONE
-                                      ? (isZh ? '未设置主学科' : 'Not set')
-                                      : key}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="flex flex-col gap-1 min-w-[11rem]">
-                              <label className="text-xs font-medium text-slate-600">
-                                {isZh ? '排序' : 'Sort'}
-                              </label>
-                              <select
-                                value={staffingLoadGrandSort}
-                                onChange={(e) =>
-                                  setStaffingLoadGrandSort(
-                                    e.target.value as 'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc',
-                                  )
-                                }
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
-                              >
-                                <option value="total-desc">{isZh ? '周课时（多→少）' : 'Periods (high → low)'}</option>
-                                <option value="total-asc">{isZh ? '周课时（少→多）' : 'Periods (low → high)'}</option>
-                                <option value="name-asc">{isZh ? '教师姓名（A→Z）' : 'Teacher name (A → Z)'}</option>
-                                <option value="primary-asc">{isZh ? '主学科（A→Z）' : 'Primary subject (A → Z)'}</option>
-                              </select>
-                            </div>
-                          </div>
-                          <div className="overflow-x-auto p-3 pt-2">
-                            <table className="min-w-full text-sm">
-                              <thead className="bg-white text-left text-xs text-slate-600 border border-slate-200 rounded-t-md">
-                                <tr>
-                                  <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
-                                    {isZh ? '教职工' : 'Staff'}
-                                  </th>
-                                  <th className="py-2 px-3 font-medium whitespace-nowrap w-[7rem]">
-                                    {isZh ? '主学科' : 'Primary'}
-                                  </th>
-                                  <th className="py-2 px-3 font-medium min-w-[12rem]">
-                                    {isZh ? '课时构成' : 'Breakdown'}
-                                  </th>
-                                  <th className="py-2 px-3 font-medium whitespace-nowrap text-right w-[7.5rem]">
-                                    {isZh ? '周课时（节/周）' : 'Periods / wk'}
-                                  </th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {staffingLoadGrandRows.length === 0 ? (
-                                  <tr className="border-t border-slate-200 bg-white">
-                                    <td colSpan={4} className="py-3 px-3 text-sm text-slate-500">
-                                      {isZh
-                                        ? '当前筛选下暂无教师行，请调整主学科筛选或确认岗位安排。'
-                                        : 'No rows for this filter. Change the primary-subject filter or check staffing.'}
-                                    </td>
-                                  </tr>
-                                ) : (
-                                  staffingLoadGrandRows.map((r) => (
-                                    <tr key={r.teacherId} className="border-t border-slate-200 bg-white">
-                                      <td className="py-2 px-3 text-slate-800 align-top whitespace-nowrap font-medium">
-                                        {r.teacherName}
-                                      </td>
-                                      <td className="py-2 px-3 text-slate-700 align-top text-xs sm:text-sm whitespace-nowrap">
-                                        {r.primarySubjectLabel}
-                                      </td>
-                                      <td className="py-2 px-3 text-slate-600 text-xs sm:text-sm leading-relaxed align-top break-words max-w-[min(48rem,85vw)]">
-                                        {r.detail}
-                                      </td>
-                                      <td className="py-2 px-3 font-semibold text-slate-900 tabular-nums text-right align-top">
-                                        {formatWeeklyLoadValue(r.total)}
-                                      </td>
-                                    </tr>
-                                  ))
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
           </StaffingSettingsPanel>
         )}
 
-        {adminTab === 'students' && (
-          <>
-            {/* 与班级管理一致：第一块仅「当前学年」 */}
-            <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="text-sm font-medium text-slate-700">{isZh ? '当前学年' : 'Academic year'}</label>
-                <select
-                  value={studentCurrentYearId || ''}
-                  onChange={(e) => setStudentCurrentYearId(e.target.value || null)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white min-w-[180px]"
+        {adminTab === 'weekly-load' && (
+          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <label className="text-sm font-medium text-slate-700 whitespace-nowrap">
+                {isZh ? '学年' : 'Year'}
+              </label>
+              <AcademicYearSelect
+                isZh={isZh}
+                years={allYears}
+                value={staffingYearId}
+                onChange={setStaffingYearId}
+                allowEmpty={allYears.length === 0}
+                emptyLabel={isZh ? '暂无学年' : 'No years'}
+                disabled={staffingLoading || allYears.length === 0}
+              />
+              {USE_CLOUD_STORAGE && staffingYearId ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleWeeklyLoadExport}
+                  disabled={staffingLoading || staffingLoadGrandRows.length === 0}
                 >
-                  <option value="">—</option>
-                  {allYears.map((y) => (
-                    <option key={y.id} value={y.id}>{y.name}</option>
-                  ))}
-                </select>
-              </div>
-            </section>
+                  {isZh ? '导出 Excel' : 'Export Excel'}
+                </Button>
+              ) : null}
+            </div>
 
-            {/* 第二块：标题 + 创建按钮 + 筛选 + 表格（与「班级列表」卡片结构一致） */}
-            <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                <h2 className="text-base font-semibold text-slate-800">
-                  {studentCurrentYearId
-                    ? `${allYears.find((y) => y.id === studentCurrentYearId)?.name ?? ''} — ${isZh ? '学生列表' : 'Students'}`
-                    : (isZh ? '学生列表' : 'Student list')}
-                </h2>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void openStudentLoginDialog()}
-                    disabled={!USE_CLOUD_STORAGE || studentLoginBusy}
-                    title={
-                      !USE_CLOUD_STORAGE
-                        ? (isZh ? '需开启云端存储后从服务器导入登录账号' : 'Requires cloud mode')
-                        : (isZh ? '为有学号的学生生成密码并导入服务器' : 'Import login accounts for students with student number')
-                    }
-                  >
-                    <LogIn className="h-4 w-4 mr-1" />
-                    {studentLoginBusy ? (isZh ? '准备中…' : 'Loading…') : isZh ? '学生登录' : 'Student login'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => setDialogCreateStudent(true)}
-                    disabled={!studentCurrentYearId}
-                    title={!studentCurrentYearId ? (isZh ? '请先选择当前学年' : 'Select current year first') : undefined}
-                  >
-                    <Plus className="h-4 w-4 mr-1" />
-                    {isZh ? '创建学生' : 'Create student'}
-                  </Button>
-                </div>
-              </div>
+            {staffingLoading ? (
+              <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
+            ) : !staffingYearId ? (
+              <p className="text-sm text-slate-500">{isZh ? '请先创建学年。' : 'Create an academic year first.'}</p>
+            ) : !USE_CLOUD_STORAGE ? (
+              <p className="text-sm text-slate-500">
+                {isZh ? '周课时统计需要云端模式（VITE_USE_CLOUD_STORAGE=true）。' : 'Weekly load requires cloud mode.'}
+              </p>
+            ) : (
+              <div className="space-y-6">
+                {staffingCourseColumnGroups.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
+                  </p>
+                ) : staffingTeachers.length === 0 ? (
+                  <p className="text-sm text-slate-500">{isZh ? '暂无教师账号。' : 'No teacher accounts.'}</p>
+                ) : (
+                  <>
+                    {staffingLoadLineItems.length === 0 && (
+                      <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                        {isZh
+                          ? '当前学年在岗位安排中尚未指定任课教师，下方合计均为 0。请前往「岗位安排 → 课程岗位」进行排课。'
+                          : 'No course staffing for this year yet; totals are zero. Assign teachers under Staffing → Course staffing.'}
+                      </p>
+                    )}
 
-              <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+                    <div className="rounded-lg border-2 border-slate-300 bg-slate-50/80 overflow-hidden shadow-sm">
+                      <div className="bg-slate-200/90 px-3 py-2 border-b border-slate-300">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          {isZh ? '全校周课时统计' : 'School-wide weekly load'}
+                        </h3>
+                      </div>
+                      <div className="flex flex-wrap items-end gap-3 px-3 pt-3 text-sm">
+                        <div className="flex flex-col gap-1 min-w-[10rem]">
+                          <label className="text-xs font-medium text-slate-600">
+                            {isZh ? '主学科筛选' : 'Primary subject'}
+                          </label>
+                          <select
+                            value={staffingLoadGrandFilterPrimary}
+                            onChange={(e) => setStaffingLoadGrandFilterPrimary(e.target.value)}
+                            className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm max-w-[16rem]"
+                          >
+                            <option value="">{isZh ? '全部' : 'All'}</option>
+                            {staffingLoadGrandPrimaryFilterOptions.map((key) => (
+                              <option key={key} value={key}>
+                                {key === STAFFING_LOAD_PRIMARY_NONE
+                                  ? (isZh ? '未设置主学科' : 'Not set')
+                                  : key}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="flex flex-col gap-1 min-w-[11rem]">
+                          <label className="text-xs font-medium text-slate-600">
+                            {isZh ? '排序' : 'Sort'}
+                          </label>
+                          <select
+                            value={staffingLoadGrandSort}
+                            onChange={(e) =>
+                              setStaffingLoadGrandSort(
+                                e.target.value as 'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc',
+                              )
+                            }
+                            className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                          >
+                            <option value="total-desc">{isZh ? '周课时（多→少）' : 'Periods (high → low)'}</option>
+                            <option value="total-asc">{isZh ? '周课时（少→多）' : 'Periods (low → high)'}</option>
+                            <option value="name-asc">{isZh ? '教师姓名（A→Z）' : 'Teacher name (A → Z)'}</option>
+                            <option value="primary-asc">{isZh ? '主学科（A→Z）' : 'Primary subject (A → Z)'}</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto p-3 pt-2">
+                        <table className="min-w-full text-sm">
+                          <thead className="bg-white text-left text-xs text-slate-600 border border-slate-200 rounded-t-md">
+                            <tr>
+                              <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
+                                {isZh ? '教职工' : 'Staff'}
+                              </th>
+                              <th className="py-2 px-3 font-medium whitespace-nowrap w-[7rem]">
+                                {isZh ? '主学科' : 'Primary'}
+                              </th>
+                              <th className="py-2 px-3 font-medium min-w-[12rem]">
+                                {isZh ? '课时构成' : 'Breakdown'}
+                              </th>
+                              <th className="py-2 px-3 font-medium whitespace-nowrap text-right w-[7.5rem]">
+                                {isZh ? '周课时（节/周）' : 'Periods / wk'}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {staffingLoadGrandRows.length === 0 ? (
+                              <tr className="border-t border-slate-200 bg-white">
+                                <td colSpan={4} className="py-3 px-3 text-sm text-slate-500">
+                                  {isZh
+                                    ? '当前筛选下暂无教师行，请调整主学科筛选或确认岗位安排。'
+                                    : 'No rows for this filter. Change the primary-subject filter or check staffing.'}
+                                </td>
+                              </tr>
+                            ) : (
+                              staffingLoadGrandRows.map((r) => (
+                                <tr key={r.teacherId} className="border-t border-slate-200 bg-white">
+                                  <td className="py-2 px-3 text-slate-800 align-top whitespace-nowrap font-medium">
+                                    {r.teacherName}
+                                  </td>
+                                  <td className="py-2 px-3 text-slate-700 align-top text-xs sm:text-sm whitespace-nowrap">
+                                    {r.primarySubjectLabel}
+                                  </td>
+                                  <td className="py-2 px-3 text-slate-600 text-xs sm:text-sm leading-relaxed align-top break-words max-w-[min(48rem,85vw)]">
+                                    {r.detail}
+                                  </td>
+                                  <td className="py-2 px-3 font-semibold text-slate-900 tabular-nums text-right align-top">
+                                    {formatWeeklyLoadValue(r.total)}
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {adminTab === 'students' && (
+          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-3">
+              <h2 className="text-base font-semibold text-slate-800">
+                {studentCurrentYearId
+                  ? `${allYears.find((y) => y.id === studentCurrentYearId)?.name ?? ''} — ${isZh ? '学生列表' : 'Students'}`
+                  : (isZh ? '学生列表' : 'Student list')}
+              </h2>
+              <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
+                <AcademicYearSelect
+                  isZh={isZh}
+                  years={allYears}
+                  value={studentCurrentYearId || ''}
+                  onChange={(id) => setStudentCurrentYearId(id || null)}
+                  allowEmpty={allYears.length === 0}
+                  emptyLabel={isZh ? '暂无学年' : 'No years'}
+                  disabled={studentLoading || allYears.length === 0}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleStudentExcelExport}
+                  disabled={studentLoading}
+                >
+                  {isZh ? '导出 Excel' : 'Export Excel'}
+                </Button>
+                <input
+                  ref={studentExcelInputRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={(e) => void handleStudentExcelImport(e)}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => studentExcelInputRef.current?.click()}
+                  disabled={studentExcelImporting || studentLoading || !studentCurrentYearId}
+                >
+                  {studentExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+                </Button>
+              </div>
+            </div>
+
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-slate-500">{isZh ? '筛选：' : 'Filter:'}</span>
                 <input
                   value={studentFilterName}
@@ -6090,7 +6392,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 </div>
               )}
             </section>
-          </>
         )}
 
         {adminTab === 'report-settings' && (
@@ -6513,6 +6814,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         </DialogContent>
       </Dialog>
 
+      <PromoteAcademicYearPreviewDialog
+        isZh={isZh}
+        open={promotePreviewOpen}
+        loading={promotePreviewLoading}
+        submitting={promoteYearLoading}
+        preview={promotePreview}
+        onOpenChange={(open) => {
+          if (!promoteYearLoading) {
+            setPromotePreviewOpen(open);
+            if (!open) setPromotePreview(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmPromoteToNextYear()}
+      />
+
       <Dialog open={dialogYearManagement} onOpenChange={setDialogYearManagement}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -6525,13 +6841,18 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             <ul className="space-y-2 max-h-64 overflow-y-auto">
               {years.map((y) => (
                 <li key={y.id} className="flex items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-0">
-                  <span className="font-medium text-slate-800">{y.name}</span>
+                  <span className="font-medium text-slate-800">
+                    {y.name}
+                    {y.isCurrent ? (
+                      <span className="ml-2 text-xs text-primary font-normal">{isZh ? '默认' : 'Default'}</span>
+                    ) : null}
+                  </span>
                   {canEditYears && (
                     <Button
                       variant="outline"
                       size="sm"
                       className="text-red-600 border-red-200 hover:bg-red-50"
-                      onClick={() => handleDeleteYear(y)}
+                      onClick={() => openDeleteYearDialog(y)}
                     >
                       <Trash2 className="h-4 w-4 mr-1" />
                       {isZh ? '删除' : 'Delete'}
@@ -6543,6 +6864,55 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogYearManagement(false)}>{isZh ? '关闭' : 'Close'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!deleteYearTarget}
+        onOpenChange={(open) => {
+          if (!open) closeDeleteYearDialog();
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{isZh ? '删除学年' : 'Delete academic year'}</DialogTitle>
+            <DialogDescription>
+              {isZh
+                ? `将永久删除「${deleteYearTarget?.name ?? ''}」及其下所有班级与学籍（学生档案保留）。此操作不可撤销。`
+                : `Permanently delete "${deleteYearTarget?.name ?? ''}" and all its classes and enrollments (student records kept). This cannot be undone.`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label className="text-sm text-slate-700 block">
+              {isZh
+                ? `请输入学年名称「${deleteYearTarget?.name ?? ''}」以确认删除`
+                : `Type the year name "${deleteYearTarget?.name ?? ''}" to confirm`}
+            </label>
+            <input
+              value={deleteYearConfirmInput}
+              onChange={(e) => setDeleteYearConfirmInput(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              placeholder={deleteYearTarget?.name ?? ''}
+              autoComplete="off"
+              disabled={deleteYearSubmitting}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDeleteYearDialog} disabled={deleteYearSubmitting}>
+              {isZh ? '取消' : 'Cancel'}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleDeleteYear()}
+              disabled={
+                deleteYearSubmitting
+                || !deleteYearTarget
+                || deleteYearConfirmInput.trim() !== (deleteYearTarget?.name ?? '').trim()
+              }
+            >
+              {deleteYearSubmitting ? (isZh ? '删除中…' : 'Deleting…') : (isZh ? '确认删除' : 'Delete')}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

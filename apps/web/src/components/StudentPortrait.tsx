@@ -2973,7 +2973,7 @@ export default function StudentPortrait({
   return (
     <div className="min-h-screen bg-slate-50 pt-14">
       <AppTopBar
-        title={isStudentSelf ? (isZh ? '我的画像' : 'My profile') : isZh ? '学生画像' : 'Student Portrait'}
+        title={isStudentSelf ? (isZh ? '我的画像' : 'My profile') : isZh ? '学生中心' : 'Student Center'}
         showBack={!isStudentSelf}
         onBack={isStudentSelf ? undefined : onBackToHub}
       />

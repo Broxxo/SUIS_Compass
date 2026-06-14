@@ -44,27 +44,23 @@ export async function saveCourses(courses: Course[]): Promise<SaveCoursesResult>
     throw error;
   }
 
-  // 如果使用云端存储，同步到云端（无 userId 时跳过，保证多用户隔离）
+  // 全校共享课程：同步到云端（需已登录且具备写权限）
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
       if (import.meta.env.DEV) {
         console.log(`[Cloud Storage] Saving ${courses.length} courses to cloud...`);
       }
-      
+
       let cloudCourseIds: Set<string> = new Set();
       try {
         const cloudCourses = await api.getCourses();
         cloudCourseIds = new Set(cloudCourses.map((c) => c.id));
         const localCourseIds = new Set(courses.map((c) => c.id));
-        
-        // 删除云端存在但本地不存在的课程（即被删除的课程）
+
         for (const cloudCourse of cloudCourses) {
           if (!localCourseIds.has(cloudCourse.id)) {
             try {
               await api.deleteCourse(cloudCourse.id);
-              if (import.meta.env.DEV) {
-                console.log(`[Cloud Storage] Deleted course ${cloudCourse.id} from cloud`);
-              }
             } catch (deleteError) {
               logError(`Failed to delete course ${cloudCourse.id} from cloud`, deleteError);
             }
@@ -73,54 +69,16 @@ export async function saveCourses(courses: Course[]): Promise<SaveCoursesResult>
       } catch (fetchError) {
         logError('Failed to fetch cloud courses for sync check', fetchError);
       }
-      
-      // 根据云端是否已有该课程决定 PUT 或 POST；409（id 被其他用户占用）时用新 id 再创建，保证导入能同步到当前账号
+
       for (const course of courses) {
         try {
-          if (cloudCourseIds.size > 0) {
-            if (cloudCourseIds.has(course.id)) {
-              await api.updateCourse(course.id, course);
-            } else {
-              await api.createCourse(course);
-            }
+          if (cloudCourseIds.has(course.id)) {
+            await api.updateCourse(course.id, course);
           } else {
-            try {
-              await api.createCourse(course);
-            } catch (createErr) {
-              const createMsg = createErr instanceof Error ? createErr.message : String(createErr);
-              if (createMsg.includes('already exists for another user')) {
-                const oldId = course.id;
-                const newId = `course-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-                await api.createCourse({ ...course, id: newId });
-                course.id = newId;
-                idReplacements.push({ oldId, newId });
-              } else {
-                await api.updateCourse(course.id, course);
-              }
-            }
+            await api.createCourse(course);
           }
         } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error);
-          if (msg.includes('already exists for another user')) {
-            const oldId = course.id;
-            const newId = `course-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-            try {
-              await api.createCourse({ ...course, id: newId });
-              course.id = newId;
-              idReplacements.push({ oldId, newId });
-            } catch (retryErr) {
-              logError(`Failed to save course ${course.id} to cloud (retry with new id)`, retryErr);
-            }
-          } else {
-            logError(`Failed to save course ${course.id} to cloud`, error);
-          }
-        }
-      }
-      if (idReplacements.length > 0) {
-        try {
-          localStorage.setItem(STORAGE_KEYS.COURSES, JSON.stringify(courses));
-        } catch (e) {
-          logError('Failed to write updated course ids to localStorage', e);
+          logError(`Failed to save course ${course.id} to cloud`, error);
         }
       }
       if (import.meta.env.DEV) {
@@ -639,7 +597,7 @@ export function exportAllDataSync(): {
     courseDomains,
     gradeConfig,
     exportDate: new Date().toISOString(),
-    version: '1.0'
+    version: '1.1',
   };
 }
 
@@ -678,8 +636,7 @@ function generateCategoryOrderFromCourses(courses: Course[]): string[] {
 }
 
 /**
- * 导入所有数据（会覆盖现有数据）
- * 注意：此函数会确保数据保存到当前登录用户的账户中，实现账号隔离
+ * 导入课程数据（会覆盖现有全校课程数据）
  */
 export async function importAllData(data: {
   courses?: Course[];

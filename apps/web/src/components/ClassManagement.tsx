@@ -510,21 +510,13 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
       >
         {error && <p className="text-sm text-red-500">{error}</p>}
 
-        <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-slate-700">
-              {isZh ? '当前学年：' : 'Current year: '}
-            </span>
-            <span className="text-sm text-slate-800">
-              {currentYear?.name ?? (currentYearId || (isZh ? '未设置' : 'Not set'))}
-            </span>
-          </div>
-          {!currentYearId && years.length === 0 && !loading && (
-            <p className="text-sm text-slate-500 mt-2">
+        {!currentYearId && years.length === 0 && !loading && (
+          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <p className="text-sm text-slate-500">
               {isZh ? '请在后台「基础设置 → 学年管理」中创建学年。' : 'Create academic years in Admin → Foundation → Academic years.'}
             </p>
-          )}
-        </section>
+          </section>
+        )}
 
         {currentYearId && (
           <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">

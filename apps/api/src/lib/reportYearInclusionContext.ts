@@ -1,4 +1,5 @@
 import pool from '../config/database.js';
+import { resolveConfigAcademicYearId } from './canonicalAcademicConfig.js';
 import {
   parseReportGradeDimensionSnapshots,
   type ReportGradeDimensionSnapshot,
@@ -99,9 +100,10 @@ function buildSubjectKeyToCourseIdFromPayload(payload: unknown): Map<string, str
 
 export async function loadReportYearInclusionContext(academicYearId: string): Promise<ReportYearInclusionContext> {
   await ensureReportYearDimensionPresetTable();
+  const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
   const row = (await pool.query(
     `SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`,
-    [academicYearId],
+    [effectiveYearId],
   )).rows[0] as { payload: unknown } | undefined;
   const payload = row?.payload ?? {};
   const stageInclusion: Record<string, string[]> = {};
@@ -329,9 +331,10 @@ function parsePresetDimensionLabels(
 /** 学年学业报告模板库学科行（来自课程管理同步的学年预设）。 */
 export async function loadYearPresetSubjectRows(academicYearId: string): Promise<YearPresetSubjectRow[]> {
   await ensureReportYearDimensionPresetTable();
+  const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
   const row = (await pool.query(
     `SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`,
-    [academicYearId],
+    [effectiveYearId],
   )).rows[0] as { payload: unknown } | undefined;
   const payload = row?.payload ?? {};
   const out: YearPresetSubjectRow[] = [];

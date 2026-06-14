@@ -3,6 +3,7 @@ import { normalizeCourseDomainsConfig } from '@repo/shared';
 import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
   AcademicYear,
+  AcademicYearPromotionPreview,
   ClassItem,
   Student,
   Enrollment,
@@ -695,6 +696,42 @@ export const api = {
       headers: getHeaders(),
     });
     if (!response.ok) throw new Error('Failed to delete academic year');
+  },
+
+  async getAcademicYearPromotePreview(sourceYearId?: string): Promise<AcademicYearPromotionPreview> {
+    const qs = sourceYearId ? `?sourceYearId=${encodeURIComponent(sourceYearId)}` : '';
+    const response = await fetch(apiUrl(`/api/classes/academic-years/promote-preview${qs}`), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to load promotion preview');
+    }
+    const data = await response.json();
+    return (data.preview ?? data) as AcademicYearPromotionPreview;
+  },
+
+  async promoteAcademicYearToNext(sourceYearId?: string): Promise<{
+    success: boolean;
+    sourceYearId: string;
+    targetYearId: string;
+    targetYearName: string;
+    classesPromoted: number;
+    classesGraduated: number;
+    studentsPromoted: number;
+    studentsGraduated: number;
+    targetSetCurrent: boolean;
+  }> {
+    const response = await fetch(apiUrl('/api/classes/academic-years/promote-to-next'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(sourceYearId ? { sourceYearId } : {}),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to promote academic year');
+    }
+    return response.json();
   },
 
   async getClasses(academicYearId: string): Promise<ClassItem[]> {

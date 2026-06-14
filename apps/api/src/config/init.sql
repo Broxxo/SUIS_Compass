@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS school_settings (
   grade_structure JSONB,
   teaching_research_groups JSONB,
   teaching_subject_groups JSONB,
+  canonical_config_academic_year_id VARCHAR(50) REFERENCES academic_years(id) ON DELETE SET NULL,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL
 );
@@ -172,6 +173,8 @@ CREATE TABLE IF NOT EXISTS classes (
   grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 20),
   name VARCHAR(100) NOT NULL,
   teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  archived_at TIMESTAMP,
+  archive_label VARCHAR(200),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

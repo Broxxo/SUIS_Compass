@@ -6,6 +6,7 @@ import {
   removeCourseFromAllYearPresetLibraries,
   syncCourseToAllYearPresetLibraries,
 } from '../lib/courseReportLibrarySync.js';
+import { getSchoolSettingsHolderUserId } from '../lib/schoolGradeStructure.js';
 
 const router = express.Router();
 
@@ -129,6 +130,7 @@ router.post('/', async (req, res) => {
     }
 
     await ensureCoursesCoTeachingColumn();
+    const holderId = (await getSchoolSettingsHolderUserId()) ?? uid;
     const { id, name, subjectCategory, applicableGrades, weeklyPeriodsByGrade, textbookVersion, color, coTeaching } =
       req.body as CourseWriteBody;
     const subjectCategoryZh = typeof subjectCategory === 'object' ? subjectCategory.zh : subjectCategory;
@@ -148,7 +150,7 @@ router.post('/', async (req, res) => {
          applicable_grades = EXCLUDED.applicable_grades, weekly_periods_by_grade = EXCLUDED.weekly_periods_by_grade,
          co_teaching = EXCLUDED.co_teaching, textbook_version = EXCLUDED.textbook_version, color = EXCLUDED.color, updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
-      [id, uid, name, subjectCategoryZh, subjectCategoryEn, ag, wp, coTeach, textbookVersion, color],
+      [id, holderId, name, subjectCategoryZh, subjectCategoryEn, ag, wp, coTeach, textbookVersion, color],
     );
 
     const course = result.rows[0] as Record<string, unknown>;

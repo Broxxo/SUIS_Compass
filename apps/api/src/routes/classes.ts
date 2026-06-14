@@ -1,7 +1,10 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import pool from '../config/database.js';
-import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
+import { buildAcademicYearPromotionPreview, promoteAcademicYearToNext } from '../lib/academicYearPromotion.js';
+import { resolveConfigAcademicYearId } from '../lib/canonicalAcademicConfig.js';
+import { ensureClassArchiveColumns } from '../lib/classArchiveColumns.js';
 import { ensureClassTeacherAssignmentsTable } from '../lib/ensureClassTeacherAssignmentsTable.js';
+import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
 import { upsertHomeroomStaffingFromClassTables } from '../lib/homeroomStaffingSync.js';
 import { sanitizeExamConfigs } from '../lib/reportExamConfigSanitize.js';
 import {
@@ -845,8 +848,9 @@ function matchDimensionMaxByKey(
 
 async function loadSanitizedExamConfigsForYear(academicYearId: string): Promise<ReturnType<typeof sanitizeExamConfigs>> {
   await ensureReportYearDimensionPresetTable();
+  const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
   const row = (await pool.query(`SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`, [
-    academicYearId,
+    effectiveYearId,
   ])).rows[0] as { payload: unknown } | undefined;
   if (!row) return {};
   return sanitizeExamConfigs(row.payload);
@@ -1229,10 +1233,11 @@ router.delete('/academic-years/:yearId', requireSystemAdmin(async (req: ReqWithU
 router.get('/', async (req: ReqWithUserId, res: Response) => {
   try {
     await ensureClassTeacherAssignmentsTable(pool);
+    await ensureClassArchiveColumns(pool);
     const academicYearId = req.query.academicYearId as string | undefined;
     const role = await getUserRole(req);
     const params: string[] = [];
-    let sql = 'SELECT id, academic_year_id, grade, name, teacher_id FROM classes';
+    let sql = 'SELECT id, academic_year_id, grade, name, teacher_id, archived_at, archive_label FROM classes';
     const where: string[] = [];
     if (academicYearId) {
       params.push(academicYearId);
@@ -1292,6 +1297,8 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
         name: r.name,
         teacherId: legacyTeacherId,
         teacherIds,
+        archivedAt: (r.archived_at as Date | null)?.toISOString() ?? null,
+        archiveLabel: (r.archive_label as string | null) ?? null,
       };
     });
     res.json({ classes });
@@ -3707,8 +3714,67 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
   }
 });
 
-// ---------- 学年升级（策略 A：一键全校升一级） ----------
-router.post('/academic-years/:sourceYearId/promote', requireAdmin(async (req: ReqWithUserId, res: Response) => {
+// ---------- 升入新学年（系统管理员：创建下一学年 + 升班/毕业归档 + 切换默认学年） ----------
+router.get('/academic-years/promote-preview', requireSystemAdmin(async (req: ReqWithUserId, res: Response) => {
+  try {
+    let sourceYearId = typeof req.query.sourceYearId === 'string' ? req.query.sourceYearId.trim() : '';
+    if (!sourceYearId) {
+      const cur = (await pool.query(
+        `SELECT id FROM academic_years WHERE is_current = TRUE ORDER BY updated_at DESC LIMIT 1`,
+      )).rows[0] as { id: string } | undefined;
+      sourceYearId = cur?.id ?? '';
+    }
+    if (!sourceYearId) {
+      res.status(400).json({ error: 'No source academic year; set current year first' });
+      return;
+    }
+    const preview = await buildAcademicYearPromotionPreview(sourceYearId);
+    res.json({ preview });
+  } catch (e) {
+    console.error('promote-preview academic year', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+router.post('/academic-years/promote-to-next', requireSystemAdmin(async (req: ReqWithUserId, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const { sourceYearId: bodySourceYearId } = req.body || {};
+    let sourceYearId = typeof bodySourceYearId === 'string' ? bodySourceYearId.trim() : '';
+    if (!sourceYearId) {
+      const cur = (await client.query(
+        `SELECT id FROM academic_years WHERE is_current = TRUE ORDER BY updated_at DESC LIMIT 1`,
+      )).rows[0] as { id: string } | undefined;
+      sourceYearId = cur?.id ?? '';
+    }
+    if (!sourceYearId) {
+      res.status(400).json({ error: 'No source academic year; set current year first' });
+      return;
+    }
+    await client.query('BEGIN');
+    const result = await promoteAcademicYearToNext(client, sourceYearId);
+    await client.query('COMMIT');
+    res.json(result);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    const msg = e instanceof Error ? e.message : '';
+    if (msg === 'SOURCE_YEAR_NOT_FOUND') {
+      res.status(404).json({ error: 'Source academic year not found' });
+      return;
+    }
+    if (msg === 'TARGET_YEAR_EXISTS') {
+      res.status(409).json({ error: 'Target academic year already exists' });
+      return;
+    }
+    console.error('promote-to-next academic year', e);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+}));
+
+// 兼容旧接口：指定源/目标学年 ID 的升班（已由 promote-to-next 取代主流程）
+router.post('/academic-years/:sourceYearId/promote', requireSystemAdmin(async (req: ReqWithUserId, res: Response) => {
   const client = await pool.connect();
   try {
     await ensureStudentPortraitTables();
@@ -3828,7 +3894,8 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
       where.push(`t.status IN ('published', 'closed')`);
     }
     if (yearId) {
-      values.push(yearId);
+      const effectiveYearId = await resolveConfigAcademicYearId(yearId);
+      values.push(effectiveYearId);
       where.push(`t.academic_year_id = $${values.length}`);
     }
     if (term) {

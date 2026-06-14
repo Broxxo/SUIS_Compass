@@ -2,6 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import pool from '../config/database.js';
+import { resolveConfigAcademicYearId } from '../lib/canonicalAcademicConfig.js';
 import {
   mergeReportScoreGradeMinScores,
   parseReportGradeDimensionSnapshots,
@@ -1346,10 +1347,11 @@ async function loadAdminScoreMinScores(
   schoolSegmentId: string,
 ): Promise<Record<ReportScoreLetterGrade, number>> {
   const seg = String(schoolSegmentId ?? '').trim();
+  const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
   const r = await pool.query(
     `SELECT min_scores FROM student_report_score_grade_bands
      WHERE academic_year_id = $1 AND term = $2 AND school_segment_id = $3`,
-    [academicYearId, term, seg],
+    [effectiveYearId, term, seg],
   );
   return mergeReportScoreGradeMinScores(r.rows[0]?.min_scores as Partial<Record<string, number>> | undefined);
 }
@@ -1556,13 +1558,14 @@ router.get('/report-dimension-presets/:academicYearId', async (req: AuthedReques
     await ensureReportTemplateTables();
     const academicYearId = String(req.params.academicYearId ?? '').trim();
     if (!academicYearId) return res.status(400).json({ error: 'academicYearId required' });
-    await ensureAllCoursesInYearPresetLibrary(academicYearId);
+    const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
+    await ensureAllCoursesInYearPresetLibrary(effectiveYearId);
     const row = (await pool.query(
       `SELECT academic_year_id, homeroom_comment_mode, payload, updated_at
        FROM student_report_year_dimension_presets
        WHERE academic_year_id = $1
        LIMIT 1`,
-      [academicYearId]
+      [effectiveYearId]
     )).rows[0] as
       | {
         academic_year_id: string;
@@ -1596,12 +1599,13 @@ router.put('/report-dimension-presets/:academicYearId', async (req: AuthedReques
     await ensureReportTemplateTables();
     const academicYearId = String(req.params.academicYearId ?? '').trim();
     if (!academicYearId) return res.status(400).json({ error: 'academicYearId required' });
+    const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
     const homeroomCommentMode = (req.body?.homeroomCommentMode ?? 'optional') as HomeroomCommentMode;
     if (!['disabled', 'optional', 'required'].includes(homeroomCommentMode)) {
       return res.status(400).json({ error: 'homeroomCommentMode must be disabled|optional|required' });
     }
     const existingRow = (
-      await pool.query(`SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`, [academicYearId])
+      await pool.query(`SELECT payload FROM student_report_year_dimension_presets WHERE academic_year_id = $1 LIMIT 1`, [effectiveYearId])
     ).rows[0] as { payload: unknown } | undefined;
     const existing = existingRow
       ? parsePresetPayload(existingRow.payload)
@@ -1657,12 +1661,12 @@ router.put('/report-dimension-presets/:academicYearId', async (req: AuthedReques
            payload = EXCLUDED.payload,
            updated_by = EXCLUDED.updated_by,
            updated_at = CURRENT_TIMESTAMP`,
-      [academicYearId, homeroomCommentMode, payload, req.userId ?? null]
+      [effectiveYearId, homeroomCommentMode, payload, req.userId ?? null]
     );
     return res.json({
       success: true,
       preset: {
-        academicYearId,
+        academicYearId: effectiveYearId,
         homeroomCommentMode,
         subjects: subjectsToStore,
         stageInclusion,
@@ -1705,6 +1709,7 @@ router.put('/report-score-grade-bands', async (req: AuthedRequest, res: Response
     if (!academicYearId || !term) {
       return res.status(400).json({ error: 'academicYearId and term are required' });
     }
+    const effectiveYearId = await resolveConfigAcademicYearId(academicYearId);
     if (!schoolSegmentId) {
       return res.status(400).json({ error: 'schoolSegmentId is required' });
     }
@@ -1731,9 +1736,9 @@ router.put('/report-score-grade-bands', async (req: AuthedRequest, res: Response
        VALUES ($1, $2, $3, $4::jsonb, $5, CURRENT_TIMESTAMP)
        ON CONFLICT (academic_year_id, term, school_segment_id)
        DO UPDATE SET min_scores = EXCLUDED.min_scores, updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP`,
-      [academicYearId, term, schoolSegmentId, JSON.stringify(merged), req.userId ?? null],
+      [effectiveYearId, term, schoolSegmentId, JSON.stringify(merged), req.userId ?? null],
     );
-    return res.json({ success: true, academicYearId, term, schoolSegmentId, minScores: merged });
+    return res.json({ success: true, academicYearId: effectiveYearId, term, schoolSegmentId, minScores: merged });
   } catch (error) {
     console.error('Put report score grade bands error:', error);
     return res.status(500).json({ error: 'Internal server error' });

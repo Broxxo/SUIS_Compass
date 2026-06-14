@@ -1,6 +1,8 @@
 import express, { Request } from 'express';
 import pool from '../config/database.js';
 
+import { getSchoolSettingsHolderUserId } from '../lib/schoolGradeStructure.js';
+
 const router = express.Router();
 
 function userId(req: Request): string {
@@ -53,13 +55,14 @@ router.post('/', async (req, res) => {
     }
 
     const { courseId, grade, semester, units } = req.body;
+    const holderId = (await getSchoolSettingsHolderUserId()) ?? uid;
     const result = await pool.query(
       `INSERT INTO semester_data (user_id, course_id, grade, semester, units, weekly_periods)
        VALUES ($1, $2, $3, $4, $5, NULL)
        ON CONFLICT (course_id, grade, semester)
        DO UPDATE SET units = EXCLUDED.units, user_id = EXCLUDED.user_id, updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
-      [uid, courseId, grade, semester, JSON.stringify(units || [])],
+      [holderId, courseId, grade, semester, JSON.stringify(units || [])],
     );
 
     const row = result.rows[0] as Record<string, unknown>;

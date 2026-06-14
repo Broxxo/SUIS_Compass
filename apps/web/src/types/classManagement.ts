@@ -7,6 +7,71 @@ export interface AcademicYear {
   isCurrent?: boolean;
 }
 
+/** 升学年预览（只读，不写库） */
+export interface AcademicYearPromotionPreview {
+  sourceYearId: string;
+  sourceYearName: string;
+  targetYearName: string;
+  targetStartDate: string | null;
+  targetEndDate: string | null;
+  canExecute: boolean;
+  blockReason: string | null;
+  summary: {
+    classesPromoted: number;
+    classesGraduated: number;
+    studentsPromoted: number;
+    studentsGraduated: number;
+    subjectAssignmentsCopied: number;
+    subjectGroupMembersCopied: number;
+    willSetDefaultYear: boolean;
+  };
+  classes: {
+    promote: Array<{
+      sourceClassId: string;
+      sourceName: string;
+      sourceGrade: number;
+      targetName: string;
+      targetGrade: number;
+      studentCount: number;
+      homeroomTeacherId: string | null;
+      homeroomTeacherName: string | null;
+      subjectAssignmentCount: number;
+    }>;
+    graduate: Array<{
+      classId: string;
+      className: string;
+      grade: number;
+      archiveLabel: string;
+      studentCount: number;
+      homeroomTeacherId: string | null;
+      homeroomTeacherName: string | null;
+      subjectAssignmentCount: number;
+    }>;
+  };
+  staffing: {
+    subjectCopies: Array<{
+      sourceClassName: string;
+      targetClassName: string;
+      subjectName: string;
+      teacherName: string;
+    }>;
+    graduateStaffingReleased: Array<{
+      className: string;
+      archiveLabel: string;
+      homeroomTeacherName: string | null;
+      subjectAssignmentCount: number;
+    }>;
+  };
+  functionalRoles: {
+    gradeHeadPromote: Array<{ fromScopeLabel: string; toScopeLabel: string; teacherName: string }>;
+    gradeHeadRelease: Array<{ scopeLabel: string; teacherName: string }>;
+    subjectGroupHeadCopy: Array<{ scopeLabel: string; teacherName: string }>;
+    subjectGroupMembersCopied: number;
+  };
+  unchanged: string[];
+  warnings: string[];
+}
+
 /** 全校组织架构部门（树形；parentId 为空表示根部门） */
 export interface OrgDepartment {
   id: string;
@@ -27,6 +92,9 @@ export interface ClassItem {
   name: string;
   teacherId?: string | null;
   teacherIds?: string[];
+  /** 毕业班归档时间（升学年后留在源学年） */
+  archivedAt?: string | null;
+  archiveLabel?: string | null;
 }
 
 /** 学生（独立于学年，跨学年存在） */

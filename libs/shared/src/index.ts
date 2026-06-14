@@ -40,6 +40,19 @@ export {
   type TeachingSubjectGroup,
 } from './teachingSubjectGroups.js';
 export {
+  parseAcademicYearSpan,
+  suggestNextAcademicYearName,
+  bumpIsoDateByYears,
+  getGradeCatalogIdForClass,
+  getSegmentGraduationLevels,
+  isGraduatingClass,
+  graduateArchiveLabel,
+  bumpClassNameForPromotion,
+  getGradeIdByLevel,
+  getGradeLevelById,
+  getGradeLabelByLevel,
+} from './academicYearPromotion.js';
+export {
   MIDTERM_PRIMARY_G46_SUBJECTS,
   MIDTERM_PRIMARY_G46_TEST_REPORT_TITLE,
   MIDTERM_PRIMARY_G46_UNIFIED_LEVEL_DESCRIPTIONS,

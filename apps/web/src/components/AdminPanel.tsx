@@ -17,6 +17,7 @@ import {
   courseIdsWithExamGrades,
   inferExamGradeInclusionFromLegacyScope,
   groupCoursesByRoadmapDisplayKey,
+  type TeachingSubjectGroup,
 } from '@repo/shared';
 import type { AdminUser } from '../lib/adminStorage';
 import {
@@ -71,8 +72,8 @@ import {
   getSubjectCategoryText,
   getCategoryCanonicalKey,
   formatCourseBilingualDisplayName,
-  getCourseReportSubjectLabels,
 } from '../lib/utils';
+import { getCourseReportSubjectLabels } from '@repo/shared';
 import {
   allocateLoginNames,
   downloadStaffImportTemplate,
@@ -90,10 +91,17 @@ import {
   type StaffingRosterTeacherRef,
 } from '../lib/staffingRosterExcel';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
-import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term } from '../types/classManagement';
+import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, FunctionalRoleAssignment, FunctionalRoleType, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term } from '../types/classManagement';
 import CurriculumRoadmap from './CurriculumRoadmap';
 import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
+import StaffingSettingsPanel, { type StaffingSubTab } from './admin/StaffingSettingsPanel';
+import GradeManagementPanel from './admin/GradeManagementPanel';
+import TeachingManagementPanel from './admin/TeachingManagementPanel';
+import {
+  buildSubjectDisplayKeyToStaffingKeys,
+  buildSubjectOptionsFromColumnGroups,
+} from '../lib/teachingSubjectGroupUtils';
 import TeacherPortraitCollectionsAdmin from './TeacherPortraitCollectionsAdmin';
 import {
   AcademicYearSelect,
@@ -449,7 +457,7 @@ function randomSixDigitPassword(): string {
 const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   'system-admin': { zh: '系统管理员', en: 'System Admin' },
   admin: { zh: '管理员', en: 'Admin' },
-  teacher: { zh: '教师', en: 'Teacher' },
+  teacher: { zh: '教职工', en: 'Staff' },
   student: { zh: '学生', en: 'Student' },
 };
 
@@ -794,8 +802,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [staffingSavingKeys, setStaffingSavingKeys] = useState<Set<string>>(new Set());
   /** 云端下学科顺序从 DB 拉取后 bump，岗位安排列与课程管理对齐 */
   const [staffingCategoryOrderNonce, setStaffingCategoryOrderNonce] = useState(0);
-  /** 岗位管理内：岗位安排表 vs 周课时统计 */
-  const [staffingSubTab, setStaffingSubTab] = useState<'roster' | 'load'>('roster');
+  /** 岗位管理内：职能岗位 | 课程岗位 | 周课时统计 */
+  const [staffingSubTab, setStaffingSubTab] = useState<StaffingSubTab>('grade-mgmt');
+  const [functionalRoleAssignments, setFunctionalRoleAssignments] = useState<FunctionalRoleAssignment[]>([]);
+  const [functionalSavingKeys, setFunctionalSavingKeys] = useState<Set<string>>(new Set());
+  const [teachingSubjectGroups, setTeachingSubjectGroups] = useState<TeachingSubjectGroup[]>([]);
+  const [subjectGroupMembers, setSubjectGroupMembers] = useState<
+    Array<{ groupId: string; teacherId: string; teacherName: string | null }>
+  >([]);
+  const [savingTeachingGroupId, setSavingTeachingGroupId] = useState<string | null>(null);
   /** 周课时统计·全校表：按主学科筛选、排序 */
   const [staffingLoadGrandFilterPrimary, setStaffingLoadGrandFilterPrimary] = useState<string>('');
   const [staffingExcelImporting, setStaffingExcelImporting] = useState(false);
@@ -1767,19 +1782,31 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       loadCurrentAcademicYearId(),
       USE_CLOUD_STORAGE ? api.getCourses() : Promise.resolve([] as Course[]),
       loadUsers('staff'),
+      USE_CLOUD_STORAGE
+        ? api.getSchoolTeachingSubjectGroups()
+        : Promise.resolve([] as TeachingSubjectGroup[]),
     ])
-      .then(async ([yList, clsList, curYearId, courseList, userList]) => {
+      .then(async ([yList, clsList, curYearId, courseList, userList, subjectGroups]) => {
         setAllYears(yList);
         setAllClasses(clsList);
         setStaffingCourses(courseList);
         setStaffingTeachers(userList.filter((u) => u.role === 'teacher'));
+        setTeachingSubjectGroups(subjectGroups);
         const id = curYearId || yList[0]?.id || '';
         setStaffingYearId(id);
         if (id && USE_CLOUD_STORAGE) {
-          const assignments = await api.getAdminStaffingAssignments(id);
+          const [assignments, functionalRoles, members] = await Promise.all([
+            api.getAdminStaffingAssignments(id),
+            api.getAdminFunctionalRoles(id),
+            api.getAdminTeachingSubjectGroupMembers(id),
+          ]);
           setStaffingAssignments(assignments);
+          setFunctionalRoleAssignments(functionalRoles);
+          setSubjectGroupMembers(members);
         } else {
           setStaffingAssignments([]);
+          setFunctionalRoleAssignments([]);
+          setSubjectGroupMembers([]);
         }
       })
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing data'))
@@ -1790,11 +1817,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     if (adminTab !== 'staffing') return;
     if (!USE_CLOUD_STORAGE || !staffingYearId) {
       setStaffingAssignments([]);
+      setFunctionalRoleAssignments([]);
+      setSubjectGroupMembers([]);
       return;
     }
     setStaffingLoading(true);
-    api.getAdminStaffingAssignments(staffingYearId)
-      .then((assignments) => setStaffingAssignments(assignments))
+    Promise.all([
+      api.getAdminStaffingAssignments(staffingYearId),
+      api.getAdminFunctionalRoles(staffingYearId),
+      api.getAdminTeachingSubjectGroupMembers(staffingYearId),
+    ])
+      .then(([assignments, functionalRoles, members]) => {
+        setStaffingAssignments(assignments);
+        setFunctionalRoleAssignments(functionalRoles);
+        setSubjectGroupMembers(members);
+      })
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing assignments'))
       .finally(() => setStaffingLoading(false));
   }, [adminTab, staffingYearId]);
@@ -4029,6 +4066,73 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
   };
 
+  const upsertFunctionalRole = async (input: {
+    academicYearId: string;
+    roleType: FunctionalRoleType;
+    scopeKey: string;
+    scopeLabel: string;
+    teacherId: string | null;
+  }) => {
+    const key = `${input.roleType}::${input.scopeKey}`;
+    setFunctionalSavingKeys((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    setError(null);
+    try {
+      await api.upsertAdminFunctionalRole({
+        academicYearId: input.academicYearId,
+        roleType: input.roleType,
+        scopeKey: input.scopeKey,
+        scopeLabel: input.scopeLabel,
+        teacherId: input.teacherId,
+      });
+      const refreshed = await api.getAdminFunctionalRoles(input.academicYearId);
+      setFunctionalRoleAssignments(refreshed);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save functional role');
+    } finally {
+      setFunctionalSavingKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
+  const saveTeachingSubjectGroups = async (groups: TeachingSubjectGroup[]) => {
+    if (!USE_CLOUD_STORAGE) return;
+    setError(null);
+    try {
+      const saved = await api.putSchoolTeachingSubjectGroups(groups);
+      setTeachingSubjectGroups(saved);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save teaching subject groups');
+      throw e;
+    }
+  };
+
+  const saveTeachingSubjectGroupMembers = async (groupId: string, teacherIds: string[]) => {
+    if (!USE_CLOUD_STORAGE || !staffingYearId) return;
+    setSavingTeachingGroupId(groupId);
+    setError(null);
+    try {
+      await api.putAdminTeachingSubjectGroupMembers({
+        academicYearId: staffingYearId,
+        groupId,
+        teacherIds,
+      });
+      const members = await api.getAdminTeachingSubjectGroupMembers(staffingYearId);
+      setSubjectGroupMembers(members);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save subject group members');
+      throw e;
+    } finally {
+      setSavingTeachingGroupId(null);
+    }
+  };
+
   const deleteEvaluationTemplate = async (templateId: string) => {
     if (!templateId) return;
     const ok = window.confirm(
@@ -4099,16 +4203,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const staffingGradeConfigSyncKey =
     adminTab === 'staffing' ? JSON.stringify(normalizeGradeConfig(loadGradeConfigSync())) : '';
 
-  /** 按学段分块；无学段配置时退化为单块「全校」；每块首列为班主任岗位 */
+  /** 按学段分块；无学段配置时退化为单块「全校」；仅课程岗位列（班主任在职能岗位） */
   const staffingSegmentBlocks = useMemo(() => {
     const norm = normalizeGradeConfig(loadGradeConfigSync());
     const hasSeg = gradeConfigHasSegments(norm);
     const segmentsOrdered = getRoadmapSegmentsInDisplayOrder(norm);
-    const homeroomCol = {
-      kind: 'homeroom' as const,
-      key: STAFFING_HOMEROOM_SUBJECT_KEY,
-      name: isZh ? '班主任' : 'Homeroom',
-    };
 
     const buildMergedColumnsForGradeIds = (gradeIds: string[]) =>
       staffingCourseColumnGroups.filter((col) =>
@@ -4131,10 +4230,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           key: '__all__' as const,
           title: '',
           classes: staffingClassList,
-          columns: [
-            homeroomCol,
-            ...staffingCourseColumnGroups.map(mapMergedCourseCol),
-          ],
+          columns: staffingCourseColumnGroups.map(mapMergedCourseCol),
         },
       ];
     }
@@ -4146,10 +4242,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         const gid = getGradeCatalogIdForClass(norm, cls.grade, { className: cls.name });
         return seg.gradeIds.includes(gid);
       }),
-      columns: [
-        homeroomCol,
-        ...buildMergedColumnsForGradeIds(seg.gradeIds).map(mapMergedCourseCol),
-      ],
+      columns: buildMergedColumnsForGradeIds(seg.gradeIds).map(mapMergedCourseCol),
     }));
   }, [
     staffingClassList,
@@ -4157,8 +4250,57 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     staffingGradeConfigSyncKey,
     courseLayoutOrderKey,
     staffingCategoryOrderNonce,
-    isZh,
   ]);
+
+  const staffingHomeroomBlocks = useMemo(
+    () =>
+      staffingSegmentBlocks.map((block) => ({
+        key: String(block.key),
+        title: block.title,
+        classes: block.classes,
+      })),
+    [staffingSegmentBlocks],
+  );
+
+  const staffingSubjectOptions = useMemo(
+    () => buildSubjectOptionsFromColumnGroups(staffingCourseColumnGroups),
+    [staffingCourseColumnGroups],
+  );
+
+  const staffingDisplayKeyToSubjectKeys = useMemo(
+    () => buildSubjectDisplayKeyToStaffingKeys(staffingCourseColumnGroups),
+    [staffingCourseColumnGroups],
+  );
+
+  const subjectGroupMembersByGroupId = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const m of subjectGroupMembers) {
+      const list = map.get(m.groupId) ?? [];
+      list.push(m.teacherId);
+      map.set(m.groupId, list);
+    }
+    return map;
+  }, [subjectGroupMembers]);
+
+  const homeroomTeacherByClassId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of staffingAssignments) {
+      if (a.subjectKey === STAFFING_HOMEROOM_SUBJECT_KEY && (a.teacherSlot ?? 0) === 0 && a.teacherId) {
+        map.set(a.classId, a.teacherId);
+      }
+    }
+    return map;
+  }, [staffingAssignments]);
+
+  const functionalTeacherByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of functionalRoleAssignments) {
+      if (a.teacherId) {
+        map.set(`${a.roleType}::${a.scopeKey}`, a.teacherId);
+      }
+    }
+    return map;
+  }, [functionalRoleAssignments]);
 
   const staffingRosterSheetsForExcel = useMemo(() => {
     const norm = normalizeGradeConfig(loadGradeConfigSync());
@@ -4597,7 +4739,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '用户管理' : 'Users'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '基础设置' : 'Foundation'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '课程管理' : 'Courses'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '岗位与课时' : 'Staffing'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '岗位安排' : 'Staffing'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生管理' : 'Students'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生画像' : 'Student portrait'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '教师画像' : 'Teacher portrait'}</th>
@@ -5244,12 +5386,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         )}
 
         {adminTab === 'staffing' && (
-          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
-            <div className="flex flex-row items-center justify-between gap-3">
-              <h2 className="text-base sm:text-lg font-semibold text-slate-800 shrink-0">
-                {isZh ? '岗位与课时' : 'Staffing & weekly loads'}
-              </h2>
-              <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+          <StaffingSettingsPanel
+            isZh={isZh}
+            subTab={staffingSubTab}
+            onSubTabChange={setStaffingSubTab}
+            loading={staffingLoading}
+            yearId={staffingYearId}
+            cloudRequired={!USE_CLOUD_STORAGE}
+            toolbar={
+              <>
                 <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
                 <AcademicYearSelect
                   isZh={isZh}
@@ -5260,7 +5405,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   emptyLabel={isZh ? '暂无学年' : 'No years'}
                   disabled={staffingLoading || allYears.length === 0}
                 />
-                {USE_CLOUD_STORAGE && staffingYearId ? (
+                {USE_CLOUD_STORAGE && staffingYearId && staffingSubTab === 'course' ? (
                   <>
                     <Button
                       type="button"
@@ -5293,50 +5438,74 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     </Button>
                   </>
                 ) : null}
-              </div>
-            </div>
+              </>
+            }
+          >
+                {staffingSubTab === 'grade-mgmt' && (
+                  <GradeManagementPanel
+                    isZh={isZh}
+                    homeroomBlocks={staffingHomeroomBlocks}
+                    teachers={staffingTeachers}
+                    homeroomTeacherByClassId={homeroomTeacherByClassId}
+                    functionalTeacherByKey={functionalTeacherByKey}
+                    homeroomSavingKeys={staffingSavingKeys}
+                    functionalSavingKeys={functionalSavingKeys}
+                    onHomeroomChange={(classId, teacherId) => {
+                      void upsertStaffingAssignment({
+                        academicYearId: staffingYearId,
+                        classId,
+                        subjectKey: STAFFING_HOMEROOM_SUBJECT_KEY,
+                        subjectName: isZh ? '班主任' : 'Homeroom',
+                        teacherId,
+                        teacherSlot: 0,
+                        coTeaching: false,
+                      });
+                    }}
+                    onFunctionalRoleChange={(roleType, scopeKey, scopeLabel, teacherId) => {
+                      void upsertFunctionalRole({
+                        academicYearId: staffingYearId,
+                        roleType,
+                        scopeKey,
+                        scopeLabel,
+                        teacherId,
+                      });
+                    }}
+                  />
+                )}
 
-            {staffingLoading ? (
-              <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
-            ) : !staffingYearId ? (
-              <p className="text-sm text-slate-500">{isZh ? '请先创建学年。' : 'Create an academic year first.'}</p>
-            ) : !USE_CLOUD_STORAGE ? (
-              <p className="text-sm text-slate-500">
-                {isZh ? '岗位安排需要云端模式（VITE_USE_CLOUD_STORAGE=true）才能保存。' : 'Staffing requires cloud mode to persist.'}
-              </p>
-            ) : (
-              <>
-                <div className="flex gap-0 border-b border-slate-200">
-                  <button
-                    type="button"
-                    onClick={() => setStaffingSubTab('roster')}
-                    className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                      staffingSubTab === 'roster'
-                        ? 'border-slate-800 text-slate-900'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    {isZh ? '岗位安排' : 'Staffing roster'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setStaffingSubTab('load')}
-                    className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                      staffingSubTab === 'load'
-                        ? 'border-slate-800 text-slate-900'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    {isZh ? '周课时统计' : 'Weekly load'}
-                  </button>
-                </div>
+                {staffingSubTab === 'teaching-mgmt' && (
+                  <TeachingManagementPanel
+                    isZh={isZh}
+                    groups={teachingSubjectGroups}
+                    subjectOptions={staffingSubjectOptions}
+                    teachers={staffingTeachers}
+                    assignments={staffingAssignments}
+                    classes={staffingClassList}
+                    displayKeyToSubjectKeys={staffingDisplayKeyToSubjectKeys}
+                    functionalTeacherByKey={functionalTeacherByKey}
+                    membersByGroupId={subjectGroupMembersByGroupId}
+                    savingGroupId={savingTeachingGroupId}
+                    functionalSavingKeys={functionalSavingKeys}
+                    onSaveGroupDefinition={saveTeachingSubjectGroups}
+                    onSaveLead={(groupId, groupLabel, teacherId) =>
+                      upsertFunctionalRole({
+                        academicYearId: staffingYearId,
+                        roleType: 'subject-group-head',
+                        scopeKey: groupId,
+                        scopeLabel: groupLabel,
+                        teacherId,
+                      })
+                    }
+                    onSaveMembers={saveTeachingSubjectGroupMembers}
+                  />
+                )}
 
-                {staffingSubTab === 'roster' && (
+                {staffingSubTab === 'course' && (
                   <>
                     {staffingClassList.length === 0 ? (
-                      <p className="text-sm text-slate-500 pt-2">{isZh ? '该学年下暂无班级。' : 'No classes in this year.'}</p>
+                      <p className="text-sm text-slate-500 border-t border-slate-100 pt-4">{isZh ? '该学年下暂无班级。' : 'No classes in this year.'}</p>
                     ) : (
-                      <div className="space-y-8 pt-2">
+                      <div className="space-y-8 border-t border-slate-100 pt-4">
                         {staffingSegmentBlocks.map((block) => {
                           const gradeNorm = normalizeGradeConfig(loadGradeConfigSync());
                           const gradeSections = groupClassesForClassManagement(gradeNorm, block.classes);
@@ -5363,36 +5532,25 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                           {isZh ? '年级' : 'Grade'}
                                         </th>
                                         <th
-                                          className="sticky left-[4.5rem] z-10 bg-slate-50 border-b border-r border-slate-200 px-2 py-2 align-bottom min-w-[4.55rem] text-center"
+                                          className="sticky left-[4.5rem] z-10 bg-slate-50 border-b border-r border-slate-200 px-2 py-2 align-bottom min-w-[5.5rem] text-center"
                                           scope="col"
                                         >
                                           {isZh ? '班级' : 'Class'}
                                         </th>
-                                        {block.columns.map((col) =>
-                                          col.kind === 'homeroom' ? (
-                                            <th
-                                              key={col.key}
-                                              className="border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[5.5rem] max-w-[7rem] text-center"
-                                            >
-                                              <div className="text-[12px] font-semibold text-slate-800 leading-snug line-clamp-2" title={col.name}>
-                                                {col.name}
-                                              </div>
-                                            </th>
-                                          ) : (
+                                        {block.columns.map((col) => (
                                             <th
                                               key={col.key}
                                               className={
                                                 col.courses.some((c) => c.coTeaching)
-                                                  ? 'border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[13rem] max-w-[22rem]'
-                                                  : 'border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[96px] max-w-[144px]'
+                                                  ? 'border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[13rem] max-w-[22rem] text-center'
+                                                  : 'border-b border-slate-200 px-1.5 py-2 font-medium align-bottom min-w-[96px] max-w-[144px] text-center'
                                               }
                                             >
-                                              <div className="text-[12px] font-semibold text-slate-800 leading-snug line-clamp-2" title={col.name}>
+                                              <div className="text-[12px] font-semibold text-slate-800 leading-snug line-clamp-2 text-center" title={col.name}>
                                                 {col.name}
                                               </div>
                                             </th>
-                                          ),
-                                        )}
+                                        ))}
                                       </tr>
                                     </thead>
                                     <tbody>
@@ -5405,6 +5563,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                           : section.classList.map((cls) => ({ cls }));
                                         return sectionRows.map(({ cls }, idxInSection) => {
                                           const curriculumLevel = getCurriculumGradeLevelForClass(gradeNorm, cls);
+                                          const homeroomAssigned = staffingAssignmentsMap.get(
+                                            `${cls.id}::${STAFFING_HOMEROOM_SUBJECT_KEY}::0`,
+                                          );
                                           return (
                                           <tr key={cls.id} className="border-t border-slate-100">
                                             {idxInSection === 0 ? (
@@ -5416,55 +5577,20 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                 {section.parentLabel}
                                               </th>
                                             ) : null}
-                                            <td className="sticky left-[4.5rem] z-[1] bg-white border-r border-slate-100 px-2 py-2 align-top font-medium text-slate-800 text-center">
-                                              {cls.name}
+                                            <td className="sticky left-[4.5rem] z-[1] bg-white border-r border-slate-100 px-2 py-2 align-top text-center min-w-[5.5rem]">
+                                              <div className="font-medium text-slate-800 leading-snug">{cls.name}</div>
+                                              {homeroomAssigned?.teacherName ? (
+                                                <div
+                                                  className="text-[11px] text-slate-500 font-normal mt-0.5 leading-snug"
+                                                  title={isZh ? '班主任' : 'Homeroom teacher'}
+                                                >
+                                                  {homeroomAssigned.teacherName}
+                                                </div>
+                                              ) : (
+                                                <div className="text-[11px] text-slate-400 font-normal mt-0.5">—</div>
+                                              )}
                                             </td>
                                             {block.columns.map((col) => {
-                                              if (col.kind === 'homeroom') {
-                                                const rowKey = `${cls.id}::${col.key}::0`;
-                                                const assigned = staffingAssignmentsMap.get(rowKey);
-                                                const currentTeacherId = assigned?.teacherId ?? '';
-                                                const isSaving = staffingSavingKeys.has(rowKey);
-                                                return (
-                                                  <td
-                                                    key={`${cls.id}::${col.key}`}
-                                                    className="px-1.5 py-2 align-middle border-l border-slate-100 text-center"
-                                                  >
-                                                    <div className="mx-auto flex w-full max-w-[9.5rem] flex-col">
-                                                      <select
-                                                        value={currentTeacherId}
-                                                        onChange={(e) => {
-                                                          void upsertStaffingAssignment({
-                                                            academicYearId: staffingYearId,
-                                                            classId: cls.id,
-                                                            subjectKey: col.key,
-                                                            subjectName: col.name,
-                                                            teacherId: e.target.value || null,
-                                                            teacherSlot: 0,
-                                                            coTeaching: false,
-                                                          });
-                                                        }}
-                                                        disabled={isSaving}
-                                                        title={col.name}
-                                                        className="w-full min-w-0 rounded-md border border-slate-200 bg-white px-1 py-1.5 text-xs sm:text-sm font-medium text-slate-800 text-center cursor-pointer hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 appearance-none bg-no-repeat pr-5 bg-[length:0.65rem] bg-[right_0.35rem_center]"
-                                                        style={{
-                                                          backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
-                                                        }}
-                                                      >
-                                                        <option value="">{isZh ? '—' : '—'}</option>
-                                                        {staffingTeachers.map((teacher) => (
-                                                          <option key={teacher.id} value={teacher.id}>
-                                                            {staffingTeacherDisplayName(teacher, isZh)}
-                                                          </option>
-                                                        ))}
-                                                      </select>
-                                                      {isSaving ? (
-                                                        <div className="text-[10px] text-slate-400 leading-none">{isZh ? '…' : '…'}</div>
-                                                      ) : null}
-                                                    </div>
-                                                  </td>
-                                                );
-                                              }
                                               const activeCourse =
                                                 col.courses.find((c) =>
                                                   courseAppliesToGrade(c, curriculumLevel, gradeNorm),
@@ -5497,7 +5623,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                   </span>
                                                 ) : null;
                                               const selectClassName =
-                                                'min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-1 py-1.5 text-xs sm:text-sm font-medium text-slate-800 text-center cursor-pointer hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 appearance-none bg-no-repeat pr-5 bg-[length:0.65rem] bg-[right_0.35rem_center]';
+                                                'min-w-0 flex-1 rounded-md border border-slate-200 bg-white py-1.5 text-xs sm:text-sm font-medium text-slate-800 text-center cursor-pointer hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 appearance-none bg-no-repeat pl-5 pr-5 bg-[length:0.65rem] bg-[right_0.35rem_center]';
                                               const selectChevronStyle = {
                                                 backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
                                               };
@@ -5618,7 +5744,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 )}
 
                 {staffingSubTab === 'load' && (
-                  <div className="space-y-6 pt-2">
+                  <div className="space-y-6 border-t border-slate-100 pt-4">
                     {staffingCourseColumnGroups.length === 0 ? (
                       <p className="text-sm text-slate-500">
                         {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
@@ -5630,8 +5756,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                         {staffingLoadLineItems.length === 0 && (
                           <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
                             {isZh
-                              ? '当前学年在岗位安排中尚未指定任课教师，下方合计均为 0。切换到「岗位安排」进行排课。'
-                              : 'No staffing assignments for this year yet; totals are zero. Use the Staffing roster tab to assign teachers.'}
+                              ? '当前学年在课程岗位中尚未指定任课教师，下方合计均为 0。切换到「课程岗位」进行排课。'
+                              : 'No course staffing for this year yet; totals are zero. Use the Course staffing tab to assign teachers.'}
                           </p>
                         )}
 
@@ -5686,7 +5812,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                               <thead className="bg-white text-left text-xs text-slate-600 border border-slate-200 rounded-t-md">
                                 <tr>
                                   <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
-                                    {isZh ? '教师' : 'Teacher'}
+                                    {isZh ? '教职工' : 'Staff'}
                                   </th>
                                   <th className="py-2 px-3 font-medium whitespace-nowrap w-[7rem]">
                                     {isZh ? '主学科' : 'Primary'}
@@ -5734,9 +5860,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     )}
                   </div>
                 )}
-              </>
-            )}
-          </section>
+          </StaffingSettingsPanel>
         )}
 
         {adminTab === 'students' && (

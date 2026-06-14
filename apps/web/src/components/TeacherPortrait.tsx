@@ -15,7 +15,6 @@ import { loadGradeConfigSync } from '../lib/storage';
 import { normalizeGradeConfig } from '../lib/gradeConfig';
 import {
   buildClassCompletionRows,
-  buildSubjectDetail,
   buildSubjectDistribution,
   buildTeachersBySegment,
   buildTeacherWorkload,
@@ -33,6 +32,7 @@ import type {
 import TeacherPortraitCollectionFill from './TeacherPortraitCollectionFill';
 import TeacherPortraitPersonalDashboard from './TeacherPortraitPersonalDashboard';
 import TeacherPortraitAdminPersonalDashboard from './TeacherPortraitAdminPersonalDashboard';
+import TeacherPortraitSubjectGroupDashboard from './TeacherPortraitSubjectGroupDashboard';
 import { AcademicYearSelect } from './academicPeriodSelectors';
 import { pickPreferredPublishedTask } from '@repo/shared';
 
@@ -97,14 +97,26 @@ function KpiCard({ label, value, sub, accent }: { label: string; value: string |
   );
 }
 
-export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => void }) {
+export default function TeacherPortrait({
+  onBackToHub,
+  initialTab,
+  initialYearId,
+  initialTerm,
+  initialCollectionTemplateId,
+}: {
+  onBackToHub: () => void;
+  initialTab?: PortraitTab;
+  initialYearId?: string;
+  initialTerm?: Term;
+  initialCollectionTemplateId?: string;
+}) {
   const { user } = useAuth();
   const { language } = useLanguage();
   const isZh = language === 'zh';
   const isAdmin = user?.role === 'system-admin' || user?.role === 'admin';
 
-  const [tab, setTab] = useState<PortraitTab>(isAdmin ? 'school' : 'dashboard');
-  const [fillTerm, setFillTerm] = useState<Term>('Semester 1');
+  const [tab, setTab] = useState<PortraitTab>(initialTab ?? (isAdmin ? 'school' : 'dashboard'));
+  const [fillTerm, setFillTerm] = useState<Term>(initialTerm ?? 'Semester 1');
   const [collectionsVisitSeq, setCollectionsVisitSeq] = useState(0);
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [yearId, setYearId] = useState<string>('');
@@ -117,7 +129,7 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
   const [myAssignments, setMyAssignments] = useState<
     Array<{ classId: string; subjectKey: string; subjectName?: string }>
   >([]);
-  const [selectedSubjectKey, setSelectedSubjectKey] = useState<string>('');
+  const [canViewSubjectDashboard, setCanViewSubjectDashboard] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,7 +147,7 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
       .then(async ([y, current, cls, , enrollments]) => {
         if (cancelled) return;
         setYears(y);
-        const yid = current || y[0]?.id || '';
+        const yid = initialYearId || current || y[0]?.id || '';
         setYearId(yid);
         setClasses(cls);
         const yearClassIds = new Set(cls.filter((c) => c.academicYearId === yid).map((c) => c.id));
@@ -150,6 +162,7 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
           setReportTemplates([]);
           setReportProgress(null);
           setMyAssignments([]);
+          setCanViewSubjectDashboard(false);
           return;
         }
 
@@ -174,9 +187,17 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
           } else {
             setReportProgress(null);
           }
+          const subjectGroups = await api.getPortraitSubjectGroups(yid).catch(() => ({ groups: [], isAdmin: true }));
+          if (!cancelled) setCanViewSubjectDashboard(subjectGroups.groups.length > 0 || isAdmin);
         } else if (user?.role === 'teacher') {
-          const mine = await api.getMySubjectAssignments(yid);
-          if (!cancelled) setMyAssignments(mine);
+          const [mine, subjectGroups] = await Promise.all([
+            api.getMySubjectAssignments(yid),
+            api.getPortraitSubjectGroups(yid).catch(() => ({ groups: [], isAdmin: false })),
+          ]);
+          if (!cancelled) {
+            setMyAssignments(mine);
+            setCanViewSubjectDashboard(subjectGroups.groups.length > 0);
+          }
         }
       })
       .catch((e: unknown) => {
@@ -188,7 +209,7 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
     return () => {
       cancelled = true;
     };
-  }, [isAdmin, user?.role]);
+  }, [isAdmin, user?.role, initialYearId]);
 
   useEffect(() => {
     if (tab === 'collections') {
@@ -271,6 +292,22 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
     };
   }, [yearId, isAdmin, user?.role]);
 
+  useEffect(() => {
+    if (isAdmin || user?.role !== 'teacher' || !USE_CLOUD_STORAGE || !yearId) return;
+    let cancelled = false;
+    api
+      .getPortraitSubjectGroups(yearId)
+      .then((data) => {
+        if (!cancelled) setCanViewSubjectDashboard(data.groups.length > 0);
+      })
+      .catch(() => {
+        if (!cancelled) setCanViewSubjectDashboard(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [yearId, isAdmin, user?.role]);
+
   const yearClasses = useMemo(
     () => classes.filter((c) => c.academicYearId === yearId),
     [classes, yearId],
@@ -290,22 +327,6 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
   );
   const classCompletion = useMemo(() => buildClassCompletionRows(reportProgress), [reportProgress]);
   const staffingTeacherCount = useMemo(() => teachersFromStaffing(assignments).size, [assignments]);
-
-  const subjectKeys = useMemo(
-    () => subjectDistribution.map((s) => s.subjectKey),
-    [subjectDistribution],
-  );
-
-  useEffect(() => {
-    if (!selectedSubjectKey && subjectKeys.length > 0) {
-      setSelectedSubjectKey(subjectKeys[0]);
-    }
-  }, [subjectKeys, selectedSubjectKey]);
-
-  const subjectDetail = useMemo(() => {
-    if (!selectedSubjectKey) return null;
-    return buildSubjectDetail(selectedSubjectKey, assignments, classById);
-  }, [selectedSubjectKey, assignments, classById]);
 
   const gradeConfig = useMemo(() => normalizeGradeConfig(loadGradeConfigSync()), []);
   const teachersBySegment = useMemo(
@@ -332,15 +353,22 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
               <Button variant={tab === 'school' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('school')}>
                 {isZh ? '学校看板' : 'School dashboard'}
               </Button>
-              <Button variant={tab === 'subject' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('subject')}>
-                {isZh ? '学科看板' : 'Subject dashboard'}
-              </Button>
+              {canViewSubjectDashboard ? (
+                <Button variant={tab === 'subject' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('subject')}>
+                  {isZh ? '学科看板' : 'Subject dashboard'}
+                </Button>
+              ) : null}
               <Button variant={tab === 'dashboard' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('dashboard')}>
                 {isZh ? '个人看板' : 'Personal dashboard'}
               </Button>
             </div>
           ) : user?.role === 'teacher' ? (
             <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
+              {canViewSubjectDashboard ? (
+                <Button variant={tab === 'subject' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('subject')}>
+                  {isZh ? '学科看板' : 'Subject dashboard'}
+                </Button>
+              ) : null}
               <Button
                 variant={tab === 'dashboard' ? 'default' : 'ghost'}
                 size="sm"
@@ -363,7 +391,7 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
               </Button>
             </div>
           )}
-          {isAdmin && tab !== 'dashboard' && (
+          {isAdmin && tab !== 'dashboard' && tab !== 'subject' && (
             <AcademicYearSelect
               isZh={isZh}
               years={years}
@@ -521,84 +549,14 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
           </div>
         )}
 
-        {!loading && tab === 'subject' && isAdmin && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap gap-2">
-              {subjectDistribution.map((s) => (
-                <button
-                  key={s.subjectKey}
-                  type="button"
-                  onClick={() => setSelectedSubjectKey(s.subjectKey)}
-                  className={`rounded-full px-3 py-1.5 text-sm border transition-colors ${
-                    selectedSubjectKey === s.subjectKey
-                      ? 'bg-rose-600 text-white border-rose-600'
-                      : 'bg-white text-slate-700 border-slate-300 hover:border-rose-300'
-                  }`}
-                >
-                  {s.subjectName}
-                  <span className="ml-1 opacity-80 text-xs">({s.teacherCount})</span>
-                </button>
-              ))}
-            </div>
-
-            {subjectDetail ? (
-              <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
-                <div className="flex flex-wrap items-end justify-between gap-2">
-                  <div>
-                    <h2 className="text-lg font-semibold text-slate-900">{subjectDetail.subjectName}</h2>
-                    <p className="text-sm text-slate-500 mt-1">
-                      {isZh
-                        ? `覆盖 ${subjectDetail.classCount} 个班 · ${subjectDetail.teachers.length} 位任课教师`
-                        : `${subjectDetail.classCount} classes · ${subjectDetail.teachers.length} teachers`}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="grid sm:grid-cols-3 gap-3">
-                  <KpiCard
-                    label={isZh ? '任课教师' : 'Teachers'}
-                    value={subjectDetail.teachers.length}
-                    accent="from-rose-50 to-white border-rose-100"
-                  />
-                  <KpiCard
-                    label={isZh ? '覆盖班级' : 'Classes'}
-                    value={subjectDetail.classCount}
-                    accent="from-pink-50 to-white border-pink-100"
-                  />
-                  <KpiCard
-                    label={isZh ? '班科岗位' : 'Assignments'}
-                    value={subjectDetail.teachers.reduce((n, t) => n + t.slotCount, 0)}
-                    accent="from-fuchsia-50 to-white border-fuchsia-100"
-                  />
-                </div>
-
-                <div className="overflow-x-auto rounded-lg border border-slate-200">
-                  <table className="w-full min-w-[520px] text-sm border-collapse">
-                    <thead className="bg-slate-50 text-xs text-slate-600">
-                      <tr>
-                        <th className="px-3 py-2 text-left font-medium">{isZh ? '教师' : 'Teacher'}</th>
-                        <th className="px-3 py-2 text-left font-medium">{isZh ? '任课班级' : 'Classes'}</th>
-                        <th className="px-3 py-2 text-right font-medium">{isZh ? '班科数' : 'Slots'}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {subjectDetail.teachers.map((t) => (
-                        <tr key={t.teacherId} className="border-t border-slate-100">
-                          <td className="px-3 py-2 font-medium text-slate-800 whitespace-nowrap">{t.teacherName}</td>
-                          <td className="px-3 py-2 text-slate-600">
-                            {t.classes.map((c) => c.className).join(isZh ? '、' : ', ')}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-slate-700">{t.slotCount}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-slate-500">{isZh ? '请选择学科或先维护岗位安排' : 'Select a subject or add staffing data'}</p>
-            )}
-          </div>
+        {!loading && tab === 'subject' && canViewSubjectDashboard && (
+          <TeacherPortraitSubjectGroupDashboard
+            isZh={isZh}
+            isAdmin={isAdmin}
+            years={years}
+            yearId={yearId}
+            onYearIdChange={setYearId}
+          />
         )}
 
         {!loading && tab === 'dashboard' && isAdmin && (
@@ -635,6 +593,7 @@ export default function TeacherPortrait({ onBackToHub }: { onBackToHub: () => vo
             onYearIdChange={setYearId}
             onTermChange={setFillTerm}
             preferLatestTaskKey={collectionsVisitSeq}
+            initialTemplateId={initialCollectionTemplateId}
           />
         )}
 

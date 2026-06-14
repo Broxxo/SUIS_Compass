@@ -35,6 +35,7 @@ import type { GradeConfig } from '../types';
 import {
   normalizeGradeConfig,
   getGradeCatalogIdForClass,
+  getSchoolSegmentIdForClass,
   getSchoolSegmentIdForStudentGradeLevel,
   getSegmentGradeIds,
   countStudentsBySchoolSegment,
@@ -94,6 +95,8 @@ function mergeStudentAnalysisRowsWithRoster(
 }
 
 const WORKBENCH_ANALYSIS_TEXTAREA_MIN_PX = 72;
+/** 班主任综合评价输入框默认高度（在 72px 基础上增加 15%） */
+const WORKBENCH_HOMEROOM_COMMENT_TEXTAREA_MIN_PX = Math.round(WORKBENCH_ANALYSIS_TEXTAREA_MIN_PX * 1.15);
 /** 个别学生分析：在默认高度上缩减约 30% */
 const WORKBENCH_STUDENT_ANALYSIS_TEXTAREA_MIN_PX = 50;
 const WORKBENCH_STUDENT_ANALYSIS_VISIBLE_ROWS = 5;
@@ -248,12 +251,12 @@ function mergeStudentTermReportWithTemplate(
       dimensions: tplDims.map((tplDim) => {
         const oldDim = existing.dimensions.find((d) => d.dimensionKey === tplDim.dimensionKey);
         return {
-          id: oldDim?.id ?? tplDim.id,
+          id: oldDim?.id ?? tplDim.id ?? tplDim.dimensionKey,
           dimensionKey: tplDim.dimensionKey,
           dimensionLabel: tplDim.dimensionLabel,
           sortOrder: tplDim.sortOrder,
           rating: defaultRating(oldDim?.rating) as TargetLevel,
-          levelDescriptions: tplDim.levelDescriptions,
+          levelDescriptions: tplDim.levelDescriptions ?? {},
         };
       }),
     });
@@ -908,9 +911,15 @@ async function wbPdfAppendChunkedDataTableAsImages(
 export default function StudentPortrait({
   onBackToHub,
   initialTab = 'overview',
+  initialWorkbenchTemplateId,
+  initialReportYearId,
+  initialReportTerm,
 }: {
   onBackToHub: () => void;
   initialTab?: PortraitTab;
+  initialWorkbenchTemplateId?: string;
+  initialReportYearId?: string;
+  initialReportTerm?: Term;
 }) {
   const { user } = useAuth();
   const { language } = useLanguage();
@@ -987,6 +996,19 @@ export default function StudentPortrait({
   const studentReportPdfExportRef = useRef<HTMLDivElement>(null);
   /** 教师手动切换学业报告模板后，不再自动改选（直至离开本 tab） */
   const workbenchManualPickRef = useRef(false);
+  const pendingHubWorkbenchLinkRef = useRef<{
+    templateId: string;
+    yearId: string;
+    term: Term;
+  } | null>(
+    initialWorkbenchTemplateId && initialReportYearId && initialReportTerm
+      ? {
+          templateId: initialWorkbenchTemplateId,
+          yearId: initialReportYearId,
+          term: initialReportTerm,
+        }
+      : null,
+  );
   const [academicReportsVisitSeq, setAcademicReportsVisitSeq] = useState(0);
   const lastWorkbenchAutoPickSeqRef = useRef(0);
   type YearDimensionExamPreset = {
@@ -1003,6 +1025,7 @@ export default function StudentPortrait({
   const [workbenchYearExamPresetLoaded, setWorkbenchYearExamPresetLoaded] = useState(false);
   /** 学生/班级学业报告展示：考试学科年级设置（决定测评成绩是否出现） */
   const [reportYearExamPreset, setReportYearExamPreset] = useState<YearDimensionExamPreset | null>(null);
+  const [reportYearExamPresetLoaded, setReportYearExamPresetLoaded] = useState(false);
   /** 学年学科目标预设中的全学科共用 A–D 说明（用于学业报告开头展示一次） */
   const [academicYearRubric, setAcademicYearRubric] = useState<Record<TargetLevel, string> | null>(null);
   const [gradeConfig, setGradeConfig] = useState<GradeConfig>(() => normalizeGradeConfig(loadGradeConfigSync()));
@@ -1152,6 +1175,11 @@ export default function StudentPortrait({
     [reportTemplate],
   );
   const reportStudentGradeCatalogId = useMemo(() => {
+    if (selectedClassRecord) {
+      return getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
+        className: selectedClassRecord.name,
+      });
+    }
     if (!selectedStudentId || !currentYearId) return null;
     const enr = enrollments.find(
       (e) => e.studentId === selectedStudentId && (!e.academicYearId || e.academicYearId === currentYearId),
@@ -1159,7 +1187,9 @@ export default function StudentPortrait({
     const cls = classes.find((c) => c.id === enr?.classId);
     if (!cls) return null;
     return getGradeCatalogIdForClass(gradeConfig, cls.grade, { className: cls.name });
-  }, [selectedStudentId, currentYearId, enrollments, classes, gradeConfig]);
+  }, [selectedClassRecord, selectedStudentId, currentYearId, enrollments, classes, gradeConfig]);
+  const reportViewPresetYearId =
+    reportTemplate?.academicYearId ?? classReportTemplate?.academicYearId ?? currentYearId ?? null;
   /** 学生/班级报告：测评成绩列是否与教师工作台、后台考试年级配置一致 */
   const subjectShowsAssessmentScore = useCallback(
     (
@@ -1169,9 +1199,15 @@ export default function StudentPortrait({
     ): boolean => {
       const cfg = tpl?.subjects?.find((s) => s.subjectKey === subjectKey);
       if (!cfg || !tpl) return false;
-      const segId = String(tpl.schoolSegmentId ?? '').trim();
+      if (USE_CLOUD_STORAGE && reportViewPresetYearId && !reportYearExamPresetLoaded) return false;
+      const term = tpl.term ?? reportTerm;
+      const segId =
+        String(tpl.schoolSegmentId ?? '').trim()
+        || (selectedClassRecord
+          ? getSchoolSegmentIdForClass(gradeConfig, selectedClassRecord) ?? ''
+          : getSchoolSegmentIdForStudentGradeLevel(gradeConfig, selectedStudent?.currentGrade ?? null) ?? '');
       return effectiveTemplateSubjectEnableScore(
-        tpl.term,
+        term,
         segId,
         subjectKey,
         gradeCatalogId,
@@ -1180,7 +1216,15 @@ export default function StudentPortrait({
         reportYearExamPreset,
       );
     },
-    [reportYearExamPreset, gradeConfig],
+    [
+      reportYearExamPreset,
+      reportYearExamPresetLoaded,
+      reportViewPresetYearId,
+      reportTerm,
+      gradeConfig,
+      selectedClassRecord,
+      selectedStudent?.currentGrade,
+    ],
   );
 
   /** 「我的学生」班级下拉：仅当前学年；教师为岗位班级子集，管理员为当前学年全部班级 */
@@ -1221,7 +1265,16 @@ export default function StudentPortrait({
   useEffect(() => {
     if (tab === 'academic-reports') {
       setAcademicReportsVisitSeq((s) => s + 1);
-      workbenchManualPickRef.current = false;
+      const link = pendingHubWorkbenchLinkRef.current;
+      if (link) {
+        pendingHubWorkbenchLinkRef.current = null;
+        workbenchManualPickRef.current = true;
+        setCurrentYearId(link.yearId);
+        setReportTerm(link.term);
+        setWorkbenchTemplateId(link.templateId);
+      } else {
+        workbenchManualPickRef.current = false;
+      }
     }
   }, [tab]);
 
@@ -1679,14 +1732,14 @@ export default function StudentPortrait({
     };
   }, [canAccessAcademicReportsTab, workbenchTemplateDetail?.academicYearId]);
 
-  const reportViewPresetYearId =
-    reportTemplate?.academicYearId ?? classReportTemplate?.academicYearId ?? null;
   useEffect(() => {
     if (!USE_CLOUD_STORAGE || !reportViewPresetYearId) {
       setReportYearExamPreset(null);
+      setReportYearExamPresetLoaded(!reportViewPresetYearId);
       return;
     }
     let cancelled = false;
+    setReportYearExamPresetLoaded(false);
     api
       .getTeacherReportYearDimensionExamPreset(reportViewPresetYearId)
       .then((p) => {
@@ -1694,6 +1747,9 @@ export default function StudentPortrait({
       })
       .catch(() => {
         if (!cancelled) setReportYearExamPreset(null);
+      })
+      .finally(() => {
+        if (!cancelled) setReportYearExamPresetLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -3359,7 +3415,8 @@ export default function StudentPortrait({
                                     prev.map((r) => (r.studentId === row.studentId ? { ...r, homeroomComment: e.target.value } : r)),
                                   )
                                 }
-                                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm min-h-[72px]"
+                                style={{ minHeight: WORKBENCH_HOMEROOM_COMMENT_TEXTAREA_MIN_PX }}
+                                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
                                 disabled={workbenchReadOnly}
                               />
                             </div>

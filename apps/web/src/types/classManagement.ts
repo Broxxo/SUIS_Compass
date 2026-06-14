@@ -467,3 +467,114 @@ export interface StaffingAssignment {
   teacherSlot?: 0 | 1;
   updatedAt: string | null;
 }
+
+export type FunctionalRoleType = 'grade-head' | 'subject-group-head';
+
+export interface FunctionalRoleAssignment {
+  id: string;
+  academicYearId: string;
+  roleType: FunctionalRoleType;
+  scopeKey: string;
+  scopeLabel: string | null;
+  teacherId: string | null;
+  teacherName: string | null;
+  updatedAt: string | null;
+}
+
+export const ALL_SUBJECTS_PORTRAIT_GROUP_ID = '__all-subjects__';
+
+export type SubjectGroupPortraitSummary = {
+  id: string;
+  nameZh: string;
+  nameEn: string | null;
+  memberCount: number;
+  subjectLabels: string[];
+  isHead: boolean;
+};
+
+export type SubjectGroupMemberClassScore = {
+  classId: string;
+  className: string;
+  grade: number;
+  subjectKey: string;
+  subjectName: string;
+  avgScore: number | null;
+  studentCount: number;
+};
+
+export type SubjectGroupMemberDashboard = {
+  teacherId: string;
+  teacherName: string;
+  assignments: Array<{
+    classId: string;
+    className: string;
+    grade: number;
+    subjectKey: string;
+    subjectName: string;
+  }>;
+  classScores: SubjectGroupMemberClassScore[];
+  diagnosis: ReportTeachingDiagnosis | null;
+  diagnosisHasContent: boolean;
+};
+
+export type GradeAverageRow = {
+  grade: number;
+  gradeLabel: string;
+  subjectKey: string;
+  subjectName: string;
+  avgScore: number | null;
+  studentCount: number;
+  classCount: number;
+};
+
+export type SubjectGroupDataSource = 'report' | 'diagnosis';
+
+export type SubjectScoreLine = {
+  subjectKey: string;
+  subjectName: string;
+  avgScore: number | null;
+  studentCount: number;
+  teacherId: string;
+  teacherName: string;
+  diagnosisHasContent: boolean;
+};
+
+export type GradeRowTeacherCell = {
+  teacherId: string;
+  teacherName: string;
+  diagnosisHasContent: boolean;
+  subjectLabels: string[];
+};
+
+export type GradeRowClassCell = {
+  classId: string;
+  className: string;
+  subjectScores: SubjectScoreLine[];
+};
+
+export type SubjectGroupGradeRow = {
+  grade: number;
+  gradeLabel: string;
+  subjectAverages: SubjectScoreLine[];
+  diagnosisSubmittedCount: number;
+  diagnosisTotalCount: number;
+  classes: GradeRowClassCell[];
+  teachers: GradeRowTeacherCell[];
+};
+
+export type SubjectGroupPortraitDashboard = {
+  group: {
+    id: string;
+    nameZh: string;
+    nameEn: string | null;
+    memberCount: number;
+    subjectLabels: string[];
+  };
+  term: Term;
+  dataSource: SubjectGroupDataSource;
+  sourceId: string | null;
+  sourceTitle: string | null;
+  members: SubjectGroupMemberDashboard[];
+  gradeAverages: GradeAverageRow[];
+  gradeRows: SubjectGroupGradeRow[];
+};

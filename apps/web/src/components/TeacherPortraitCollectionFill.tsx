@@ -26,6 +26,7 @@ export default function TeacherPortraitCollectionFill({
   onYearIdChange,
   onTermChange,
   preferLatestTaskKey = 0,
+  initialTemplateId,
 }: {
   isZh: boolean;
   years: AcademicYear[];
@@ -35,6 +36,8 @@ export default function TeacherPortraitCollectionFill({
   onTermChange: (t: Term) => void;
   /** 每次进入「教师发展」tab 递增，用于自动选中最近待办 */
   preferLatestTaskKey?: number;
+  /** Hub 待办跳转时指定模板 */
+  initialTemplateId?: string;
 }) {
   const [list, setList] = useState<TeacherPortraitCollectionTemplateSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
@@ -47,6 +50,7 @@ export default function TeacherPortraitCollectionFill({
   const [savedHint, setSavedHint] = useState<string | null>(null);
   const lastPreferLatestTaskKeyRef = useRef(preferLatestTaskKey);
   const manualTemplatePickRef = useRef(false);
+  const initialTemplateAppliedRef = useRef(false);
 
   const pickTemplateId = useCallback((open: TeacherPortraitCollectionTemplateSummary[]) => {
     const picked = pickPreferredPublishedTask(
@@ -81,6 +85,15 @@ export default function TeacherPortraitCollectionFill({
         manualTemplatePickRef.current = false;
       }
       setSelectedId((prev) => {
+        if (
+          initialTemplateId &&
+          !initialTemplateAppliedRef.current &&
+          open.some((t) => t.id === initialTemplateId)
+        ) {
+          initialTemplateAppliedRef.current = true;
+          manualTemplatePickRef.current = true;
+          return initialTemplateId;
+        }
         if (!forcePrefer && manualTemplatePickRef.current && prev && open.some((t) => t.id === prev)) {
           return prev;
         }
@@ -95,7 +108,7 @@ export default function TeacherPortraitCollectionFill({
     } finally {
       setLoading(false);
     }
-  }, [yearId, term, preferLatestTaskKey, pickTemplateId]);
+  }, [yearId, term, preferLatestTaskKey, pickTemplateId, initialTemplateId]);
 
   useEffect(() => {
     void loadList();

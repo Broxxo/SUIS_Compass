@@ -123,6 +123,8 @@ END $$;
 CREATE TABLE IF NOT EXISTS school_settings (
   id VARCHAR(32) PRIMARY KEY DEFAULT 'default',
   grade_structure JSONB,
+  teaching_research_groups JSONB,
+  teaching_subject_groups JSONB,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL
 );
@@ -221,6 +223,33 @@ CREATE TABLE IF NOT EXISTS class_subject_teacher_assignments (
 );
 CREATE INDEX IF NOT EXISTS idx_csta_year_class ON class_subject_teacher_assignments(academic_year_id, class_id);
 CREATE INDEX IF NOT EXISTS idx_csta_teacher ON class_subject_teacher_assignments(teacher_id);
+
+-- 职能岗位（年级组长、学科组长等；班主任仍走 class_subject_teacher_assignments）
+CREATE TABLE IF NOT EXISTS functional_role_assignments (
+  id VARCHAR(100) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  role_type VARCHAR(40) NOT NULL CHECK (role_type IN ('grade-head', 'subject-group-head')),
+  scope_key VARCHAR(120) NOT NULL,
+  scope_label VARCHAR(200),
+  teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(academic_year_id, role_type, scope_key)
+);
+CREATE INDEX IF NOT EXISTS idx_functional_role_assignments_year_type
+  ON functional_role_assignments(academic_year_id, role_type);
+
+CREATE TABLE IF NOT EXISTS teaching_subject_group_members (
+  id VARCHAR(100) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  group_id VARCHAR(80) NOT NULL,
+  teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(academic_year_id, group_id, teacher_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tsg_members_year_group
+  ON teaching_subject_group_members(academic_year_id, group_id);
 
 CREATE TABLE IF NOT EXISTS students (
   id VARCHAR(50) PRIMARY KEY,

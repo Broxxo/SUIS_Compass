@@ -44,6 +44,10 @@ import {
   teachingDiagnosisHasContent as portraitDiagnosisHasContent,
   type TeachingDiagnosisPayload as PortraitDiagnosisPayload,
 } from '../lib/teacherPortraitCollections.js';
+import {
+  buildSubjectGroupPortraitDashboard,
+  listPortraitSubjectGroups,
+} from '../lib/subjectGroupPortraitDashboard.js';
 
 type ReqWithUserId = Request & { userId?: string };
 type Term = 'Semester 1' | 'Semester 2';
@@ -1012,6 +1016,26 @@ async function getTemplateById(templateId: string) {
     schoolSegmentId,
     scoreGradeMinScores,
     subjects: Array.from(subjectMap.values()).sort((a, b) => a.sortOrder - b.sortOrder),
+  };
+}
+
+type ReportWorkflowTemplate = NonNullable<Awaited<ReturnType<typeof getTemplateForReportWorkflow>>>;
+
+/** 学生报告详情接口下发的模板元数据（含学年/学期/学段，供前端判断测评成绩是否展示）。 */
+function reportTemplateClientView(
+  template: ReportWorkflowTemplate,
+  subjects: ReportWorkflowTemplate['subjects'],
+) {
+  return {
+    id: template.id,
+    academicYearId: template.academicYearId,
+    term: template.term,
+    status: template.status,
+    title: template.title,
+    schoolSegmentId: template.schoolSegmentId,
+    scoreGradeMinScores: template.scoreGradeMinScores,
+    homeroomCommentMode: template.homeroomCommentMode,
+    subjects,
   };
 }
 
@@ -2998,9 +3022,7 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
           createdAt: null,
           updatedAt: null,
         },
-        template: template
-          ? { id: template.id, status: template.status, title: template.title, homeroomCommentMode: template.homeroomCommentMode, subjects: tplSubjectsEmpty }
-          : null,
+        template: template ? reportTemplateClientView(template, tplSubjectsEmpty) : null,
       });
       return;
     }
@@ -3242,9 +3264,7 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
         createdAt: reportRow.created_at?.toISOString() ?? null,
         updatedAt: reportRow.updated_at?.toISOString() ?? null,
       },
-      template: template
-        ? { id: template.id, status: template.status, title: template.title, homeroomCommentMode: template.homeroomCommentMode, subjects: templateSubjectsOut }
-        : null,
+      template: template ? reportTemplateClientView(template, templateSubjectsOut) : null,
     });
   } catch (e) {
     console.error('get report detail', e);
@@ -3964,6 +3984,68 @@ router.put('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
     });
   } catch (error) {
     console.error('Save teacher portrait collection error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/teacher-portrait/subject-groups', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      res.status(400).json({ error: 'academicYearId is required' });
+      return;
+    }
+    const role = await getUserRole(req);
+    if (!req.userId || role === 'student') {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const isAdmin = role === 'system-admin' || role === 'admin';
+    const groups = await listPortraitSubjectGroups(academicYearId, req.userId, isAdmin);
+    res.json({ groups, isAdmin });
+  } catch (e) {
+    console.error('list portrait subject groups', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/teacher-portrait/subject-groups/:groupId/dashboard', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const groupId = String(req.params.groupId ?? '').trim();
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    const term: Term =
+      req.query.term === 'Semester 2' ? 'Semester 2' : 'Semester 1';
+    const dataSource = req.query.dataSource === 'diagnosis' ? 'diagnosis' : 'report';
+    const sourceId =
+      typeof req.query.sourceId === 'string' && req.query.sourceId.trim()
+        ? req.query.sourceId.trim()
+        : null;
+    if (!groupId || !academicYearId) {
+      res.status(400).json({ error: 'groupId and academicYearId are required' });
+      return;
+    }
+    const role = await getUserRole(req);
+    if (!req.userId || role === 'student') {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const isAdmin = role === 'system-admin' || role === 'admin';
+    const dashboard = await buildSubjectGroupPortraitDashboard({
+      groupId,
+      academicYearId,
+      term,
+      userId: req.userId,
+      isAdmin,
+      dataSource,
+      sourceId,
+    });
+    if (!dashboard) {
+      res.status(403).json({ error: 'Forbidden or group not found' });
+      return;
+    }
+    res.json({ dashboard });
+  } catch (e) {
+    console.error('subject group portrait dashboard', e);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

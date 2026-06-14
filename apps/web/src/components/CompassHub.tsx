@@ -23,8 +23,11 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { restrictToParentElement } from '@dnd-kit/modifiers';
+import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import type { HubPortraitNavigation, HubTeacherTodoItem } from '../types/hubNavigation';
 import AppTopBar from './AppTopBar';
+import HubTeacherTodosTile, { hubTodosFrostedStyle, type HubTodosViewerRole } from './HubTeacherTodosTile';
 import { Button } from './ui/button';
 
 type HubView =
@@ -33,8 +36,7 @@ type HubView =
   | 'student-portrait'
   | 'teacher-portrait'
   | 'academic-reports'
-  | 'class-assistant'
-  | 'class-management';
+  | 'class-assistant';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
 const tileBase =
@@ -43,7 +45,7 @@ const tileBase =
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-400';
 
 type HubTileId =
-  | 'class-management'
+  | 'teacher-todos'
   | 'class-assistant'
   | 'suis-ai'
   | 'curriculum-roadmap'
@@ -54,7 +56,7 @@ type HubTileId =
 
 type HubTile = {
   id: HubTileId;
-  kind: 'app' | 'placeholder';
+  kind: 'app' | 'placeholder' | 'widget';
   view?: HubView;
   spanX: 1 | 2;
   spanY: 1 | 2;
@@ -70,7 +72,11 @@ const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v3';
 function migrateSavedHubIds(savedIds: string[]): string[] {
   const out: string[] = [];
   for (const id of savedIds) {
+    if (id === 'class-management') continue;
     if (!out.includes(id)) out.push(id);
+  }
+  if (!out.includes('teacher-todos')) {
+    out.unshift('teacher-todos');
   }
   return out;
 }
@@ -200,6 +206,8 @@ function SortableTile({
   packed,
   onClick,
   onLongPress,
+  onOpenTodo,
+  todosViewerRole,
 }: {
   tile: HubTile;
   isZh: boolean;
@@ -208,6 +216,8 @@ function SortableTile({
   packed: PackedPos;
   onClick?: () => void;
   onLongPress: (tileId: HubTileId) => void;
+  onOpenTodo: (item: HubTeacherTodoItem) => void;
+  todosViewerRole: HubTodosViewerRole;
 }) {
   const {
     attributes,
@@ -254,11 +264,13 @@ function SortableTile({
   const commonClass =
     (tile.kind === 'placeholder'
       ? 'rounded-xl bg-slate-200/60 border border-slate-200'
-      : tileBase) +
+      : tile.kind === 'widget'
+        ? 'rounded-2xl overflow-hidden'
+        : tileBase) +
     ' select-none';
 
   const jiggleClass =
-    editing && tile.kind === 'app' && tile.id !== activeId ? ' hub-jiggle' : '';
+    editing && tile.kind !== 'placeholder' && tile.id !== activeId ? ' hub-jiggle' : '';
 
   if (tile.kind === 'placeholder') {
     return (
@@ -276,6 +288,31 @@ function SortableTile({
         {...(!editing ? longPress : undefined)}
         aria-hidden
       />
+    );
+  }
+
+  if (tile.kind === 'widget') {
+    return (
+      <div
+        ref={setNodeRef}
+        data-hub-tile
+        className={`${commonClass}${jiggleClass}`}
+        style={{
+          ...baseStyle,
+          ...dndStyle,
+          background: 'transparent',
+        }}
+        {...attributes}
+        {...(editing ? listeners : undefined)}
+        {...(!editing ? longPress : undefined)}
+      >
+        <HubTeacherTodosTile
+          isZh={isZh}
+          editing={editing}
+          viewerRole={todosViewerRole}
+          onOpenTodo={onOpenTodo}
+        />
+      </div>
     );
   }
 
@@ -301,11 +338,18 @@ function SortableTile({
 
 export default function CompassHub({
   onNavigate,
+  onOpenTodo,
 }: {
   onNavigate: (view: HubView) => void;
+  onOpenTodo: (nav: HubPortraitNavigation) => void;
 }) {
+  const { user } = useAuth();
   const { language, setLanguage } = useLanguage();
   const isZh = language === 'zh';
+  const isTeacher = user?.role === 'teacher';
+  const isAdmin = user?.role === 'admin' || user?.role === 'system-admin';
+  const todosViewerRole: HubTodosViewerRole | null = isTeacher ? 'teacher' : isAdmin ? 'admin' : null;
+  const showTodosTile = isTeacher || isAdmin;
   const [editing, setEditing] = useState(false);
   const [activeId, setActiveId] = useState<HubTileId | null>(null);
   const lastOverIdRef = useRef<HubTileId | null>(null);
@@ -331,27 +375,30 @@ export default function CompassHub({
   const columns = isPortrait ? 3 : 5;
   const rows = isPortrait ? 5 : 3;
 
+  const handleOpenTodo = (item: HubTeacherTodoItem) => {
+    if (item.target.type === 'teacher-portrait-collection') {
+      onOpenTodo({
+        view: 'teacher-portrait',
+        academicYearId: item.target.academicYearId,
+        term: item.target.term,
+        templateId: item.target.templateId,
+        portraitTab: isAdmin ? 'school' : 'collections',
+      });
+      return;
+    }
+    onOpenTodo({
+      view: 'academic-reports',
+      academicYearId: item.target.academicYearId,
+      term: item.target.term,
+      templateId: item.target.templateId,
+    });
+  };
+
   const defaultTiles: HubTile[] = useMemo(
     () => [
-      {
-        id: 'class-management',
-        kind: 'app',
-        view: 'class-management',
-        spanX: 1,
-        spanY: 1,
-        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
-        className: 'p-1.5 sm:p-2',
-        style: {
-          background: 'linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%)',
-          boxShadow: '0 6px 16px -2px rgba(71, 85, 105, 0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
-        },
-        renderLabel: (zh) => (
-          <span className="flex flex-col items-center leading-tight">
-            <span>{zh ? '我的' : 'My'}</span>
-            <span>{zh ? '班级' : 'Classes'}</span>
-          </span>
-        ),
-      },
+      ...(showTodosTile
+        ? [{ id: 'teacher-todos' as const, kind: 'widget' as const, spanX: 1 as const, spanY: 1 as const, fontSize: '0.75rem' }]
+        : []),
       { id: 'placeholder-1', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
       { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
 
@@ -466,7 +513,7 @@ export default function CompassHub({
         ),
       },
     ],
-    []
+    [showTodosTile]
   );
 
   const [tiles, setTiles] = useState<HubTile[]>(() => {
@@ -633,6 +680,8 @@ export default function CompassHub({
                       activeId={activeId}
                       packed={packedMap.get(tile.id) ?? { col: 1, row: 1, spanX: tile.spanX, spanY: tile.spanY }}
                       onLongPress={handleLongPress}
+                      onOpenTodo={handleOpenTodo}
+                      todosViewerRole={todosViewerRole ?? 'teacher'}
                       onClick={
                         tile.kind === 'app'
                           ? () => {
@@ -653,19 +702,23 @@ export default function CompassHub({
                     className={
                       activeTile.kind === 'placeholder'
                         ? 'rounded-xl bg-slate-200/70 border border-slate-200 shadow-2xl'
-                        : `${tileBase} shadow-2xl`
+                        : activeTile.kind === 'widget'
+                          ? 'rounded-2xl shadow-2xl p-2 text-xs text-slate-700'
+                          : `${tileBase} shadow-2xl`
                     }
                     style={{
                       width: gridWidth.tile * activeTile.spanX + gridWidth.gap * (activeTile.spanX - 1),
                       height: gridWidth.tile * activeTile.spanY + gridWidth.gap * (activeTile.spanY - 1),
                       fontSize: activeTile.fontSize,
                       ...activeTile.style,
+                      ...(activeTile.kind === 'widget' ? hubTodosFrostedStyle : {}),
                       transform: 'scale(1.05)',
                       touchAction: 'none',
                     }}
                     aria-hidden
                   >
                     {activeTile.kind === 'app' && activeTile.renderLabel ? activeTile.renderLabel(isZh) : null}
+                    {activeTile.kind === 'widget' ? (isZh ? '待办' : 'Tasks') : null}
                   </div>
                 ) : null}
               </DragOverlay>

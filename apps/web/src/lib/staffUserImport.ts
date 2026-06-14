@@ -90,7 +90,7 @@ function parseRoleCell(raw: string): 'admin' | 'teacher' | null {
   const t = raw.trim();
   if (!t) return 'teacher';
   if (/管理|admin/i.test(t) && !/教师|老师/.test(t)) return 'admin';
-  if (/教师|老师|teacher|user/i.test(t)) return 'teacher';
+  if (/教职工|教师|老师|teacher|staff|user/i.test(t)) return 'teacher';
   if (t.toLowerCase() === 'admin') return 'admin';
   if (t.toLowerCase() === 'teacher') return 'teacher';
   return null;
@@ -154,8 +154,8 @@ export function downloadStaffImportTemplate(isZh: boolean): void {
     : [['Name (ZH)', 'Name (EN)', 'Role', 'Department', 'Primary subject', 'Password']];
   const example = isZh
     ? [
-        ['张三', 'San Zhang', '教师', '数学组', '数学', ''],
-        ['', 'Mary Smith', '教师', '外语组', '英语', 'ab1234'],
+        ['张三', 'San Zhang', '教职工', '数学组', '数学', ''],
+        ['', 'Mary Smith', '教职工', '外语组', '英语', 'ab1234'],
       ]
     : [
         ['Zhang San', 'San Zhang', 'Teacher', 'Math', 'Math', ''],
@@ -163,7 +163,7 @@ export function downloadStaffImportTemplate(isZh: boolean): void {
       ];
   const ws = XLSX.utils.aoa_to_sheet([...header, ...example]);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, isZh ? '教师' : 'Staff');
+  XLSX.utils.book_append_sheet(wb, ws, isZh ? '教职工' : 'Staff');
   const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([buf], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -171,7 +171,7 @@ export function downloadStaffImportTemplate(isZh: boolean): void {
   const a = document.createElement('a');
   const url = URL.createObjectURL(blob);
   a.href = url;
-  a.download = isZh ? '教师导入模板.xlsx' : 'staff-import-template.xlsx';
+  a.download = isZh ? '教职工导入模板.xlsx' : 'staff-import-template.xlsx';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -188,8 +188,8 @@ export type StaffUserExportSource = {
 };
 
 function staffExportRoleLabel(role: 'admin' | 'teacher', isZh: boolean): string {
-  if (isZh) return role === 'admin' ? '管理员' : '教师';
-  return role === 'admin' ? 'Admin' : 'Teacher';
+  if (isZh) return role === 'admin' ? '管理员' : '教职工';
+  return role === 'admin' ? 'Admin' : 'Staff';
 }
 
 /**
@@ -216,7 +216,7 @@ export function downloadStaffUsersExport(users: readonly StaffUserExportSource[]
   });
   const ws = XLSX.utils.aoa_to_sheet([...header, ...body]);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, isZh ? '教师' : 'Staff');
+  XLSX.utils.book_append_sheet(wb, ws, isZh ? '教职工' : 'Staff');
   const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([buf], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

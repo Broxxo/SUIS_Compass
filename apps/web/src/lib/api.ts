@@ -1,4 +1,4 @@
-import type { CourseDomainsConfig } from '@repo/shared';
+import type { CourseDomainsConfig, TeachingResearchGroup, TeachingSubjectGroup } from '@repo/shared';
 import { normalizeCourseDomainsConfig } from '@repo/shared';
 import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
@@ -22,6 +22,8 @@ import type {
   TeacherPortraitCollectionProgress,
   TeacherPortraitCollectionSubmission,
   StaffingAssignment,
+  FunctionalRoleAssignment,
+  FunctionalRoleType,
   OrgDepartment,
   ReportTemplateStatus,
   HomeroomCommentMode,
@@ -362,14 +364,75 @@ export const api = {
     return (data?.gradeStructure ?? data?.gradeConfig ?? gradeStructure) as GradeConfig;
   },
 
-  /** @deprecated 使用 getSchoolGradeStructure */
-  async getGradeConfig(): Promise<GradeConfig> {
-    return this.getSchoolGradeStructure();
+  async getSchoolTeachingResearchGroups(): Promise<TeachingResearchGroup[]> {
+    const response = await fetch(apiUrl('/api/settings/teaching-research-groups'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Failed to fetch teaching research groups: ${response.status} - ${errorText}`);
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch teaching research groups');
+    return (data.groups ?? []) as TeachingResearchGroup[];
   },
 
-  /** @deprecated 使用 putSchoolGradeStructure */
-  async putGradeConfig(gradeConfig: GradeConfig): Promise<GradeConfig> {
-    return this.putSchoolGradeStructure(gradeConfig);
+  async getSchoolTeachingSubjectGroups(): Promise<TeachingSubjectGroup[]> {
+    const response = await fetch(apiUrl('/api/settings/teaching-subject-groups'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Failed to fetch teaching subject groups: ${response.status} - ${errorText}`);
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch teaching subject groups');
+    return (data.groups ?? []) as TeachingSubjectGroup[];
+  },
+
+  async putSchoolTeachingSubjectGroups(groups: TeachingSubjectGroup[]): Promise<TeachingSubjectGroup[]> {
+    const response = await fetch(apiUrl('/api/settings/teaching-subject-groups'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ groups }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save teaching subject groups');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to save teaching subject groups');
+    return (data.groups ?? groups) as TeachingSubjectGroup[];
+  },
+
+  async getAdminTeachingSubjectGroupMembers(
+    academicYearId: string,
+  ): Promise<Array<{ groupId: string; teacherId: string; teacherName: string | null }>> {
+    const response = await fetch(
+      apiUrl(
+        `/api/admin/teaching-subject-groups/members?academicYearId=${encodeURIComponent(academicYearId)}`,
+      ),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch subject group members');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch subject group members');
+    return (data.members ?? []) as Array<{ groupId: string; teacherId: string; teacherName: string | null }>;
+  },
+
+  async putAdminTeachingSubjectGroupMembers(input: {
+    academicYearId: string;
+    groupId: string;
+    teacherIds: string[];
+  }): Promise<void> {
+    const response = await fetch(apiUrl('/api/admin/teaching-subject-groups/members'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save subject group members');
+    }
   },
 
   /**
@@ -1422,6 +1485,37 @@ export const api = {
     }
   },
 
+  async getAdminFunctionalRoles(academicYearId: string): Promise<FunctionalRoleAssignment[]> {
+    const response = await fetch(
+      apiUrl(`/api/admin/functional-roles?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch functional roles');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch functional roles');
+    return (data.assignments ?? []) as FunctionalRoleAssignment[];
+  },
+
+  async upsertAdminFunctionalRole(input: {
+    academicYearId: string;
+    roleType: FunctionalRoleType;
+    scopeKey: string;
+    scopeLabel?: string | null;
+    teacherId: string | null;
+  }): Promise<void> {
+    const response = await fetch(apiUrl('/api/admin/functional-roles'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save functional role');
+    }
+  },
+
   async getAdminOrgDepartments(): Promise<OrgDepartment[]> {
     const response = await fetch(apiUrl('/api/admin/org-departments'), { headers: getHeaders() });
     if (!response.ok) {
@@ -1761,6 +1855,51 @@ export const api = {
       const data = await response.json().catch(() => ({}));
       throw new Error((data as { error?: string }).error || 'Failed to save');
     }
+  },
+
+  async getPortraitSubjectGroups(academicYearId: string): Promise<{
+    groups: import('../types/classManagement').SubjectGroupPortraitSummary[];
+    isAdmin: boolean;
+  }> {
+    const response = await fetch(
+      apiUrl(`/api/classes/teacher-portrait/subject-groups?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch subject groups');
+    }
+    return readJsonOrThrow(response, 'Failed to fetch subject groups') as {
+      groups: import('../types/classManagement').SubjectGroupPortraitSummary[];
+      isAdmin: boolean;
+    };
+  },
+
+  async getSubjectGroupPortraitDashboard(input: {
+    groupId: string;
+    academicYearId: string;
+    term: Term;
+    dataSource?: import('../types/classManagement').SubjectGroupDataSource;
+    sourceId?: string | null;
+  }): Promise<import('../types/classManagement').SubjectGroupPortraitDashboard> {
+    const q = new URLSearchParams({
+      academicYearId: input.academicYearId,
+      term: input.term,
+      dataSource: input.dataSource ?? 'report',
+    });
+    if (input.sourceId?.trim()) q.set('sourceId', input.sourceId.trim());
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/teacher-portrait/subject-groups/${encodeURIComponent(input.groupId)}/dashboard?${q.toString()}`,
+      ),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch subject group dashboard');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch subject group dashboard');
+    return (data as { dashboard: import('../types/classManagement').SubjectGroupPortraitDashboard }).dashboard;
   },
 };
 

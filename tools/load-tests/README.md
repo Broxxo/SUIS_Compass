@@ -15,6 +15,12 @@ npm run load:report
 - **仅学业报告**（学科评价 + 班主任评语 + 班科分析），不含教学诊断 KISS
 - 学科/班主任并发 **64**、班科分析 **16**、总耗时 **≤120s**
 
+单学段示例：
+
+```bash
+npm run load:report -- --rounds=2 --templates=小学期末学业报告 --template-ranges=1-6
+```
+
 ## 可选参数
 
 | 参数 | 默认 | 说明 |
@@ -39,31 +45,47 @@ npm run load:report
 
 ## 每轮写入内容
 
-1. **学科报告**：考试科测评成绩覆盖 6 个分数段（10–100）；非考试科仅维度等第
+1. **学科报告**：考试科按各学科配置的**满分**生成得分（得分率覆盖 6 段）；非考试科仅维度等第
 2. **班科分析**：五段式班级整体分析 + **全班 25 人**个别学情/支持计划
 3. **班主任综合评价**：多段文字评语（含学生姓名、亮点、建议）
-4. **教学诊断 KISS**：全体任课/班主任教师 × 期中 + 期末 Keep/Improve/Stop/Start
+4. **教学诊断 KISS**（`--with-portraits`）：全体任课/班主任教师 × 期中 + 期末 Keep/Improve/Stop/Start
 
 分阶段执行：**学科 → 班主任+KISS → 班科分析**，避免并发打满数据库连接池导致 API 假死。
 
 ## 校验
 
-- 各学段考试分数跨度与分数段覆盖
+- 各学段考试分数跨度与得分率段覆盖
 - 班科分析轮次标记 + 全班个别学生分析行数
 - 班主任评语长度与轮次标记
-- 期中/期末教学诊断 KISS 提交覆盖率
+- **三层一致性**：后台学年配置 → 教师压测任务 → 学生 GET 报告 API（`verifyReportTierConsistency.ts`）
 
-结果：`tools/load-tests/artifacts/report-load-*.json`
+结果：`tools/load-tests/artifacts/report-load-*.json`（已 gitignore）
 
 ## 数据准备
 
 ```bash
-npm run seed:g16:test-students
-npm run seed:g789:classes-students
+npm run seed:g16:test-students      # G1–G6 压测学生与班级
+npm run seed:g789:classes-students  # G7–G9 班级与学生
+npm run seed:report:import-dimensions   # 模板维度导入学年预设（可选）
+npm run seed:report:midterm-primary-test  # 小学段期中学业报告测试模板（可选）
 ```
 
-## 模块
+压测前可先做配置审计：
 
-- `scripts/reportLoadContext.ts` — 任务计划（多学段合并）
-- `scripts/reportLoadRunner.ts` — HTTP 执行与校验
-- `scripts/run-report-load-test.ts` — CLI 入口
+```bash
+npm run audit:report-templates
+```
+
+## 脚本一览（保留集）
+
+| 脚本 | npm 命令 | 用途 |
+|------|----------|------|
+| `run-report-load-test.ts` | `load:report` | CLI 入口 |
+| `reportLoadRunner.ts` | — | HTTP 执行、校验 |
+| `reportLoadContext.ts` | — | 任务计划与学年纳入规则 |
+| `verifyReportTierConsistency.ts` | — | 三层一致性复查 |
+| `audit-report-templates.ts` | `audit:report-templates` | 压测前模板/岗位/纳入审计 |
+| `seed-g16-loadtest-students.ts` | `seed:g16:test-students` | 小学压测数据 |
+| `seed-g789-classes-students.ts` | `seed:g789:classes-students` | 初中压测数据 |
+| `import-report-dimensions-to-preset.ts` | `seed:report:import-dimensions` | 维度导入预设 |
+| `seed-midterm-primary-test-report.ts` | `seed:report:midterm-primary-test` | 期中测试模板种子 |

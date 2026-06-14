@@ -32,6 +32,15 @@ import {
   applyHomeroomFromStaffingToClassTables,
   backfillHomeroomStaffingForAcademicYear,
 } from '../lib/homeroomStaffingSync.js';
+import {
+  listFunctionalRoleAssignments,
+  upsertFunctionalRoleAssignment,
+  type FunctionalRoleType,
+} from '../lib/functionalRoleAssignments.js';
+import {
+  listTeachingSubjectGroupMembers,
+  replaceTeachingSubjectGroupMembers,
+} from '../lib/teachingSubjectGroupMembers.js';
 import { createRunOnce } from '../lib/runOnce.js';
 import {
   ensureTeacherPortraitCollectionTables,
@@ -2615,6 +2624,97 @@ router.delete('/staffing/assignments/:academicYearId/:classId/:subjectKey', asyn
   }
 });
 
+router.get('/functional-roles', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const assignments = await listFunctionalRoleAssignments(academicYearId);
+    return res.json({ assignments });
+  } catch (error) {
+    console.error('List functional roles error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/functional-roles', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const roleType = String(req.body?.roleType ?? '').trim() as FunctionalRoleType;
+    const scopeKey = String(req.body?.scopeKey ?? '').trim();
+    const scopeLabel =
+      typeof req.body?.scopeLabel === 'string' ? req.body.scopeLabel.trim() || null : null;
+    const teacherIdRaw = req.body?.teacherId;
+    const teacherId =
+      teacherIdRaw == null || String(teacherIdRaw).trim() === '' ? null : String(teacherIdRaw).trim();
+    if (!academicYearId || !roleType || !scopeKey) {
+      return res.status(400).json({ error: 'academicYearId, roleType, scopeKey are required' });
+    }
+    if (roleType !== 'grade-head' && roleType !== 'subject-group-head') {
+      return res.status(400).json({ error: 'roleType must be grade-head or subject-group-head' });
+    }
+    if (teacherId) {
+      const okTeacher = await assertTeacherUser(teacherId);
+      if (!okTeacher) {
+        return res.status(400).json({ error: 'teacherId must reference an active teacher account' });
+      }
+    }
+    await upsertFunctionalRoleAssignment({
+      academicYearId,
+      roleType,
+      scopeKey,
+      scopeLabel,
+      teacherId,
+      updatedBy: req.userId ?? null,
+    });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Upsert functional role error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/teaching-subject-groups/members', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId =
+      typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const members = await listTeachingSubjectGroupMembers(academicYearId);
+    return res.json({ members });
+  } catch (error) {
+    console.error('List teaching subject group members error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/teaching-subject-groups/members', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const groupId = String(req.body?.groupId ?? '').trim();
+    const teacherIdsRaw = req.body?.teacherIds;
+    if (!academicYearId || !groupId) {
+      return res.status(400).json({ error: 'academicYearId and groupId are required' });
+    }
+    const teacherIds = Array.isArray(teacherIdsRaw)
+      ? teacherIdsRaw.map((id) => String(id ?? '').trim()).filter(Boolean)
+      : [];
+    for (const teacherId of teacherIds) {
+      const okTeacher = await assertTeacherUser(teacherId);
+      if (!okTeacher) {
+        return res.status(400).json({ error: 'teacherIds must reference active teacher accounts' });
+      }
+    }
+    await replaceTeachingSubjectGroupMembers({ academicYearId, groupId, teacherIds });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Replace teaching subject group members error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.delete('/report-templates/:templateId', async (req: AuthedRequest, res: Response) => {
   const client = await pool.connect();
   try {
@@ -2882,14 +2982,14 @@ router.post('/teacher-portrait/templates/:templateId/publish', async (req: Authe
       `UPDATE teacher_portrait_collection_templates
        SET status = 'published', published_at = CURRENT_TIMESTAMP,
            updated_by = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2 AND status = 'draft'
+       WHERE id = $2 AND status IN ('draft', 'closed')
        RETURNING id`,
       [req.userId ?? null, templateId],
     );
     if ((result.rowCount ?? 0) === 0) {
       const exists = await getTeacherPortraitTemplateById(templateId);
       if (!exists) return res.status(404).json({ error: 'Template not found' });
-      return res.status(409).json({ error: 'Template is not in draft status' });
+      return res.status(409).json({ error: 'Template is already published' });
     }
     const template = await getTeacherPortraitTemplateById(templateId);
     res.json({ success: true, template });

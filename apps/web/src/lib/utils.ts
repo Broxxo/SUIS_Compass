@@ -62,19 +62,6 @@ function parseCourseCategoryZhEn(course: Course): { zh: string; en: string } {
 }
 
 /**
- * 评价报告模板等：学科中英文名（不拼接完整合成课程名里的版本段）。
- * 无独立英文时 `subjectNameEn` 与中文相同，便于 API / 校验；展示请用 {@link formatCourseBilingualDisplayName}。
- */
-export function getCourseReportSubjectLabels(course: Course): { subjectNameZh: string; subjectNameEn: string } {
-  const { zh, en } = parseCourseCategoryZhEn(course);
-  const fb = firstSegmentOfCompoundCourseName(course.name);
-  const nameTrim = (course.name || '').trim();
-  const subjectNameZh = zh || fb || nameTrim;
-  const subjectNameEn = en || subjectNameZh;
-  return { subjectNameZh, subjectNameEn };
-}
-
-/**
  * 课程下拉等：双语「中文 英文」，例如「语文 Chinese」；仅有中文时只显示中文。
  */
 export function formatCourseBilingualDisplayName(course: Course): string {

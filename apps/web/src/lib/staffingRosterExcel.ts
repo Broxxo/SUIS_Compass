@@ -17,7 +17,8 @@ import {
   getSchoolGradeLabelForClass,
   normalizeGradeConfig,
 } from './gradeConfig';
-import { getCourseReportSubjectLabels, getSubjectCategoryText } from './utils';
+import { getCourseReportSubjectLabels } from '@repo/shared';
+import { getSubjectCategoryText } from './utils';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from './courseGradeUtils';
 
 export type StaffingRosterColumn =
@@ -88,11 +89,6 @@ export function parseTeacherNameFromRosterCellSegment(raw: string): string {
   return t;
 }
 
-/** @deprecated alias */
-function parseTeacherNameFromExportCell(raw: string): string {
-  return parseTeacherNameFromRosterCellSegment(raw);
-}
-
 function teacherDisplayName(t: StaffingRosterTeacherRef, isZh: boolean): string {
   const zh = (t.nameZh ?? '').trim();
   const en = (t.nameEn ?? '').trim();
@@ -105,7 +101,7 @@ export function resolveStaffingTeacherId(
   teachers: readonly StaffingRosterTeacherRef[],
   _isZh: boolean,
 ): string | null {
-  const raw = parseTeacherNameFromExportCell(cellText);
+  const raw = parseTeacherNameFromRosterCellSegment(cellText);
   if (!raw || raw === '—' || raw === '-' || raw === '–') return null;
   const lower = raw.toLowerCase();
   for (const t of teachers) {

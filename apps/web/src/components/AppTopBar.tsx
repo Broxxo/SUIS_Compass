@@ -25,7 +25,7 @@ interface AppTopBarProps {
 const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   'system-admin': { zh: '系统管理员', en: 'System Admin' },
   admin: { zh: '管理员', en: 'Admin' },
-  teacher: { zh: '教师', en: 'Teacher' },
+  teacher: { zh: '教职工', en: 'Staff' },
   student: { zh: '学生', en: 'Student' },
 };
 

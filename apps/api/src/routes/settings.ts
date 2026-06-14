@@ -1,6 +1,14 @@
 import express, { Request } from 'express';
 import pool from '../config/database.js';
 import { loadSchoolGradeStructure, saveSchoolGradeStructure } from '../lib/schoolGradeStructure.js';
+import {
+  loadSchoolTeachingResearchGroups,
+  saveSchoolTeachingResearchGroups,
+} from '../lib/schoolTeachingResearchGroups.js';
+import {
+  loadSchoolTeachingSubjectGroups,
+  saveSchoolTeachingSubjectGroups,
+} from '../lib/schoolTeachingSubjectGroups.js';
 import { normalizeCourseDomainsConfig } from '@repo/shared';
 
 const router = express.Router();
@@ -262,6 +270,72 @@ router.put('/grade-config', async (req, res) => {
     res.json({ success: true, gradeConfig: normalized });
   } catch (error) {
     console.error('Save grade config error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** 全校教研共同体列表（职能岗位·学科组长） */
+router.get('/teaching-research-groups', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const groups = await loadSchoolTeachingResearchGroups();
+    res.json({ groups });
+  } catch (error) {
+    console.error('Get teaching research groups error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/teaching-research-groups', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+
+    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
+    const role = roleResult.rows[0]?.role as string | undefined;
+    if (role !== 'system-admin' && role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
+    }
+
+    const raw = (req.body as { groups?: unknown })?.groups;
+    const groups = await saveSchoolTeachingResearchGroups(raw, uid);
+    res.json({ success: true, groups });
+  } catch (error) {
+    console.error('Save teaching research groups error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** 全校学科组定义（教学管理） */
+router.get('/teaching-subject-groups', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const groups = await loadSchoolTeachingSubjectGroups();
+    res.json({ groups });
+  } catch (error) {
+    console.error('Get teaching subject groups error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/teaching-subject-groups', async (req, res) => {
+  try {
+    const uid = userId(req);
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+
+    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
+    const role = roleResult.rows[0]?.role as string | undefined;
+    if (role !== 'system-admin' && role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
+    }
+
+    const raw = (req.body as { groups?: unknown })?.groups;
+    const groups = await saveSchoolTeachingSubjectGroups(raw, uid);
+    res.json({ success: true, groups });
+  } catch (error) {
+    console.error('Save teaching subject groups error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

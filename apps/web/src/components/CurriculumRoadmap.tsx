@@ -21,10 +21,11 @@ import ConceptSettingsDialog from './ConceptSettingsDialog';
 import AppTopBar from './AppTopBar';
 import { Settings, Plus, Bot, Download, Upload, SlidersHorizontal, BarChart2, Globe } from 'lucide-react';
 import { Button } from './ui/button';
+import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from './ui/segment-tab-button';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useAIContext } from '../contexts/AIContext';
-import { getSubjectCategoryText, getCategoryCanonicalKey, cn } from '../lib/utils';
+import { getSubjectCategoryText, getCategoryCanonicalKey } from '../lib/utils';
 import type { TranslationKey } from '../locales/translations';
 import { DEFAULT_GRADE_CONFIG, SEMESTERS } from '../lib/constants';
 import {
@@ -63,79 +64,86 @@ import {
 // 课程列宽度与列间距（自适应上下限）
 const COLUMN_WIDTH_DEFAULT_PX = 56;
 const COLUMN_GAP_DEFAULT_PX = 24;
-const COLUMN_WIDTH_MAX_PX = 78;
 const COLUMN_WIDTH_MIN_PX = 42;
-const COLUMN_GAP_MAX_PX = 24;
 const COLUMN_GAP_MIN_PX = 6;
 /** 左侧年级标签列宽（复合名如 G9国际）；右对齐贴近课程区，右侧留少量空隙 */
 const GRADE_LABEL_COL_WIDTH_PX = 84;
+/** Hub 整体视图：年级列更窄，把横向空间留给课程网格 */
+const GRADE_LABEL_COL_WIDTH_HUB_PX = 68;
 /** 同一课程领域内各课程列之间的间距（紧密排列） */
 const ROADMAP_DOMAIN_INNER_GAP_PX = 2;
 
-function clamp(n: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, n));
+function roadmapDomainInnerGapTotal(segments: readonly RoadmapLayoutSegment[]): number {
+  return segments.reduce(
+    (sum, s) => (s.kind === 'domain' ? sum + Math.max(0, s.columns.length - 1) * ROADMAP_DOMAIN_INNER_GAP_PX : sum),
+    0,
+  );
 }
 
-function computeAdaptiveColumns(
-  columnCount: number,
+function roadmapLayoutTotalWidth(
+  segments: readonly RoadmapLayoutSegment[],
+  columnWidthPx: number,
+  segmentGapPx: number,
+): number {
+  let total = roadmapDomainInnerGapTotal(segments);
+  segments.forEach((seg, idx) => {
+    if (idx > 0) total += segmentGapPx;
+    if (seg.kind === 'domain') {
+      total += seg.columns.length * columnWidthPx;
+    } else {
+      total += columnWidthPx;
+    }
+  });
+  return total;
+}
+
+/** 按当前可用宽度分配列宽与段间距，使整体视图无需横向滚动且铺满容器 */
+function computeAdaptiveRoadmapLayout(
+  segments: readonly RoadmapLayoutSegment[],
   availableWidthPx: number,
-): { columnWidthPx: number; columnGapPx: number } {
+): { columnWidthPx: number; segmentGapPx: number } {
+  const columnCount = countRoadmapLayoutColumns(segments);
+  const segmentGapCount = Math.max(0, segments.length - 1);
+
   if (columnCount <= 0 || !Number.isFinite(availableWidthPx) || availableWidthPx <= 0) {
-    return { columnWidthPx: COLUMN_WIDTH_DEFAULT_PX, columnGapPx: COLUMN_GAP_DEFAULT_PX };
+    return { columnWidthPx: COLUMN_WIDTH_DEFAULT_PX, segmentGapPx: COLUMN_GAP_DEFAULT_PX };
   }
 
-  if (columnCount === 1) {
-    return {
-      columnWidthPx: clamp(availableWidthPx, COLUMN_WIDTH_MIN_PX, COLUMN_WIDTH_MAX_PX),
-      columnGapPx: 0,
-    };
+  const innerGapTotal = roadmapDomainInnerGapTotal(segments);
+  const flexBudget = availableWidthPx - innerGapTotal;
+  if (flexBudget <= 0) {
+    return { columnWidthPx: COLUMN_WIDTH_MIN_PX, segmentGapPx: 0 };
   }
 
-  const preferredTotal = columnCount * COLUMN_WIDTH_MAX_PX + (columnCount - 1) * COLUMN_GAP_MAX_PX;
-  if (preferredTotal <= availableWidthPx) {
-    return { columnWidthPx: COLUMN_WIDTH_MAX_PX, columnGapPx: COLUMN_GAP_MAX_PX };
+  let segmentGapPx = segmentGapCount > 0 ? COLUMN_GAP_MIN_PX : 0;
+  let columnWidthPx = (flexBudget - segmentGapCount * segmentGapPx) / columnCount;
+
+  if (columnWidthPx < COLUMN_WIDTH_MIN_PX) {
+    segmentGapPx = 0;
+    columnWidthPx = flexBudget / columnCount;
   }
 
-  const scale = availableWidthPx / preferredTotal;
-  let width = clamp(COLUMN_WIDTH_MAX_PX * scale, COLUMN_WIDTH_MIN_PX, COLUMN_WIDTH_MAX_PX);
-  let gap = clamp(COLUMN_GAP_MAX_PX * scale, COLUMN_GAP_MIN_PX, COLUMN_GAP_MAX_PX);
-  let total = columnCount * width + (columnCount - 1) * gap;
+  const ABSOLUTE_MIN_COL_PX = 22;
+  columnWidthPx = Math.max(ABSOLUTE_MIN_COL_PX, columnWidthPx);
 
-  if (total > availableWidthPx) {
-    let overflow = total - availableWidthPx;
-    const reducibleGap = (gap - COLUMN_GAP_MIN_PX) * (columnCount - 1);
-    if (reducibleGap > 0) {
-      const reduce = Math.min(overflow, reducibleGap);
-      gap -= reduce / (columnCount - 1);
-      overflow -= reduce;
-    }
-    if (overflow > 0) {
-      const reducibleWidth = (width - COLUMN_WIDTH_MIN_PX) * columnCount;
-      if (reducibleWidth > 0) {
-        const reduce = Math.min(overflow, reducibleWidth);
-        width -= reduce / columnCount;
-      }
-    }
+  let total = roadmapLayoutTotalWidth(segments, columnWidthPx, segmentGapPx);
+  if (total > availableWidthPx + 0.5) {
+    const scale = availableWidthPx / total;
+    columnWidthPx *= scale;
+    segmentGapPx *= scale;
+  } else if (total < availableWidthPx - 0.5) {
+    columnWidthPx += (availableWidthPx - total) / columnCount;
   }
 
   return {
-    columnWidthPx: Math.round(width * 100) / 100,
-    columnGapPx: Math.round(gap * 100) / 100,
+    columnWidthPx: Math.round(columnWidthPx * 100) / 100,
+    segmentGapPx: Math.round(segmentGapPx * 100) / 100,
   };
 }
 
 type ViewMode = 'overview' | 'unit' | 'concept';
 
-/** 选中/未选中统一圆角；分组外壳无内边距，避免选中蓝块小于灰底造成「套娃」缝 */
-const roadmapTabChip =
-  'flex items-center justify-center rounded-lg px-2 sm:px-2.5 py-1.5 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap shrink-0';
-const roadmapTabActive = 'bg-primary text-primary-foreground shadow-sm';
-const roadmapTabInactive = 'text-slate-600 hover:bg-white/80 hover:text-slate-900';
-const roadmapTabGroupShell =
-  'inline-flex flex-wrap items-stretch justify-center gap-0.5 rounded-lg bg-slate-100/95 p-0 ring-1 ring-slate-200/90 shadow-sm overflow-hidden';
-
 function RoadmapViewTabStrip({
-  language,
   gradeConfig,
   viewMode,
   setViewMode,
@@ -143,7 +151,6 @@ function RoadmapViewTabStrip({
   setOverviewStageTabId,
   t,
 }: {
-  language: 'zh' | 'en';
   gradeConfig: GradeConfig;
   viewMode: ViewMode;
   setViewMode: (m: ViewMode) => void;
@@ -151,73 +158,49 @@ function RoadmapViewTabStrip({
   setOverviewStageTabId: (id: string) => void;
   t: (key: TranslationKey) => string;
 }) {
-  const isZh = language === 'zh';
   const segments = getRoadmapSegmentsInDisplayOrder(gradeConfig);
-  const overviewWholeSchool =
-    viewMode === 'overview' && overviewStageTabId === ROADMAP_OVERVIEW_TAB_ALL;
 
   return (
-    <nav
-      className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-w-full"
-      aria-label={t('view.roadmapNavAria')}
-    >
-      {/* 第一类：低年段学段在前，整体视图在最后 */}
-      <div
-        className={roadmapTabGroupShell}
-        title={isZh ? '全校与各学段课程网格' : 'School-wide and per-stage curriculum grid'}
-      >
+    <SegmentTabStrip className="justify-center max-w-full" aria-label={t('view.roadmapNavAria')}>
+      <SegmentTabGroup>
         {segments.map((seg) => {
           const active = viewMode === 'overview' && overviewStageTabId === seg.id;
           return (
-            <button
+            <SegmentTabButton
               key={seg.id}
-              type="button"
-              className={cn(roadmapTabChip, active ? roadmapTabActive : roadmapTabInactive)}
+              grouped
+              active={active}
               onClick={() => {
                 setViewMode('overview');
                 setOverviewStageTabId(seg.id);
               }}
             >
               {seg.label}
-            </button>
+            </SegmentTabButton>
           );
         })}
-        <button
-          type="button"
-          className={cn(roadmapTabChip, overviewWholeSchool ? roadmapTabActive : roadmapTabInactive)}
+        <SegmentTabButton
+          grouped
+          active={viewMode === 'overview' && overviewStageTabId === ROADMAP_OVERVIEW_TAB_ALL}
           onClick={() => {
             setViewMode('overview');
             setOverviewStageTabId(ROADMAP_OVERVIEW_TAB_ALL);
           }}
         >
           {t('view.overview')}
-        </button>
-      </div>
-
-      <span className="inline-block w-px h-6 shrink-0 self-center bg-slate-300/95" aria-hidden />
-
-      <div className={roadmapTabGroupShell} title={isZh ? '按学期编辑单元' : 'Edit units by semester'}>
-        <button
-          type="button"
-          className={cn(roadmapTabChip, viewMode === 'unit' ? roadmapTabActive : roadmapTabInactive)}
-          onClick={() => setViewMode('unit')}
-        >
+        </SegmentTabButton>
+      </SegmentTabGroup>
+      <SegmentTabGroup>
+        <SegmentTabButton grouped active={viewMode === 'unit'} onClick={() => setViewMode('unit')}>
           {t('view.unit')}
-        </button>
-      </div>
-
-      <span className="inline-block w-px h-6 shrink-0 self-center bg-slate-300/95" aria-hidden />
-
-      <div className={roadmapTabGroupShell} title={isZh ? '跨学科概念关联' : 'Cross-subject concept map'}>
-        <button
-          type="button"
-          className={cn(roadmapTabChip, viewMode === 'concept' ? roadmapTabActive : roadmapTabInactive)}
-          onClick={() => setViewMode('concept')}
-        >
+        </SegmentTabButton>
+      </SegmentTabGroup>
+      <SegmentTabGroup>
+        <SegmentTabButton grouped active={viewMode === 'concept'} onClick={() => setViewMode('concept')}>
           {t('view.concept')}
-        </button>
-      </div>
-    </nav>
+        </SegmentTabButton>
+      </SegmentTabGroup>
+    </SegmentTabStrip>
   );
 }
 
@@ -245,7 +228,6 @@ export default function CurriculumRoadmap({
 }: CurriculumRoadmapProps) {
   const { language, t } = useLanguage();
   const { user } = useAuth();
-  const isHubSurface = surface === 'hub';
   const isAdminSurface = surface === 'admin-course-management';
   const showRoadmapTopBar = !embedded;
   const canEditFramework = surface === 'admin-course-management' && user?.role === 'system-admin';
@@ -367,7 +349,7 @@ export default function CurriculumRoadmap({
     const ro = new ResizeObserver(() => update());
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [viewMode, overviewStageTabId, courses.length, showTotalPeriods]);
 
   // 定期刷新学期数据（用于更新格子颜色）
   useEffect(() => {
@@ -747,6 +729,93 @@ export default function CurriculumRoadmap({
     ? (language === 'zh' ? '课程管理' : 'Course management')
     : (language === 'zh' ? '课程河流' : 'Curriculum Roadmap');
 
+  const showRoadmapTabToolbar = showRoadmapTopBar || (embedded && isAdminSurface);
+
+  const adminToolbarActions = canEditFramework ? (
+    <>
+      <Button
+        variant="outline"
+        size="icon"
+        onClick={() => setIsAddCourseDialogOpen(true)}
+        className="h-9 w-9 rounded-lg flex-shrink-0"
+        title={t('course.add')}
+      >
+        <Plus className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="outline"
+        size="icon"
+        onClick={() => setIsSettingsDialogOpen(true)}
+        className="h-9 w-9 rounded-lg flex-shrink-0"
+        title={language === 'zh' ? '课程设置' : 'Course settings'}
+      >
+        <SlidersHorizontal className="h-4 w-4" />
+      </Button>
+      <div className="relative">
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => setIsSettingsMenuOpen((open) => !open)}
+          className="h-9 w-9 rounded-lg flex-shrink-0"
+          title={t('settings.title')}
+        >
+          <Settings className="h-4 w-4" />
+        </Button>
+        {isSettingsMenuOpen && (
+          <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-200 bg-white shadow-lg py-1 text-sm text-slate-800 z-30">
+            <button
+              type="button"
+              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
+              onClick={() => {
+                setIsSettingsMenuOpen(false);
+                setShowTotalPeriods((v) => !v);
+              }}
+            >
+              <BarChart2 className="h-4 w-4" />
+              <span>{totalPeriodsToggleTitle}</span>
+            </button>
+            <button
+              type="button"
+              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
+              onClick={() => {
+                setIsSettingsMenuOpen(false);
+                setIsConceptSettingsDialogOpen(true);
+              }}
+            >
+              <Globe className="h-4 w-4" />
+              <span>{language === 'zh' ? '概念设置' : 'Concept settings'}</span>
+            </button>
+            <button
+              type="button"
+              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
+              title={t('settings.exportCourseDataTitle')}
+              onClick={() => {
+                setIsSettingsMenuOpen(false);
+                handleExportCourseData();
+              }}
+            >
+              <Download className="h-4 w-4" />
+              <span>{t('settings.exportCourseData')}</span>
+            </button>
+            <button
+              type="button"
+              disabled={isImportingCourseData}
+              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              title={t('settings.importCourseDataTitle')}
+              onClick={() => {
+                setIsSettingsMenuOpen(false);
+                handleImportCourseDataClick();
+              }}
+            >
+              <Upload className="h-4 w-4" />
+              <span>{t('settings.importCourseData')}</span>
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  ) : null;
+
   return (
     <div
       className={
@@ -760,239 +829,59 @@ export default function CurriculumRoadmap({
           title={topBarTitle}
           showBack={!!onBackToHub}
           onBack={onBackToHub}
-          centerContent={
-            <RoadmapViewTabStrip
-              language={language}
-              gradeConfig={gradeConfig}
-              viewMode={viewMode}
-              setViewMode={setViewMode}
-              overviewStageTabId={overviewStageTabId}
-              setOverviewStageTabId={setOverviewStageTabId}
-              t={t}
-            />
-          }
           rightChildren={
-            <>
-              {!isHubSurface && canEditFramework && (
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setIsAddCourseDialogOpen(true)}
-                  className="h-9 w-9 rounded-lg flex-shrink-0"
-                  title={t('course.add')}
-                >
-                  <Plus className="h-4 w-4" />
-                </Button>
-              )}
-              {!isHubSurface && canEditFramework && (
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setIsSettingsDialogOpen(true)}
-                  className="h-9 w-9 rounded-lg flex-shrink-0"
-                  title={language === 'zh' ? '课程设置' : 'Course settings'}
-                >
-                  <SlidersHorizontal className="h-4 w-4" />
-                </Button>
-              )}
-              {!isHubSurface && canEditFramework && (
-                <div className="relative">
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => setIsSettingsMenuOpen((open) => !open)}
-                    className="h-9 w-9 rounded-lg flex-shrink-0"
-                    title={t('settings.title')}
-                  >
-                    <Settings className="h-4 w-4" />
-                  </Button>
-
-                  {isSettingsMenuOpen && (
-                    <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-200 bg-white shadow-lg py-1 text-sm text-slate-800 z-30">
-                      <button
-                        type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                        onClick={() => {
-                          setIsSettingsMenuOpen(false);
-                          setShowTotalPeriods((v) => !v);
-                        }}
-                      >
-                        <BarChart2 className="h-4 w-4" />
-                        <span>{totalPeriodsToggleTitle}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                        onClick={() => {
-                          setIsSettingsMenuOpen(false);
-                          setIsConceptSettingsDialogOpen(true);
-                        }}
-                      >
-                        <Globe className="h-4 w-4" />
-                        <span>{language === 'zh' ? '概念设置' : 'Concept settings'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                        title={t('settings.exportCourseDataTitle')}
-                        onClick={() => {
-                          setIsSettingsMenuOpen(false);
-                          handleExportCourseData();
-                        }}
-                      >
-                        <Download className="h-4 w-4" />
-                        <span>{t('settings.exportCourseData')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isImportingCourseData}
-                        className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
-                        title={t('settings.importCourseDataTitle')}
-                        onClick={() => {
-                          setIsSettingsMenuOpen(false);
-                          handleImportCourseDataClick();
-                        }}
-                      >
-                        <Upload className="h-4 w-4" />
-                        <span>{t('settings.importCourseData')}</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-              {onToggleAI && (
-                <Button
-                  variant={isAIOpen ? 'default' : 'outline'}
-                  size="icon"
-                  onClick={onToggleAI}
-                  className="h-9 w-9 rounded-lg flex-shrink-0"
-                  title="AI"
-                >
-                  <Bot className="h-4 w-4" />
-                </Button>
-              )}
-            </>
+            onToggleAI ? (
+              <Button
+                variant={isAIOpen ? 'default' : 'outline'}
+                size="icon"
+                onClick={onToggleAI}
+                className="h-9 w-9 rounded-lg flex-shrink-0"
+                title="AI"
+              >
+                <Bot className="h-4 w-4" />
+              </Button>
+            ) : undefined
           }
         />
       )}
 
-      {embedded && isAdminSurface && (
-        <div className="relative flex-shrink-0 border-b border-slate-200 bg-white">
-          <div className="relative flex min-h-[42px] w-full items-center justify-end px-2 sm:px-3 py-1.5">
-            {/* 相对整条顶栏水平居中，与右侧图标列宽度解耦 */}
-            <div
-              className={`pointer-events-none absolute left-1/2 top-1/2 z-0 w-full -translate-x-1/2 -translate-y-1/2 ${
-                canEditFramework ? 'max-w-[calc(100%-10.5rem)] sm:max-w-[calc(100%-11rem)]' : 'max-w-[calc(100%-1rem)]'
-              }`}
-            >
-              <div className="pointer-events-auto flex justify-center overflow-x-auto no-scrollbar">
-                <RoadmapViewTabStrip
-                  language={language}
-                  gradeConfig={gradeConfig}
-                  viewMode={viewMode}
-                  setViewMode={setViewMode}
-                  overviewStageTabId={overviewStageTabId}
-                  setOverviewStageTabId={setOverviewStageTabId}
-                  t={t}
-                />
-              </div>
+      {showRoadmapTabToolbar && (
+        <div
+          className={`flex-shrink-0 border-b border-slate-200 bg-white px-3 sm:px-4 py-2 ${
+            showRoadmapTopBar ? 'mt-14' : ''
+          }`}
+        >
+          <div className="relative flex min-h-[40px] items-center justify-center">
+            <div className="min-w-0 max-w-full overflow-x-auto no-scrollbar">
+              <RoadmapViewTabStrip
+                gradeConfig={gradeConfig}
+                viewMode={viewMode}
+                setViewMode={setViewMode}
+                overviewStageTabId={overviewStageTabId}
+                setOverviewStageTabId={setOverviewStageTabId}
+                t={t}
+              />
             </div>
-
-            {canEditFramework && (
-            <div className="relative z-10 ml-auto flex items-center gap-1.5 sm:gap-2 shrink-0 rounded-lg bg-white/90 py-0.5 pl-1 backdrop-blur-sm">
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setIsAddCourseDialogOpen(true)}
-                className="h-9 w-9 rounded-lg flex-shrink-0"
-                title={t('course.add')}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setIsSettingsDialogOpen(true)}
-                className="h-9 w-9 rounded-lg flex-shrink-0"
-                title={language === 'zh' ? '课程设置' : 'Course settings'}
-              >
-                <SlidersHorizontal className="h-4 w-4" />
-              </Button>
-              <div className="relative">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setIsSettingsMenuOpen((open) => !open)}
-                  className="h-9 w-9 rounded-lg flex-shrink-0"
-                  title={t('settings.title')}
-                >
-                  <Settings className="h-4 w-4" />
-                </Button>
-                {isSettingsMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-200 bg-white shadow-lg py-1 text-sm text-slate-800 z-30">
-                    <button
-                      type="button"
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                      onClick={() => {
-                        setIsSettingsMenuOpen(false);
-                        setShowTotalPeriods((v) => !v);
-                      }}
-                    >
-                      <BarChart2 className="h-4 w-4" />
-                      <span>{totalPeriodsToggleTitle}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                      onClick={() => {
-                        setIsSettingsMenuOpen(false);
-                        setIsConceptSettingsDialogOpen(true);
-                      }}
-                    >
-                      <Globe className="h-4 w-4" />
-                      <span>{language === 'zh' ? '概念设置' : 'Concept settings'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
-                      title={t('settings.exportCourseDataTitle')}
-                      onClick={() => {
-                        setIsSettingsMenuOpen(false);
-                        handleExportCourseData();
-                      }}
-                    >
-                      <Download className="h-4 w-4" />
-                      <span>{t('settings.exportCourseData')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isImportingCourseData}
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
-                      title={t('settings.importCourseDataTitle')}
-                      onClick={() => {
-                        setIsSettingsMenuOpen(false);
-                        handleImportCourseDataClick();
-                      }}
-                    >
-                      <Upload className="h-4 w-4" />
-                      <span>{t('settings.importCourseData')}</span>
-                    </button>
-                  </div>
-                )}
+            {isAdminSurface ? (
+              <div className="absolute right-0 top-1/2 flex -translate-y-1/2 flex-wrap items-center justify-end gap-1.5 sm:gap-2">
+                {adminToolbarActions}
               </div>
-            </div>
-            )}
+            ) : null}
           </div>
         </div>
       )}
 
-      {/* 主内容区：留出顶部栏高度 */}
-      <div className={`relative flex-1 min-h-0 ${showRoadmapTopBar ? 'pt-14' : 'pt-2'} overflow-hidden`}>
+      {/* 主内容区 */}
+      <div className={`relative flex-1 min-h-0 overflow-hidden ${showRoadmapTopBar ? '' : 'pt-2'}`}>
 
-      {/* Course Area：行宽=内容宽(上限95vw)，大屏居中且总课时贴框体；窄屏行=100%中间滚动 */}
+      {/* Course Area：Hub 贴左铺满可用宽度；后台课程管理保持略宽边距 */}
       {viewMode === 'overview' ? (
-        <div className={`h-full w-full pt-2 px-2 sm:px-4 ${isAdminSurface ? 'pb-3' : 'pb-14'} flex flex-col min-w-0`}>
-          <div className="flex-1 min-h-0 min-w-0 flex justify-center items-stretch">
+        <div
+          className={`h-full w-full pt-2 flex flex-col min-w-0 ${
+            isAdminSurface ? 'px-2 sm:px-4 pb-3' : 'pl-1 pr-2 sm:pl-2 sm:pr-3 pb-14'
+          }`}
+        >
+          <div className="flex-1 min-h-0 min-w-0 flex items-stretch">
           {(() => {
             const visibleGradeLevels = getRoadmapVisibleGradeLevels(gradeConfig, overviewStageTabId);
             const tabFilteredCourses = courses.filter((c) =>
@@ -1004,23 +893,18 @@ export default function CurriculumRoadmap({
               courseDomains,
               language,
             );
-            const columnCount = countRoadmapLayoutColumns(layoutSegments);
-            const labelColWidth = GRADE_LABEL_COL_WIDTH_PX;
+            const labelColWidth = isAdminSurface ? GRADE_LABEL_COL_WIDTH_PX : GRADE_LABEL_COL_WIDTH_HUB_PX;
             const periodsColWidth = showTotalPeriods ? 52 : 0;
-            const isDesktop = overviewRowWidthPx >= 640;
             const availableCourseWidth = Math.max(0, overviewRowWidthPx - labelColWidth - periodsColWidth);
-            const adaptive = isDesktop
-              ? computeAdaptiveColumns(columnCount, availableCourseWidth)
-              : { columnWidthPx: COLUMN_WIDTH_DEFAULT_PX, columnGapPx: COLUMN_GAP_DEFAULT_PX };
+            const adaptive =
+              overviewRowWidthPx > 0
+                ? computeAdaptiveRoadmapLayout(layoutSegments, availableCourseWidth)
+                : { columnWidthPx: COLUMN_WIDTH_DEFAULT_PX, segmentGapPx: COLUMN_GAP_DEFAULT_PX };
             const segmentWidth = (seg: RoadmapLayoutSegment) =>
               seg.kind === 'domain'
                 ? seg.columns.length * adaptive.columnWidthPx +
                   Math.max(0, seg.columns.length - 1) * ROADMAP_DOMAIN_INNER_GAP_PX
                 : adaptive.columnWidthPx;
-            const totalColumnsWidth = layoutSegments.reduce((sum, seg, i) => {
-              const gap = i > 0 ? adaptive.columnGapPx : 0;
-              return sum + gap + segmentWidth(seg);
-            }, 0);
             const denseGrades = visibleGradeLevels.length > 9;
             const headerHeight = denseGrades ? 24 : 28;
             const hasDomainSegments = layoutSegments.some((s) => s.kind === 'domain');
@@ -1029,10 +913,10 @@ export default function CurriculumRoadmap({
             return (
               <div
                 ref={overviewRowRef}
-                className={`${isAdminSurface ? 'h-full w-full max-w-none' : 'h-full w-[94vw] sm:w-full max-w-[1200px]'} mx-auto min-w-0 flex flex-row gap-0 items-stretch overflow-hidden flex-shrink-0`}
+                className="h-full w-full max-w-none min-w-0 flex flex-row gap-0 items-stretch overflow-hidden flex-shrink-0"
               >
                   {/* 左侧年级 */}
-                  <div className="flex flex-col flex-shrink-0 pl-1 pr-1" style={{ width: labelColWidth }}>
+                  <div className="flex flex-col flex-shrink-0 pr-1" style={{ width: labelColWidth }}>
                     <div style={{ height: totalHeaderHeight, flexShrink: 0 }} />
                     <div className="flex-1 flex flex-col min-h-0">
                       {visibleGradeLevels.map((grade) => (
@@ -1046,16 +930,13 @@ export default function CurriculumRoadmap({
                       ))}
                     </div>
                   </div>
-                  {/* 中间课程网格：外层仅负责横向滚动，真正的“框体”由内部容器绘制边框，标签在框体上方 */}
-                  <div className="curriculum-roadmap-scroll-x flex-1 min-w-0 h-full overflow-x-auto overflow-y-hidden pr-0 min-h-0">
-                    <div
-                      className="flex flex-col flex-shrink-0 h-full"
-                      style={{ width: `max(100%, ${totalColumnsWidth}px)` }}
-                    >
+                  {/* 中间课程网格：列宽自适应铺满，无需横向滚动 */}
+                  <div className="flex-1 min-w-0 h-full overflow-x-hidden overflow-y-hidden pr-0 min-h-0">
+                    <div className="flex flex-col w-full h-full min-w-0">
                   {/* Course Names at Top - 领域簇 + 学科列（顺序在设置中调整） */}
                   <div className="flex flex-shrink-0 items-end" style={{ height: totalHeaderHeight }}>
                     {layoutSegments.map((segment, segIdx) => {
-                      const marginLeft = segIdx > 0 ? adaptive.columnGapPx : 0;
+                      const marginLeft = segIdx > 0 ? adaptive.segmentGapPx : 0;
                       if (segment.kind === 'domain') {
                         const domainLabel = getCourseDomainLabel(segment.label, language);
                         return (
@@ -1117,7 +998,7 @@ export default function CurriculumRoadmap({
                     </div>
                     <div className="h-full flex overflow-y-hidden items-stretch">
                       {layoutSegments.map((segment, segIdx) => {
-                        const marginLeft = segIdx > 0 ? adaptive.columnGapPx : 0;
+                        const marginLeft = segIdx > 0 ? adaptive.segmentGapPx : 0;
                         if (segment.kind === 'domain') {
                           return (
                             <div

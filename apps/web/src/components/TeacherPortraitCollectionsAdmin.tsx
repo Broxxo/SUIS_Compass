@@ -405,7 +405,7 @@ export default function TeacherPortraitCollectionsAdmin({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busy || tpl.status !== 'draft'}
+                        disabled={busy || tpl.status === 'published'}
                         onClick={() =>
                           void runAction(async () => {
                             await api.publishAdminTeacherPortraitTemplate(tpl.id);

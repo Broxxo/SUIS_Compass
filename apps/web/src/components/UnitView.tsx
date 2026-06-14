@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react';
 import { Course, GradeConfig, Semester, Unit } from '../types';
 import AddUnitDialog from './AddUnitDialog';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -129,8 +129,37 @@ export default function UnitView({
   };
 
   const TOTAL_WEEKS = 20;
-  const WEEK_WIDTH = 116; 
   const COURSE_LABEL_WIDTH = 105;
+  const MIN_WEEK_WIDTH_PX = 28;
+  const [gridWidthPx, setGridWidthPx] = useState(0);
+  const weekWidthRef = useRef(116);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const w = el.clientWidth;
+      setGridWidthPx(w);
+      const weekArea = Math.max(0, w - COURSE_LABEL_WIDTH);
+      weekWidthRef.current = Math.max(MIN_WEEK_WIDTH_PX, weekArea / TOTAL_WEEKS);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const weekWidthPx = useMemo(
+    () =>
+      gridWidthPx > 0
+        ? Math.max(MIN_WEEK_WIDTH_PX, (gridWidthPx - COURSE_LABEL_WIDTH) / TOTAL_WEEKS)
+        : 116,
+    [gridWidthPx],
+  );
+
+  useEffect(() => {
+    weekWidthRef.current = weekWidthPx;
+  }, [weekWidthPx]);
 
   // Drag and Resize Handlers
   const handlePointerDown = (e: React.PointerEvent, unit: Unit, courseId: string, type: 'drag' | 'resize-left' | 'resize-right') => {
@@ -161,7 +190,7 @@ export default function UnitView({
       wasDraggingRef.current = true;
     }
 
-    const deltaWeeks = Math.round(deltaX / WEEK_WIDTH);
+    const deltaWeeks = Math.round(deltaX / weekWidthRef.current);
 
     if (deltaWeeks === 0 && dragState.type === 'drag') return;
 
@@ -272,8 +301,8 @@ export default function UnitView({
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-3 pt-2">
         <div className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           {/* Timeline and Grid Area */}
-          <div className="flex-1 overflow-auto relative" ref={scrollContainerRef}>
-            <div style={{ minWidth: `${COURSE_LABEL_WIDTH + TOTAL_WEEKS * WEEK_WIDTH}px` }}>
+          <div className="flex-1 overflow-y-auto overflow-x-hidden relative" ref={scrollContainerRef}>
+            <div className="w-full">
               {/* Week Header - Sticky at top */}
               <div className="flex sticky top-0 z-20 bg-gray-100/95 backdrop-blur-sm border-b border-gray-200">
                 <div 
@@ -286,7 +315,7 @@ export default function UnitView({
                   {Array.from({ length: TOTAL_WEEKS }, (_, i) => (
                     <div
                       key={i}
-                      style={{ width: `${WEEK_WIDTH}px` }}
+                      style={{ width: `${weekWidthPx}px` }}
                       className="flex-shrink-0 h-8 flex items-center justify-center border-r border-gray-200 text-xs font-bold text-gray-500"
                     >
                       Week {i + 1}
@@ -337,14 +366,14 @@ export default function UnitView({
                         {/* Units Row */}
                         <div 
                           className="flex-1 relative bg-white group-hover:bg-blue-50/10 transition-colors" 
-                          style={{ width: `${TOTAL_WEEKS * WEEK_WIDTH}px` }}
+                          style={{ width: `${TOTAL_WEEKS * weekWidthPx}px` }}
                         >
                           {/* Vertical Grid Lines */}
                           <div className="absolute inset-0 flex pointer-events-none">
                             {Array.from({ length: TOTAL_WEEKS }, (_, i) => (
                               <div
                                 key={i}
-                                style={{ width: `${WEEK_WIDTH}px` }}
+                                style={{ width: `${weekWidthPx}px` }}
                                 className="h-full border-r border-gray-100/30 flex-shrink-0"
                               />
                             ))}
@@ -371,8 +400,8 @@ export default function UnitView({
                             }
 
                             const duration = displayEnd - displayStart;
-                            const leftOffset = displayStart * WEEK_WIDTH;
-                            const width = duration * WEEK_WIDTH;
+                            const leftOffset = displayStart * weekWidthPx;
+                            const width = duration * weekWidthPx;
                             const isUnitHovered = hoveredUnitId === unit.id;
 
                             return (

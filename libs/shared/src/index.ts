@@ -30,6 +30,16 @@ export {
   staffingHomeroomSubjectName,
 } from './staffingHomeroom.js';
 export {
+  DEFAULT_TEACHING_RESEARCH_GROUPS,
+  normalizeTeachingResearchGroups,
+  type TeachingResearchGroup,
+} from './teachingResearchGroups.js';
+export {
+  createTeachingSubjectGroupId,
+  normalizeTeachingSubjectGroups,
+  type TeachingSubjectGroup,
+} from './teachingSubjectGroups.js';
+export {
   MIDTERM_PRIMARY_G46_SUBJECTS,
   MIDTERM_PRIMARY_G46_TEST_REPORT_TITLE,
   MIDTERM_PRIMARY_G46_UNIFIED_LEVEL_DESCRIPTIONS,

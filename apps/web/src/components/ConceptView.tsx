@@ -936,8 +936,8 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
 
       {/* Main Content Area：与单元视图同一套外边距；单层圆角边框画布 */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-3 pt-2">
-        <div className="relative flex min-h-0 flex-1 justify-center overflow-hidden">
-          <div className="relative h-full w-full max-w-[95%] min-h-0">
+        <div className="relative flex min-h-0 flex-1 overflow-hidden">
+          <div className="relative h-full w-full min-h-0">
             <div
               ref={containerRef}
               className="relative h-full w-full overflow-hidden rounded-xl border border-gray-200 bg-gradient-to-b from-gray-50 to-gray-100 shadow-sm"

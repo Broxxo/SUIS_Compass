@@ -7,10 +7,10 @@ import { LanguageProvider } from './contexts/LanguageContext'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { AIContextProvider, useAIContext } from './contexts/AIContext'
 import AdminPanel from './components/AdminPanel'
-import ClassManagement from './components/ClassManagement'
 import ClassAssistant from './components/ClassAssistant'
 import StudentPortrait from './components/StudentPortrait'
 import TeacherPortrait from './components/TeacherPortrait'
+import type { HubPortraitNavigation } from './types/hubNavigation'
 
 type HubView =
   | 'suis-ai'
@@ -19,7 +19,6 @@ type HubView =
   | 'teacher-portrait'
   | 'academic-reports'
   | 'class-assistant'
-  | 'class-management'
   | 'admin';
 
 const MOBILE_BREAKPOINT = 768;
@@ -28,6 +27,7 @@ function AppContent() {
   const { isAuthenticated, user } = useAuth();
   const { setScreenId, setContextPayload } = useAIContext();
   const [view, setView] = useState<HubView | 'hub'>('hub');
+  const [portraitNav, setPortraitNav] = useState<HubPortraitNavigation | null>(null);
   const [aiOverlayOpen, setAiOverlayOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT);
 
@@ -138,16 +138,6 @@ function AppContent() {
     return <AdminPanel onBackToHub={() => setView('hub')} />;
   }
 
-  if (view === 'class-management') {
-    return (
-      <ClassManagement
-        onBackToHub={() => setView('hub')}
-        pageTitle={undefined}
-        hideYearGear
-      />
-    );
-  }
-
   if (view === 'class-assistant') {
     return <ClassAssistant onBackToHub={() => setView('hub')} />
   }
@@ -157,11 +147,35 @@ function AppContent() {
   }
 
   if (view === 'teacher-portrait') {
-    return <TeacherPortrait onBackToHub={() => setView('hub')} />;
+    const nav = portraitNav?.view === 'teacher-portrait' ? portraitNav : null;
+    return (
+      <TeacherPortrait
+        onBackToHub={() => {
+          setPortraitNav(null);
+          setView('hub');
+        }}
+        initialTab={nav?.portraitTab ?? (nav ? 'collections' : undefined)}
+        initialYearId={nav?.academicYearId}
+        initialTerm={nav?.term}
+        initialCollectionTemplateId={nav?.templateId}
+      />
+    );
   }
 
   if (view === 'academic-reports') {
-    return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="academic-reports" />;
+    const nav = portraitNav?.view === 'academic-reports' ? portraitNav : null;
+    return (
+      <StudentPortrait
+        onBackToHub={() => {
+          setPortraitNav(null);
+          setView('hub');
+        }}
+        initialTab="academic-reports"
+        initialWorkbenchTemplateId={nav?.templateId}
+        initialReportYearId={nav?.academicYearId}
+        initialReportTerm={nav?.term}
+      />
+    );
   }
 
   // 其他入口暂未实现
@@ -183,12 +197,17 @@ function AppContent() {
   return (
     <CompassHub
       onNavigate={(v) => {
+        setPortraitNav(null);
         if (v === 'suis-ai') {
           // 从主 HUB 进入 SUIS AI 时，重置上下文为“无特定应用”
           setScreenId(null);
           setContextPayload({});
         }
         setView(v);
+      }}
+      onOpenTodo={(nav) => {
+        setPortraitNav(nav);
+        setView(nav.view);
       }}
     />
   );

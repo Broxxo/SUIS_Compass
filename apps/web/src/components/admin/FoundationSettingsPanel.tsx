@@ -1,10 +1,10 @@
-import type { ReactNode } from 'react';
 import OrgStructurePanel from './OrgStructurePanel';
 import GradeStructureEditor from '../GradeStructureEditor';
 import ClassManagement from '../ClassManagement';
 import { Button } from '../ui/button';
 import { Plus } from 'lucide-react';
 import type { AcademicYear } from '../../types/classManagement';
+import { SegmentTabButton } from '../ui/segment-tab-button';
 
 export type FoundationSubTab = 'years' | 'structure' | 'classes' | 'organization';
 
@@ -31,28 +31,6 @@ type FoundationSettingsPanelProps = {
   onStructureSaved?: () => void;
 };
 
-function SubTabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
-        active ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
 export default function FoundationSettingsPanel({
   isZh,
   subTab,
@@ -78,18 +56,18 @@ export default function FoundationSettingsPanel({
   return (
     <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
       <div className="flex flex-wrap gap-2">
-        <SubTabButton active={subTab === 'years'} onClick={() => onSubTabChange('years')}>
+        <SegmentTabButton active={subTab === 'years'} onClick={() => onSubTabChange('years')}>
           {isZh ? '学年管理' : 'Academic years'}
-        </SubTabButton>
-        <SubTabButton active={subTab === 'structure'} onClick={() => onSubTabChange('structure')}>
+        </SegmentTabButton>
+        <SegmentTabButton active={subTab === 'structure'} onClick={() => onSubTabChange('structure')}>
           {isZh ? '学段与年级' : 'Stages & grades'}
-        </SubTabButton>
-        <SubTabButton active={subTab === 'classes'} onClick={() => onSubTabChange('classes')}>
+        </SegmentTabButton>
+        <SegmentTabButton active={subTab === 'classes'} onClick={() => onSubTabChange('classes')}>
           {isZh ? '班级管理' : 'Classes'}
-        </SubTabButton>
-        <SubTabButton active={subTab === 'organization'} onClick={() => onSubTabChange('organization')}>
+        </SegmentTabButton>
+        <SegmentTabButton active={subTab === 'organization'} onClick={() => onSubTabChange('organization')}>
           {isZh ? '组织架构' : 'Organization'}
-        </SubTabButton>
+        </SegmentTabButton>
       </div>
 
       {subTab === 'years' && (

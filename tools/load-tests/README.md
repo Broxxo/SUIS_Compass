@@ -6,6 +6,7 @@
 
 ```bash
 npm run load:report
+npm run load:report -- --fast   # 1 轮 · 小学期末+期末诊断 · 跳过三层复查 · 并行写入
 ```
 
 默认：
@@ -38,6 +39,8 @@ npm run load:report -- --rounds=2 --templates=小学期末学业报告 --templat
 | `--timeout-ms` | 25000 | 单请求超时 |
 | `--retries` | 2 | 失败重试次数 |
 | `--verify-all-rounds=1` | 否 | 每轮都校验（默认仅最后一轮） |
+| `--fast` | 否 | **1 轮**压测「小学期末学业报告」+「期末教学诊断」；跳过学科设置日志与三层复查；班主任/班科/KISS **并行** |
+| `--skip-tier-verify` | 否 | 跳过三层一致性 HTTP 复查 |
 
 兼容旧参数：`--template`、`--portrait-template` 仍可用。
 

@@ -654,6 +654,48 @@ export const api = {
     };
   },
 
+  async getDingTalkPreview(input?: { force?: boolean }): Promise<import('../types/dingtalk').DingTalkPreviewData> {
+    const force = input?.force ? 'force=1' : '';
+    const qs = force ? `?${force}` : '';
+    const response = await fetch(apiUrl(`/api/admin/dingtalk/preview${qs}`), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to fetch DingTalk preview'));
+    }
+    return readJsonOrThrow(response, 'Failed to fetch DingTalk preview');
+  },
+
+  async getDingTalkSyncPlan(
+    preview?: import('../types/dingtalk').DingTalkPreviewData,
+  ): Promise<import('../types/dingtalkSync').DingTalkSyncPlan> {
+    const response = await fetch(apiUrl('/api/admin/dingtalk/sync/plan'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ preview: preview ?? undefined }),
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to load sync plan'));
+    }
+    return readJsonOrThrow(response, 'Failed to load sync plan');
+  },
+
+  async applyDingTalkSync(input: {
+    actionIds: string[];
+    preview?: import('../types/dingtalk').DingTalkPreviewData;
+    plan?: import('../types/dingtalkSync').DingTalkSyncPlan;
+  }): Promise<import('../types/dingtalkSync').DingTalkSyncApplyResult> {
+    const response = await fetch(apiUrl('/api/admin/dingtalk/sync/apply'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ actionIds: input.actionIds, preview: input.preview, plan: input.plan }),
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to apply sync'));
+    }
+    return readJsonOrThrow(response, 'Failed to apply sync');
+  },
+
   /**
    * 班级管理 API（1.3）
    */

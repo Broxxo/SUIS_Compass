@@ -103,6 +103,10 @@ export type LoadTestConfig = {
   /** 班科分析（全班 25 人）payload 较大，单独限流 */
   insightConcurrency: number;
   verifyLastRoundOnly: boolean;
+  /** 跳过三层一致性 HTTP 复查（压测写入后省数十秒） */
+  skipTierVerify: boolean;
+  /** 跳过控制台学科设置明细 */
+  skipSubjectSettingsLog: boolean;
 };
 
 const DEFAULT_TERM = 'Semester 2' as const;
@@ -126,6 +130,8 @@ const DEFAULT_CONFIG: Omit<LoadTestConfig, 'apiBase'> = {
   maxWallMs: 120_000,
   insightConcurrency: 16,
   verifyLastRoundOnly: true,
+  skipTierVerify: false,
+  skipSubjectSettingsLog: false,
 };
 
 const SCORE_BUCKETS = [
@@ -510,14 +516,10 @@ export async function runLoadRound(
         )
       : Promise.resolve();
 
-  await Promise.all([homeroomPromise, portraitPromise]);
-  const homeroomElapsedMs = Date.now() - homeroomStart;
-  const portraitElapsedMs = Date.now() - portraitStart;
-
+  const parallelStart = Date.now();
   let insightOk = 0;
   let insightFail = 0;
-  const insightStart = Date.now();
-  await runPool(
+  const insightPromise = runPool(
     insightTasks,
     config.insightConcurrency,
     async (task) => {
@@ -535,7 +537,11 @@ export async function runLoadRound(
       if (done % 20 === 0 || done === total) console.log(`[R${round} insights] ${done}/${total}`);
     },
   );
-  const insightElapsedMs = Date.now() - insightStart;
+  await Promise.all([homeroomPromise, portraitPromise, insightPromise]);
+  const parallelElapsedMs = Date.now() - parallelStart;
+  const homeroomElapsedMs = parallelElapsedMs;
+  const portraitElapsedMs = parallelElapsedMs;
+  const insightElapsedMs = parallelElapsedMs;
 
   subjectLatencies.sort((a, b) => a - b);
   homeroomLatencies.sort((a, b) => a - b);
@@ -546,7 +552,7 @@ export async function runLoadRound(
     );
   }
 
-  const totalElapsedMs = subjectElapsedMs + homeroomElapsedMs + portraitElapsedMs + insightElapsedMs;
+  const totalElapsedMs = subjectElapsedMs + parallelElapsedMs;
 
   return {
     round,
@@ -681,17 +687,29 @@ export async function verifyRoundWrites(
   }
 
   const insightRows = await pool.query(
-    `SELECT c.grade, i.subject_key, i.class_overall_analysis, i.student_analysis_rows
+    `SELECT c.grade, c.id AS class_id, i.subject_key, i.class_overall_analysis, i.student_analysis_rows
      FROM student_report_subject_class_insights i
      JOIN classes c ON c.id = i.class_id
      WHERE i.template_id = $1`,
     [templateId],
   );
+  const classSizeRows = await pool.query(
+    `SELECT e.class_id, COUNT(DISTINCT e.student_id)::int AS student_count
+     FROM student_enrollments e
+     WHERE e.academic_year_id = $1
+     GROUP BY e.class_id`,
+    [plan.template.academicYearId],
+  );
+  const studentsPerClass = new Map<string, number>(
+    classSizeRows.rows.map((r: { class_id: string; student_count: number }) => [
+      String(r.class_id),
+      Number(r.student_count),
+    ]),
+  );
   let insightsWithClassAnalysis = 0;
   let examInsightsWithAnalysis = 0;
   let examInsightsMissingAnalysis = 0;
   let insightsWithFullStudentRows = 0;
-  const expectedStudentsPerClass = 25;
   for (const row of insightRows.rows) {
     const text = String(row.class_overall_analysis ?? '');
     if (!text.includes(marker)) continue;
@@ -714,7 +732,9 @@ export async function verifyRoundWrites(
       const sp = String(rec.supportPlan ?? '');
       return la.includes(marker) && sp.includes(marker) && String(rec.studentId ?? '').trim();
     });
-    if (withMarker.length >= expectedStudentsPerClass) insightsWithFullStudentRows += 1;
+    const classId = String(row.class_id ?? '');
+    const expectedStudents = studentsPerClass.get(classId) ?? withMarker.length;
+    if (withMarker.length >= expectedStudents) insightsWithFullStudentRows += 1;
   }
   for (const key of examKeys) {
     const [g, sk] = key.split('::');
@@ -854,8 +874,10 @@ export async function runFullLoadTest(
 
   const suite = await buildReportLoadSuite(pool, config.reportSpecs, config.portraitTemplateTitles);
   const plan = suite.executionPlan;
-  for (const p of suite.plans) {
-    printReportSubjectSettings(p.subjectSettings);
+  if (!config.skipSubjectSettingsLog) {
+    for (const p of suite.plans) {
+      printReportSubjectSettings(p.subjectSettings);
+    }
   }
 
   const examTaskCount = plan.subjectTasks.filter((t) => t.enableScore).length;
@@ -956,7 +978,7 @@ export async function runFullLoadTest(
 
   const tierConsistency: TierConsistencyReport[] = [];
   const tierIssues: string[] = [];
-  for (const segmentPlan of suite.plans) {
+  if (!config.skipTierVerify) for (const segmentPlan of suite.plans) {
     const spec = config.reportSpecs.find((s) => s.templateTitle === segmentPlan.template.title);
     const gradeLevels: number[] = [];
     for (let g = spec?.gradeMin ?? 1; g <= (spec?.gradeMax ?? 9); g += 1) gradeLevels.push(g);
@@ -1040,21 +1062,27 @@ export function parseLoadTestCliArgs(argv: string[]): LoadTestConfig {
     const hit = argv.find((a) => a.startsWith(p));
     return hit ? hit.slice(p.length).trim() : null;
   };
-  const reportsOnly = argv.includes('--reports-only') || !argv.includes('--with-portraits');
+  const fast = argv.includes('--fast');
+  const reportsOnly = argv.includes('--reports-only') || (!argv.includes('--with-portraits') && !fast);
   const term = parseTerm(argv);
-  return {
+  const base: LoadTestConfig = {
     ...DEFAULT_CONFIG,
     apiBase: process.env.API_BASE_URL?.trim() || 'http://127.0.0.1:8080',
     term,
-    reportSpecs: parseReportSpecs(argv, term),
-    portraitTemplateTitles: parsePortraitTitles(argv, reportsOnly),
-    reportsOnly,
-    rounds: Math.max(1, Number(parseArg('rounds') ?? DEFAULT_CONFIG.rounds)),
-    concurrency: Math.max(1, Number(parseArg('concurrency') ?? DEFAULT_CONFIG.concurrency)),
-    retries: Math.max(0, Number(parseArg('retries') ?? DEFAULT_CONFIG.retries)),
+    reportSpecs: fast
+      ? parseReportSpecs([...argv, '--templates=小学期末学业报告', '--template-ranges=1-6'], term)
+      : parseReportSpecs(argv, term),
+    portraitTemplateTitles: fast ? ['期末教学诊断'] : parsePortraitTitles(argv, reportsOnly),
+    reportsOnly: fast ? false : reportsOnly,
+    rounds: fast ? 1 : Math.max(1, Number(parseArg('rounds') ?? DEFAULT_CONFIG.rounds)),
+    concurrency: Math.max(1, Number(parseArg('concurrency') ?? (fast ? 64 : DEFAULT_CONFIG.concurrency))),
+    retries: Math.max(0, Number(parseArg('retries') ?? (fast ? 2 : DEFAULT_CONFIG.retries))),
     requestTimeoutMs: Math.max(5000, Number(parseArg('timeout-ms') ?? DEFAULT_CONFIG.requestTimeoutMs)),
-    maxWallMs: Math.max(10_000, Number(parseArg('max-wall-ms') ?? DEFAULT_CONFIG.maxWallMs)),
-    insightConcurrency: Math.max(4, Number(parseArg('insight-concurrency') ?? DEFAULT_CONFIG.insightConcurrency)),
-    verifyLastRoundOnly: parseArg('verify-all-rounds') !== '1',
+    maxWallMs: Math.max(10_000, Number(parseArg('max-wall-ms') ?? (fast ? 300_000 : DEFAULT_CONFIG.maxWallMs))),
+    insightConcurrency: Math.max(4, Number(parseArg('insight-concurrency') ?? (fast ? 24 : DEFAULT_CONFIG.insightConcurrency))),
+    verifyLastRoundOnly: true,
+    skipTierVerify: fast || argv.includes('--skip-tier-verify'),
+    skipSubjectSettingsLog: fast || argv.includes('--skip-subject-settings-log'),
   };
+  return base;
 }

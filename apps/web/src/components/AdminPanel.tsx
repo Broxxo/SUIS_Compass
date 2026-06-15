@@ -105,6 +105,15 @@ import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
 import PromoteAcademicYearPreviewDialog from './admin/PromoteAcademicYearPreviewDialog';
 import StaffingSettingsPanel, { type StaffingSubTab } from './admin/StaffingSettingsPanel';
+import DatabaseSettingsPanel, { type DatabaseSubTab } from './admin/DatabaseSettingsPanel';
+import ProgramDatabasePanel from './admin/ProgramDatabasePanel';
+import DingTalkApiPanel from './admin/DingTalkApiPanel';
+import DingTalkSyncDialog from './admin/DingTalkSyncDialog';
+import type { DingTalkPreviewData } from '../types/dingtalk';
+import {
+  loadDingTalkPreviewFromStorage,
+  saveDingTalkPreviewToStorage,
+} from '../lib/dingtalkPreviewStorage';
 import GradeManagementPanel from './admin/GradeManagementPanel';
 import TeachingManagementPanel from './admin/TeachingManagementPanel';
 import {
@@ -807,6 +816,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [dbTotal, setDbTotal] = useState(0);
   const [dbTableLoading, setDbTableLoading] = useState(false);
   const [dbRowsLoading, setDbRowsLoading] = useState(false);
+  const [databaseSubTab, setDatabaseSubTab] = useState<DatabaseSubTab>('dingtalk');
+  const [dingTalkPreview, setDingTalkPreview] = useState<DingTalkPreviewData | null>(null);
+  const [dingTalkPreviewLoading, setDingTalkPreviewLoading] = useState(false);
+  const [dingTalkFromCache, setDingTalkFromCache] = useState(false);
+  const [dingTalkSyncOpen, setDingTalkSyncOpen] = useState(false);
 
   /** 岗位安排：学年 + 班级列表（后续接入班主任/学科教师编辑与复制上年） */
   const [staffingYearId, setStaffingYearId] = useState<string>('');
@@ -1598,6 +1612,22 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     };
   }, [reportTargetStageSubjects, reportTargetDirtySubjectKeys, reportTargetStagePersistedSavedKeys]);
 
+  const loadDingTalkPreview = async (force = false) => {
+    if (!force) return;
+    setDingTalkPreviewLoading(true);
+    setDingTalkFromCache(false);
+    setError(null);
+    try {
+      const data = await api.getDingTalkPreview({ force: true });
+      setDingTalkPreview(data);
+      if (!data.error && data.fetchedAt) {
+        saveDingTalkPreviewToStorage(data);
+      }
+    } finally {
+      setDingTalkPreviewLoading(false);
+    }
+  };
+
   const loadDatabaseTables = async () => {
     setDbTableLoading(true);
     try {
@@ -1720,16 +1750,26 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [selectedReportTemplateId, adminTab]);
 
   useEffect(() => {
+    const cached = loadDingTalkPreviewFromStorage();
+    if (cached?.fetchedAt) {
+      setDingTalkPreview(cached);
+      setDingTalkFromCache(true);
+    }
+  }, []);
+
+  useEffect(() => {
     if (adminTab !== 'database') return;
     if (!isSystemAdmin) return;
     setError(null);
-    setDbOffset(0);
-    loadDatabaseTables()
-      .then((chosen) => {
-        if (chosen) return loadDatabaseRows(chosen, 0, dbLimit);
-      })
-      .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load database tables'));
-  }, [adminTab, isSystemAdmin]);
+    if (databaseSubTab === 'program') {
+      setDbOffset(0);
+      loadDatabaseTables()
+        .then((chosen) => {
+          if (chosen) return loadDatabaseRows(chosen, 0, dbLimit);
+        })
+        .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load database tables'));
+    }
+  }, [adminTab, isSystemAdmin, databaseSubTab]);
 
   // 选定学年后，统计该学年的班级数和学生数（按学籍去重）
   useEffect(() => {
@@ -6018,32 +6058,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
         {adminTab === 'weekly-load' && (
           <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <label className="text-sm font-medium text-slate-700 whitespace-nowrap">
-                {isZh ? '学年' : 'Year'}
-              </label>
-              <AcademicYearSelect
-                isZh={isZh}
-                years={allYears}
-                value={staffingYearId}
-                onChange={setStaffingYearId}
-                allowEmpty={allYears.length === 0}
-                emptyLabel={isZh ? '暂无学年' : 'No years'}
-                disabled={staffingLoading || allYears.length === 0}
-              />
-              {USE_CLOUD_STORAGE && staffingYearId ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleWeeklyLoadExport}
-                  disabled={staffingLoading || staffingLoadGrandRows.length === 0}
-                >
-                  {isZh ? '导出 Excel' : 'Export Excel'}
-                </Button>
-              ) : null}
-            </div>
-
             {staffingLoading ? (
               <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
             ) : !staffingYearId ? (
@@ -6070,13 +6084,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                       </p>
                     )}
 
-                    <div className="rounded-lg border-2 border-slate-300 bg-slate-50/80 overflow-hidden shadow-sm">
-                      <div className="bg-slate-200/90 px-3 py-2 border-b border-slate-300">
-                        <h3 className="text-sm font-semibold text-slate-900">
-                          {isZh ? '全校周课时统计' : 'School-wide weekly load'}
-                        </h3>
-                      </div>
-                      <div className="flex flex-wrap items-end gap-3 px-3 pt-3 text-sm">
+                    <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 mb-4 text-sm">
+                      <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
                         <div className="flex flex-col gap-1 min-w-[10rem]">
                           <label className="text-xs font-medium text-slate-600">
                             {isZh ? '主学科筛选' : 'Primary subject'}
@@ -6116,9 +6125,35 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                           </select>
                         </div>
                       </div>
-                      <div className="overflow-x-auto p-3 pt-2">
-                        <table className="min-w-full text-sm">
-                          <thead className="bg-white text-left text-xs text-slate-600 border border-slate-200 rounded-t-md">
+                      <div className="flex flex-wrap items-end gap-x-3 gap-y-3">
+                        <div className="flex flex-col gap-1">
+                          <label className="text-xs font-medium text-slate-600">
+                            {isZh ? '学年' : 'Year'}
+                          </label>
+                          <AcademicYearSelect
+                            isZh={isZh}
+                            years={allYears}
+                            value={staffingYearId}
+                            onChange={setStaffingYearId}
+                            allowEmpty={allYears.length === 0}
+                            emptyLabel={isZh ? '暂无学年' : 'No years'}
+                            disabled={staffingLoading || allYears.length === 0}
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={handleWeeklyLoadExport}
+                          disabled={staffingLoading || staffingLoadGrandRows.length === 0}
+                        >
+                          {isZh ? '导出 Excel' : 'Export Excel'}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto rounded-lg border border-slate-200">
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-slate-50 text-left text-xs text-slate-600">
                             <tr>
                               <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
                                 {isZh ? '教职工' : 'Staff'}
@@ -6163,7 +6198,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                             )}
                           </tbody>
                         </table>
-                      </div>
                     </div>
                   </>
                 )}
@@ -6179,6 +6213,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 {studentCurrentYearId
                   ? `${allYears.find((y) => y.id === studentCurrentYearId)?.name ?? ''} — ${isZh ? '学生列表' : 'Students'}`
                   : (isZh ? '学生列表' : 'Student list')}
+                <span className="text-slate-500 font-normal">
+                  {' '}({studentLoading ? '…' : students.length})
+                </span>
               </h2>
               <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
                 <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
@@ -6622,175 +6659,102 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         )}
 
         {adminTab === 'database' && isSystemAdmin && (
-          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <h2 className="text-base sm:text-lg font-semibold text-slate-800">
-                {isZh ? '数据库只读浏览' : 'Database read-only browser'}
-              </h2>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setError(null);
-                  void loadDatabaseTables()
-                    .then((chosen) => {
-                      if (chosen) return loadDatabaseRows(chosen, 0, dbLimit);
-                    })
-                    .catch((e: unknown) => setError((e as Error)?.message || 'Failed to refresh database view'));
-                }}
-                disabled={dbTableLoading || dbRowsLoading}
-              >
-                {isZh ? '刷新' : 'Refresh'}
-              </Button>
-            </div>
-            <p className="text-xs text-slate-500">
-              {isZh
-                ? '仅用于查看数据，不支持增删改。'
-                : 'Read-only view. Create/update/delete actions are disabled.'}
-            </p>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-4 border border-slate-200 rounded-lg overflow-hidden">
-                <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-xs font-medium text-slate-600">
-                  {isZh ? '数据表与行数' : 'Tables and row counts'}
-                </div>
-                <div className="max-h-[420px] overflow-auto">
-                  {dbTableLoading ? (
-                    <p className="px-3 py-3 text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
-                  ) : dbTables.length === 0 ? (
-                    <p className="px-3 py-3 text-sm text-slate-500">{isZh ? '未发现数据表。' : 'No tables found.'}</p>
-                  ) : (
-                    <ul className="divide-y divide-slate-100">
-                      {dbTables.map((t) => (
-                        <li key={t.tableName}>
-                          <button
-                            type="button"
-                            className={`w-full text-left px-3 py-2.5 hover:bg-slate-50 ${dbSelectedTable === t.tableName ? 'bg-slate-50' : ''}`}
-                            onClick={() => {
-                              setDbSelectedTable(t.tableName);
-                              setDbOffset(0);
-                              setError(null);
-                              void loadDatabaseRows(t.tableName, 0, dbLimit).catch((e: unknown) =>
-                                setError((e as Error)?.message || 'Failed to load table rows')
-                              );
-                            }}
-                          >
-                            <div className="font-mono text-xs text-slate-800">{t.tableName}</div>
-                            <div className="text-xs text-slate-500">
-                              {isZh ? `行数：${t.rowCount}` : `Rows: ${t.rowCount}`}
-                            </div>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </div>
-
-              <div className="lg:col-span-8 border border-slate-200 rounded-lg overflow-hidden">
-                <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 flex-wrap">
-                  <div className="text-xs text-slate-600">
-                    {dbSelectedTable
-                      ? (
-                        isZh
-                          ? <>表：<span className="font-mono text-slate-800">{dbSelectedTable}</span>{dbPrimaryKey ? <>（主键：<span className="font-mono">{dbPrimaryKey}</span>）</> : ''}</>
-                          : <>Table: <span className="font-mono text-slate-800">{dbSelectedTable}</span>{dbPrimaryKey ? <> (PK: <span className="font-mono">{dbPrimaryKey}</span>)</> : ''}</>
-                      )
-                      : (isZh ? '请选择左侧数据表' : 'Select a table on the left')}
-                  </div>
-                  {dbSelectedTable && (
-                    <div className="text-xs text-slate-500">
-                      {isZh ? `共 ${dbTotal} 行` : `Total ${dbTotal} rows`}
-                    </div>
-                  )}
-                </div>
-                <div className="max-h-[420px] overflow-auto">
-                  {dbRowsLoading ? (
-                    <p className="px-3 py-3 text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
-                  ) : !dbSelectedTable ? (
-                    <p className="px-3 py-3 text-sm text-slate-500">{isZh ? '请先选择数据表。' : 'Please choose a table first.'}</p>
-                  ) : dbColumns.length === 0 ? (
-                    <p className="px-3 py-3 text-sm text-slate-500">{isZh ? '该表无字段。' : 'This table has no columns.'}</p>
-                  ) : (
-                    <table className="min-w-full text-xs">
-                      <thead className="sticky top-0 bg-white">
-                        <tr className="border-b border-slate-200 text-left text-slate-500">
-                          {dbColumns.map((col) => (
-                            <th key={col} className="px-2 py-2 font-medium whitespace-nowrap">{col}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {dbRows.length === 0 ? (
-                          <tr>
-                            <td colSpan={dbColumns.length} className="px-2 py-6 text-center text-slate-500">
-                              {isZh ? '暂无数据。' : 'No rows.'}
-                            </td>
-                          </tr>
-                        ) : (
-                          dbRows.map((row, idx) => (
-                            <tr key={`${dbOffset + idx}`} className="border-b border-slate-100 align-top">
-                              {dbColumns.map((col) => {
-                                const value = row[col];
-                                const display = value == null
-                                  ? 'NULL'
-                                  : typeof value === 'object'
-                                    ? JSON.stringify(value)
-                                    : String(value);
-                                return (
-                                  <td key={`${idx}-${col}`} className="px-2 py-1.5 text-slate-700 max-w-[260px]">
-                                    <div className="truncate" title={display}>{display}</div>
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-                {dbSelectedTable && (
-                  <div className="px-3 py-2 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs">
-                    <span className="text-slate-500">
-                      {isZh
-                        ? `第 ${dbTotal === 0 ? 0 : dbOffset + 1} - ${Math.min(dbOffset + dbLimit, dbTotal)} 条`
-                        : `${dbTotal === 0 ? 0 : dbOffset + 1}-${Math.min(dbOffset + dbLimit, dbTotal)}`}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={dbRowsLoading || dbOffset <= 0}
-                        onClick={() => {
-                          const nextOffset = Math.max(0, dbOffset - dbLimit);
-                          void loadDatabaseRows(dbSelectedTable, nextOffset, dbLimit).catch((e: unknown) =>
-                            setError((e as Error)?.message || 'Failed to load previous page')
-                          );
-                        }}
-                      >
-                        {isZh ? '上一页' : 'Prev'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={dbRowsLoading || dbOffset + dbLimit >= dbTotal}
-                        onClick={() => {
-                          const nextOffset = dbOffset + dbLimit;
-                          void loadDatabaseRows(dbSelectedTable, nextOffset, dbLimit).catch((e: unknown) =>
-                            setError((e as Error)?.message || 'Failed to load next page')
-                          );
-                        }}
-                      >
-                        {isZh ? '下一页' : 'Next'}
-                      </Button>
-                    </div>
-                  </div>
+          <DatabaseSettingsPanel
+            isZh={isZh}
+            subTab={databaseSubTab}
+            onSubTabChange={(tab) => {
+              setDatabaseSubTab(tab);
+              setError(null);
+            }}
+            toolbar={(
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setError(null);
+                    if (databaseSubTab === 'program') {
+                      void loadDatabaseTables()
+                        .then((chosen) => {
+                          if (chosen) return loadDatabaseRows(chosen, 0, dbLimit);
+                        })
+                        .catch((e: unknown) => setError((e as Error)?.message || 'Failed to refresh database view'));
+                    } else {
+                      void loadDingTalkPreview(true).catch((e: unknown) =>
+                        setError((e as Error)?.message || 'Failed to refresh DingTalk preview')
+                      );
+                    }
+                  }}
+                  disabled={
+                    databaseSubTab === 'program'
+                      ? (dbTableLoading || dbRowsLoading)
+                      : dingTalkPreviewLoading
+                  }
+                >
+                  {isZh ? '刷新' : 'Refresh'}
+                </Button>
+                {databaseSubTab === 'dingtalk' && (
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setError(null);
+                      setDingTalkSyncOpen(true);
+                    }}
+                    disabled={dingTalkPreviewLoading || !dingTalkPreview?.fetchedAt}
+                  >
+                    {isZh ? '同步学生数据' : 'Sync students'}
+                  </Button>
                 )}
-              </div>
-            </div>
-          </section>
+              </>
+            )}
+          >
+            {databaseSubTab === 'dingtalk' ? (
+              <DingTalkApiPanel
+                isZh={isZh}
+                loading={dingTalkPreviewLoading}
+                data={dingTalkPreview}
+                fromCache={dingTalkFromCache}
+              />
+            ) : (
+              <ProgramDatabasePanel
+                isZh={isZh}
+                dbTables={dbTables}
+                dbSelectedTable={dbSelectedTable}
+                dbColumns={dbColumns}
+                dbRows={dbRows}
+                dbPrimaryKey={dbPrimaryKey}
+                dbLimit={dbLimit}
+                dbOffset={dbOffset}
+                dbTotal={dbTotal}
+                dbTableLoading={dbTableLoading}
+                dbRowsLoading={dbRowsLoading}
+                onSelectTable={(tableName) => {
+                  setDbSelectedTable(tableName);
+                  setDbOffset(0);
+                  setError(null);
+                  void loadDatabaseRows(tableName, 0, dbLimit).catch((e: unknown) =>
+                    setError((e as Error)?.message || 'Failed to load table rows')
+                  );
+                }}
+                onLoadRows={(tableName, offset, limit) => {
+                  void loadDatabaseRows(tableName, offset, limit).catch((e: unknown) =>
+                    setError((e as Error)?.message || 'Failed to load table rows')
+                  );
+                }}
+              />
+            )}
+          </DatabaseSettingsPanel>
         )}
+
+      <DingTalkSyncDialog
+        isZh={isZh}
+        open={dingTalkSyncOpen}
+        onClose={() => setDingTalkSyncOpen(false)}
+        dingTalkPreview={dingTalkPreview}
+        onApplied={() => {
+          void loadStudents().catch(() => undefined);
+        }}
+      />
       </main>
 
       <Dialog open={dialogCreateYear} onOpenChange={setDialogCreateYear}>

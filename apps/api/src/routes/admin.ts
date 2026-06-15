@@ -1,4 +1,9 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
+import { fetchDingTalkPreview } from '../services/dingtalk/preview.js';
+import { buildDingTalkSyncPlan } from '../services/dingtalk/syncPlan.js';
+import { applyDingTalkSync } from '../services/dingtalk/syncApply.js';
+import { renumberAllStudentsInSystem } from '../services/dingtalk/renumberAllStudents.js';
+import { repairStudentClassAssignmentsFromDingTalk } from '../services/dingtalk/repairClassAssignments.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import pool from '../config/database.js';
@@ -817,6 +822,84 @@ router.get('/database/tables/:tableName/rows', async (req: AuthedRequest, res: R
     });
   } catch (error) {
     console.error('Get table rows error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 钉钉 API 预览（只读）：拉取家校通讯录组织树与学生名单，供后台「数据库 · 钉钉API」展示
+router.get('/dingtalk/preview', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+
+    const force = String(req.query.force ?? '') === '1' || String(req.query.force ?? '') === 'true';
+    const preview = await fetchDingTalkPreview({ force });
+    return res.json(preview);
+  } catch (error) {
+    console.error('Get DingTalk preview error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/dingtalk/sync/plan', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const clientPreview = req.body?.preview ?? null;
+    const plan = await buildDingTalkSyncPlan({ clientPreview });
+    return res.json(plan);
+  } catch (error) {
+    console.error('Get DingTalk sync plan error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/dingtalk/sync/apply', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const actionIds = Array.isArray(req.body?.actionIds) ? req.body.actionIds.map(String) : [];
+    const clientPreview = req.body?.preview ?? null;
+    const plan = req.body?.plan ?? null;
+    const result = await applyDingTalkSync({ actionIds, clientPreview, plan });
+    return res.json(result);
+  } catch (error) {
+    console.error('Apply DingTalk sync error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/students/renumber-all', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const result = await renumberAllStudentsInSystem();
+    return res.json(result);
+  } catch (error) {
+    console.error('Renumber all students error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/dingtalk/sync/repair-classes', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const clientPreview = req.body?.preview ?? null;
+    const result = await repairStudentClassAssignmentsFromDingTalk(clientPreview);
+    return res.json(result);
+  } catch (error) {
+    console.error('Repair class assignments error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

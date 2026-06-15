@@ -312,7 +312,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'status') THEN
     ALTER TABLE students ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'active';
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'students' AND column_name = 'dingtalk_user_id') THEN
+    ALTER TABLE students ADD COLUMN dingtalk_user_id VARCHAR(100);
+  END IF;
 END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_students_dingtalk_user_id_unique
+  ON students(dingtalk_user_id) WHERE dingtalk_user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS student_enrollments (
   id VARCHAR(50) PRIMARY KEY,

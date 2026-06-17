@@ -183,6 +183,7 @@ npm run build && npm start
 
 | 状态            | 版本        | 分支    |
 | ------------- | --------- | ----- |
+| **开发中**       | **0.5.3** | `v053` |
 | **已发布（`main`）** | **0.5.2** | —     |
 | 上一版           | **0.5.1** | `v051` |
 
@@ -218,6 +219,12 @@ npm run build && npm start
 | **Hub · SUIS AI** | 全屏入口；可手动选择「学生中心 / 教师中心 / 课程河流」基础上下文（无页面明细） |
 
 实现要点：`AIPanel` + `AIContext`；`studentPortraitAIContext.ts` / `teacherPortraitAIContext.ts`；`remark-gfm` 表格渲染。侧栏布局见 `App.tsx` 中 `AI_DOCK_*` 常量。
+
+---
+
+## v0.5.3（开发中 · 分支 `v053`）
+
+在 `v053` 上迭代 **0.5.x** 能力；合并前请更新本表与版本历史，并将 npm 包版本与产品版本对齐。
 
 ---
 

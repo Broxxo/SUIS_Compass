@@ -2,6 +2,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { resolvePgSsl } from './pgSsl.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** 始终从 apps/api/.env 加载（无论从仓库根目录还是 apps/api 启动 workspace 脚本） */
@@ -17,7 +18,7 @@ const poolMax = Math.min(100, Math.max(10, parseInt(process.env.PG_POOL_MAX || '
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: false,
+  ssl: resolvePgSsl(process.env.DATABASE_URL),
   max: poolMax,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,

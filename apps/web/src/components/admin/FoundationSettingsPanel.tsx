@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import OrgStructurePanel from './OrgStructurePanel';
 import GradeStructureEditor from '../GradeStructureEditor';
-import ClassManagement from '../ClassManagement';
 import { Button } from '../ui/button';
 import {
   Dialog,
@@ -15,7 +14,7 @@ import { Plus } from 'lucide-react';
 import type { AcademicYear } from '../../types/classManagement';
 import { SegmentTabButton } from '../ui/segment-tab-button';
 
-export type FoundationSubTab = 'years' | 'structure' | 'classes' | 'organization';
+export type FoundationSubTab = 'structure' | 'organization' | 'years';
 
 type FoundationSettingsPanelProps = {
   isZh: boolean;
@@ -36,8 +35,6 @@ type FoundationSettingsPanelProps = {
   promotePreviewLoading?: boolean;
   currentYearClassCount: number | null;
   currentYearStudentCount: number | null;
-  currentYearClasses: Array<{ cls: { id: string; grade: number; name: string }; studentCount: number }>;
-  getGradeLabel: (grade: number) => string;
   onOrgError: (msg: string) => void;
   onDepartmentsChange: () => void;
   onStructureSaved?: () => void;
@@ -63,8 +60,6 @@ export default function FoundationSettingsPanel({
   promotePreviewLoading = false,
   currentYearClassCount,
   currentYearStudentCount,
-  currentYearClasses,
-  getGradeLabel,
   onOrgError,
   onDepartmentsChange,
   onStructureSaved,
@@ -107,17 +102,14 @@ export default function FoundationSettingsPanel({
   return (
     <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
       <div className="flex flex-wrap gap-2">
-        <SegmentTabButton active={subTab === 'years'} onClick={() => onSubTabChange('years')}>
-          {isZh ? '学年管理' : 'Academic years'}
-        </SegmentTabButton>
         <SegmentTabButton active={subTab === 'structure'} onClick={() => onSubTabChange('structure')}>
           {isZh ? '学段与年级' : 'Stages & grades'}
         </SegmentTabButton>
-        <SegmentTabButton active={subTab === 'classes'} onClick={() => onSubTabChange('classes')}>
-          {isZh ? '班级管理' : 'Classes'}
-        </SegmentTabButton>
         <SegmentTabButton active={subTab === 'organization'} onClick={() => onSubTabChange('organization')}>
           {isZh ? '组织架构' : 'Organization'}
+        </SegmentTabButton>
+        <SegmentTabButton active={subTab === 'years'} onClick={() => onSubTabChange('years')}>
+          {isZh ? '学年管理' : 'Academic years'}
         </SegmentTabButton>
       </div>
 
@@ -180,45 +172,6 @@ export default function FoundationSettingsPanel({
             </p>
           )}
           {yearLoading && <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>}
-
-          {currentYearId && (
-            <div className="mt-2 border-t border-slate-200 pt-4">
-              <h3 className="text-sm font-semibold text-slate-800 mb-2">
-                {isZh ? '默认学年班级列表' : 'Classes in default year'}
-              </h3>
-              {currentYearClasses.length === 0 ? (
-                <p className="text-sm text-slate-500">{isZh ? '本学年暂无班级。' : 'No classes in this academic year.'}</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full text-sm border border-slate-200 rounded-lg">
-                    <thead>
-                      <tr className="bg-slate-100 text-left text-xs text-slate-600">
-                        <th className="py-2 px-3 font-medium">{isZh ? '年级' : 'Grade'}</th>
-                        <th className="py-2 px-3 font-medium">{isZh ? '班级名称' : 'Class name'}</th>
-                        <th className="py-2 px-3 font-medium">{isZh ? '学生数' : 'Students'}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {currentYearClasses.map(({ cls, studentCount }) => (
-                        <tr key={cls.id} className="border-t border-slate-100">
-                          <td className="py-2 px-3 text-slate-700">{getGradeLabel(cls.grade)}</td>
-                          <td className="py-2 px-3 text-slate-800">
-                            {cls.name}
-                            {cls.archiveLabel ? (
-                              <span className="ml-2 text-xs text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
-                                {cls.archiveLabel}
-                              </span>
-                            ) : null}
-                          </td>
-                          <td className="py-2 px-3 text-slate-700">{studentCount}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
 
@@ -229,12 +182,6 @@ export default function FoundationSettingsPanel({
             canEdit={canEditStructure}
             onSaved={onStructureSaved}
           />
-        </div>
-      )}
-
-      {subTab === 'classes' && (
-        <div className="border-t border-slate-100 pt-4 -mx-4 sm:-mx-6 px-0 sm:px-0">
-          <ClassManagement onBackToHub={() => {}} embedded hideYearGear={false} />
         </div>
       )}
 

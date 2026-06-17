@@ -28,7 +28,7 @@ export async function requireValidUser(req: Request, res: Response, next: NextFu
     }
   }
 
-  if (legacyUserId) {
+  if (legacyUserId && process.env.NODE_ENV !== 'production') {
     try {
       const result = await pool.query('SELECT id FROM users WHERE id = $1', [legacyUserId]);
       if (result.rows.length > 0) {

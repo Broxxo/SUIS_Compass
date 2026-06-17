@@ -8,30 +8,53 @@ export const FILTER_SELECT_WIDTH = {
   teacher: 'min-w-[12rem] max-w-[18rem] w-auto',
   report: 'min-w-[14rem] max-w-[22rem] w-auto',
   md: 'min-w-[10rem] max-w-[16rem] w-auto',
+  sm: 'min-w-[6.5rem] max-w-[11rem] w-auto',
 } as const;
 
 export type FilterSelectWidth = keyof typeof FILTER_SELECT_WIDTH;
+export type FilterControlSize = 'md' | 'sm';
+
+const FILTER_CONTROL_SIZE_CLASS: Record<FilterControlSize, string> = {
+  md: 'px-3 py-2 text-sm',
+  sm: 'px-2 py-1.5 text-xs',
+};
 
 const filterSelectBase =
-  'rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white ' +
+  'rounded-lg border border-slate-300 bg-white ' +
   'disabled:bg-slate-50 disabled:text-slate-500 ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300/80';
 
-export function filterSelectClassName(width: FilterSelectWidth = 'md', className?: string) {
-  return cn(filterSelectBase, FILTER_SELECT_WIDTH[width], className);
+export function filterSelectClassName(
+  width: FilterSelectWidth = 'md',
+  className?: string,
+  size: FilterControlSize = 'md',
+) {
+  return cn(filterSelectBase, FILTER_CONTROL_SIZE_CLASS[size], FILTER_SELECT_WIDTH[width], className);
 }
 
 export function FilterSelect({
   width = 'md',
+  controlSize = 'md',
   className,
   ...props
-}: SelectHTMLAttributes<HTMLSelectElement> & { width?: FilterSelectWidth }) {
-  return <select className={filterSelectClassName(width, className)} {...props} />;
+}: SelectHTMLAttributes<HTMLSelectElement> & { width?: FilterSelectWidth; controlSize?: FilterControlSize }) {
+  return <select className={filterSelectClassName(width, className, controlSize)} {...props} />;
 }
 
-export function FilterFieldLabel({ children, htmlFor }: { children: ReactNode; htmlFor?: string }) {
+export function FilterFieldLabel({
+  children,
+  htmlFor,
+  size = 'md',
+}: {
+  children: ReactNode;
+  htmlFor?: string;
+  size?: FilterControlSize;
+}) {
   return (
-    <label htmlFor={htmlFor} className="block text-xs text-slate-500 mb-1">
+    <label
+      htmlFor={htmlFor}
+      className={cn('block text-slate-500 mb-0.5', size === 'sm' ? 'text-[11px]' : 'text-xs')}
+    >
       {children}
     </label>
   );
@@ -42,15 +65,21 @@ export function FilterField({
   htmlFor,
   children,
   className,
+  size = 'md',
 }: {
   label?: ReactNode;
   htmlFor?: string;
   children: ReactNode;
   className?: string;
+  size?: FilterControlSize;
 }) {
   return (
     <div className={cn('shrink-0', className)}>
-      {label != null ? <FilterFieldLabel htmlFor={htmlFor}>{label}</FilterFieldLabel> : null}
+      {label != null ? (
+        <FilterFieldLabel htmlFor={htmlFor} size={size}>
+          {label}
+        </FilterFieldLabel>
+      ) : null}
       {children}
     </div>
   );

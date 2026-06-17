@@ -37,10 +37,10 @@ END $$;
 -- 旧数据：将原 display_name 回填到 name_zh（测试库可整库 init 重建）
 UPDATE users SET name_zh = display_name WHERE name_zh IS NULL AND display_name IS NOT NULL AND TRIM(display_name) <> '';
 
--- 预设用户：密码将在首次部署时由 seed 写入哈希（见 scripts/seed-users.ts 或 init 说明）
+-- 预设用户：默认系统管理员 Admin / Suiscompass2019!（password_hash 预置，勿在 password 列存明文）
 -- 角色：system-admin 系统管理员 | admin 管理员 | teacher 教师
-INSERT INTO users (id, username, password, role, display_name, name_zh) VALUES
-  ('admin-1', 'Admin', '4321', 'system-admin', '系统管理员', '系统管理员')
+INSERT INTO users (id, username, password, password_hash, role, display_name, name_zh) VALUES
+  ('admin-1', 'Admin', NULL, '$2a$10$UKiOHMaAhEAD.GI6iA6bgugpEbODjmGNdta.7wdPrlhujaeUHK3Sm', 'system-admin', '系统管理员', '系统管理员')
 ON CONFLICT (username) DO NOTHING;
 
 -- 课程表（全校共享；通过权限控制写入）
@@ -119,6 +119,18 @@ BEGIN
   END IF;
 END $$;
 
+-- 学年表（须在 school_settings、classes 等引用 academic_years 的表之前创建）
+CREATE TABLE IF NOT EXISTS academic_years (
+  id VARCHAR(50) PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  start_date DATE,
+  end_date DATE,
+  is_current BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_academic_years_current ON academic_years(is_current) WHERE is_current = TRUE;
+
 -- 全校基础设置：学段与年级结构（自 user_settings.grade_config 迁移）
 CREATE TABLE IF NOT EXISTS school_settings (
   id VARCHAR(32) PRIMARY KEY DEFAULT 'default',
@@ -155,18 +167,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_semester_data_course_grade_term_unique
   ON semester_data(course_id, grade, semester);
 DROP INDEX IF EXISTS idx_semester_data_user_id;
 
--- 班级管理（1.3）：学年、班级、学生、学籍（全校共享，不按 user_id 隔离；仅 admin 可写）
-CREATE TABLE IF NOT EXISTS academic_years (
-  id VARCHAR(50) PRIMARY KEY,
-  name VARCHAR(100) NOT NULL,
-  start_date DATE,
-  end_date DATE,
-  is_current BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_academic_years_current ON academic_years(is_current) WHERE is_current = TRUE;
-
+-- 班级管理（1.3）：班级、学生、学籍（全校共享，不按 user_id 隔离；仅 admin 可写）
 CREATE TABLE IF NOT EXISTS classes (
   id VARCHAR(50) PRIMARY KEY,
   academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Course, Semester } from '../types';
 import { Send, User, Bot, X, Loader2, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { aiMarkdownComponents, aiRemarkPlugins } from './aiMarkdown';
 import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/aiModels';
 import { loadSemesterDataSync, loadKeyConceptsSync } from '../lib/storage';
 import { getApiUrl, getAuthHeaders } from '../lib/api';
@@ -422,11 +423,9 @@ ${context}`
                       {/* 主要内容 */}
                       <div className="markdown-content">
                         <ReactMarkdown
+                          remarkPlugins={aiRemarkPlugins}
                           components={{
-                            p: ({ children }) => <p className="mb-1 last:mb-0 leading-relaxed">{children}</p>,
-                            ul: ({ children }) => <ul className="list-disc pl-4 mb-1 space-y-0.5">{children}</ul>,
-                            ol: ({ children }) => <ol className="list-decimal pl-4 mb-1 space-y-0.5">{children}</ol>,
-                            li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                            ...aiMarkdownComponents,
                             strong: ({ children }) => (
                               <strong className={`font-bold ${msg.role === 'user' ? 'text-white underline decoration-blue-300' : 'text-blue-700'}`}>
                                 {children}

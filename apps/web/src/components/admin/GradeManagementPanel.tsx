@@ -78,7 +78,7 @@ function TeacherSelect({
   );
 }
 
-function classesInGradeSection<T extends { name: string }>(
+function classesInGradeSection<T extends { id: string; grade: number; name: string }>(
   section: ReturnType<typeof groupClassesForClassManagement<T>>[number],
 ): T[] {
   if (section.tracks) {

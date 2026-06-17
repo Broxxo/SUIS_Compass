@@ -1,13 +1,12 @@
 import { STAFFING_HOMEROOM_SUBJECT_KEY, staffingSubjectKeyFromCourse } from '@repo/shared';
 import type { TeachingSubjectGroup } from '@repo/shared';
-import type { Course } from '../types';
+import type { Course, GradeConfig } from '../types';
 import type { ClassItem, StaffingAssignment } from '../types/classManagement';
 import type { AdminUser } from './adminStorage';
 import {
   getGradeCatalogIdForClass,
   getRoadmapSegmentsInDisplayOrder,
   normalizeGradeConfig,
-  type GradeConfig,
 } from './gradeConfig';
 
 export type SubjectOption = { key: string; label: string };

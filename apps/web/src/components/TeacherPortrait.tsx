@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Bot } from 'lucide-react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAIContext } from '../contexts/AIContext';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import {
   loadAcademicYears,
@@ -35,6 +37,14 @@ import TeacherPortraitAdminPersonalDashboard from './TeacherPortraitAdminPersona
 import TeacherPortraitSubjectGroupDashboard from './TeacherPortraitSubjectGroupDashboard';
 import { AcademicYearSelect } from './academicPeriodSelectors';
 import { pickPreferredPublishedTask } from '@repo/shared';
+import {
+  buildTeacherPortraitAIPayload,
+  type TeacherPortraitSubjectDashboardSlice,
+} from '../lib/teacherPortraitAIContext';
+import {
+  buildSubjectScoreScalesForReportDashboard,
+  type ReportSubjectScoreScaleSet,
+} from '../lib/studentPortraitOverview';
 
 type PortraitTab = 'school' | 'dashboard' | 'subject' | 'collections';
 
@@ -103,15 +113,20 @@ export default function TeacherPortrait({
   initialYearId,
   initialTerm,
   initialCollectionTemplateId,
+  isAIOpen = false,
+  onToggleAI,
 }: {
   onBackToHub: () => void;
   initialTab?: PortraitTab;
   initialYearId?: string;
   initialTerm?: Term;
   initialCollectionTemplateId?: string;
+  isAIOpen?: boolean;
+  onToggleAI?: () => void;
 }) {
   const { user } = useAuth();
   const { language } = useLanguage();
+  const { setContextFromApp } = useAIContext();
   const isZh = language === 'zh';
   const isAdmin = user?.role === 'system-admin' || user?.role === 'admin';
 
@@ -130,6 +145,11 @@ export default function TeacherPortrait({
     Array<{ classId: string; subjectKey: string; subjectName?: string }>
   >([]);
   const [canViewSubjectDashboard, setCanViewSubjectDashboard] = useState(false);
+  const [subjectDashboardSlice, setSubjectDashboardSlice] = useState<TeacherPortraitSubjectDashboardSlice | null>(
+    null,
+  );
+  const [subjectDashboardScoreScaleSet, setSubjectDashboardScoreScaleSet] =
+    useState<ReportSubjectScoreScaleSet | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -329,6 +349,50 @@ export default function TeacherPortrait({
   const staffingTeacherCount = useMemo(() => teachersFromStaffing(assignments).size, [assignments]);
 
   const gradeConfig = useMemo(() => normalizeGradeConfig(loadGradeConfigSync()), []);
+
+  useEffect(() => {
+    const sd = subjectDashboardSlice;
+    if (
+      !USE_CLOUD_STORAGE ||
+      !sd ||
+      sd.loading ||
+      sd.dataSource !== 'report' ||
+      !sd.dashboard?.sourceId ||
+      !yearId ||
+      !sd.dashboard.gradeRows.length
+    ) {
+      setSubjectDashboardScoreScaleSet(null);
+      return;
+    }
+    let cancelled = false;
+    const templateId = sd.dashboard.sourceId;
+    const reportLabel = sd.sourceTitle ?? sd.dashboard.sourceTitle ?? '';
+    Promise.all([
+      api.getTeacherReportYearDimensionExamPreset(yearId),
+      api.getReportTemplateById(templateId),
+    ])
+      .then(([preset, template]) => {
+        if (cancelled) return;
+        setSubjectDashboardScoreScaleSet(
+          buildSubjectScoreScalesForReportDashboard({
+            template,
+            examPreset: preset,
+            gradeConfig,
+            gradeRows: sd.dashboard!.gradeRows,
+            reportLabel,
+            term: sd.term,
+            templateTitle: template.title ?? null,
+          }),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setSubjectDashboardScoreScaleSet(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [subjectDashboardSlice, yearId, gradeConfig]);
+
   const teachersBySegment = useMemo(
     () => buildTeachersBySegment(assignments, classById, gradeConfig),
     [assignments, classById, gradeConfig],
@@ -339,14 +403,115 @@ export default function TeacherPortrait({
 
   const activeReport = reportTemplates.find((t) => t.status === 'published') ?? reportTemplates[0];
 
+  const academicYearName = useMemo(
+    () => years.find((y) => y.id === yearId)?.name ?? null,
+    [years, yearId],
+  );
+
+  const personalAssignments = useMemo(() => {
+    const byClass = new Map<string, { className: string; grade: number; subjects: string[] }>();
+    for (const a of myAssignments) {
+      const cls = classById.get(a.classId);
+      if (!cls) continue;
+      let row = byClass.get(a.classId);
+      if (!row) {
+        row = { className: cls.name, grade: cls.grade, subjects: [] };
+        byClass.set(a.classId, row);
+      }
+      const subj = (a.subjectName || a.subjectKey).trim();
+      if (subj && !row.subjects.includes(subj)) row.subjects.push(subj);
+    }
+    return [...byClass.values()].sort((a, b) => a.grade - b.grade || a.className.localeCompare(b.className));
+  }, [myAssignments, classById]);
+
+  const schoolStatsForAI = useMemo(
+    () => ({
+      teacherCount: teachers.length,
+      staffingTeacherCount,
+      classCount: yearClasses.length,
+      studentCount,
+      subjectCount: subjectDistribution.length,
+      reportTitle: activeReport?.title ?? null,
+      completionRate: reportProgress?.completionRate ?? null,
+      completedStudents: reportProgress?.completedStudents ?? null,
+      totalStudents: reportProgress?.totalStudents ?? null,
+      pendingStudents: reportProgress?.pendingStudents ?? null,
+      attentionClasses: attentionClasses.map((c) => ({
+        className: c.className,
+        completionRate: c.completionRate,
+        pendingStudents: c.pendingStudents,
+      })),
+    }),
+    [
+      teachers.length,
+      staffingTeacherCount,
+      yearClasses.length,
+      studentCount,
+      subjectDistribution.length,
+      activeReport?.title,
+      reportProgress,
+      attentionClasses,
+    ],
+  );
+
+  const teacherPortraitAIPayload = useMemo(
+    () =>
+      buildTeacherPortraitAIPayload({
+        tab,
+        isAdmin,
+        isZh,
+        academicYearName,
+        term: fillTerm,
+        schoolStats: schoolStatsForAI,
+        personalAssignments,
+        subjectDashboard: subjectDashboardSlice,
+        subjectScoreScaleSet: subjectDashboardScoreScaleSet,
+        tabLabels: {
+          school: isZh ? '学校看板' : 'School dashboard',
+          subject: isZh ? '学科看板' : 'Subject dashboard',
+          personal: isZh ? '个人看板' : 'Personal dashboard',
+          collections: isZh ? '教师发展' : 'Teacher development',
+        },
+      }),
+    [
+      tab,
+      isAdmin,
+      isZh,
+      academicYearName,
+      fillTerm,
+      schoolStatsForAI,
+      personalAssignments,
+      subjectDashboardSlice,
+      subjectDashboardScoreScaleSet,
+    ],
+  );
+
+  useEffect(() => {
+    if (!onToggleAI) return;
+    setContextFromApp('teacher-portrait', teacherPortraitAIPayload);
+  }, [teacherPortraitAIPayload, setContextFromApp, onToggleAI]);
+
   return (
-    <div className="min-h-screen bg-slate-50 pt-14 pb-8">
+    <div className={`${onToggleAI ? 'h-full min-h-0' : 'min-h-screen'} bg-slate-50 pt-14 flex flex-col`}>
       <AppTopBar
         title={isZh ? '教师中心' : 'Teacher Center'}
         showBack
         onBack={onBackToHub}
+        rightChildren={
+          onToggleAI ? (
+            <Button
+              variant={isAIOpen ? 'default' : 'outline'}
+              size="icon"
+              onClick={onToggleAI}
+              className="h-9 w-9 rounded-lg flex-shrink-0"
+              title="AI"
+            >
+              <Bot className="h-4 w-4" />
+            </Button>
+          ) : undefined
+        }
       />
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-4">
+      <main className={`flex-1 min-h-0 ${onToggleAI ? 'overflow-y-auto' : ''} max-w-6xl w-full mx-auto px-4 py-6 space-y-4`}>
         <div className="flex flex-wrap items-center gap-2 justify-between">
           {isAdmin ? (
             <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
@@ -491,7 +656,7 @@ export default function TeacherPortrait({
                 </p>
                 {teachersBySegment.length === 0 ? (
                   <p className="text-sm text-slate-500">
-                    {isZh ? '请先在后台「基础设置」配置学段与年级' : 'Configure segments in Admin → Foundation settings'}
+                    {isZh ? '请先在后台「学校设置」配置学段与年级' : 'Configure segments in Admin → School settings'}
                   </p>
                 ) : (
                   <HorizontalBarChart
@@ -556,6 +721,7 @@ export default function TeacherPortrait({
             years={years}
             yearId={yearId}
             onYearIdChange={setYearId}
+            onAIContextChange={setSubjectDashboardSlice}
           />
         )}
 

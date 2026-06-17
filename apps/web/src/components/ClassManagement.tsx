@@ -1,8 +1,8 @@
 /**
- * 班级管理：学年、班级、学生（嵌入后台「基础设置」）。
+ * 班级管理：学年、班级、学生（后台一级入口「班级管理」）。
  * 浏览班级与学生请使用学生画像；此处仅负责治理侧 CRUD。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
@@ -36,8 +36,15 @@ import type { AdminUser } from '../lib/adminStorage';
 import { ChevronDown, ChevronRight, Plus, Settings, Trash2, UserMinus } from 'lucide-react';
 import { DEFAULT_GRADE_CONFIG } from '../lib/constants';
 import CreateStudentDialog from './CreateStudentDialog';
+import { AcademicYearSelect } from './academicPeriodSelectors';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import { loadGradeConfig } from '../lib/storage';
+import {
+  adminUserToStaffingTeacherRef,
+  downloadClassesExport,
+  parseClassImportWorkbook,
+  resolveHomeroomTeacherId,
+} from '../lib/classRosterExcel';
 import {
   filterClassesBySchoolSegment,
   getGradeLabelByLevel,
@@ -92,6 +99,8 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [dialogYearManagement, setDialogYearManagement] = useState(false);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
+  const classExcelInputRef = useRef<HTMLInputElement>(null);
+  const [classExcelImporting, setClassExcelImporting] = useState(false);
   const [teachers, setTeachers] = useState<AdminUser[]>([]);
   const [newClassTeacherId, setNewClassTeacherId] = useState<string>('');
   const [classTeachers, setClassTeachers] = useState<Record<string, { teacherId: string; role: string; displayName: string }[]>>({});
@@ -412,6 +421,145 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
 
   const currentYear = years.find((y) => y.id === currentYearId);
 
+  const teacherRefs = useMemo(
+    () => teachers.map((t) => adminUserToStaffingTeacherRef(t)),
+    [teachers],
+  );
+
+  const buildHomeroomByClassId = async (classList: ClassItem[]): Promise<Map<string, string>> => {
+    const map = new Map<string, string>();
+    for (const cls of classList) {
+      if (USE_CLOUD_STORAGE) {
+        try {
+          const list = await api.getClassTeachers(cls.id);
+          const homeroom = list.find((t) => t.role === 'homeroom');
+          map.set(cls.id, homeroom?.displayName ?? '');
+        } catch {
+          map.set(cls.id, '');
+        }
+      } else {
+        const homeroom = loadClassTeachersLocalSync(cls.id).find((t) => t.role === 'homeroom');
+        const tid = homeroom?.teacherId ?? cls.teacherId ?? null;
+        const teacher = tid ? teachers.find((t) => t.id === tid) : undefined;
+        map.set(cls.id, homeroom?.displayName ?? teacher?.displayName ?? '');
+      }
+    }
+    return map;
+  };
+
+  const setHomeroomTeacher = async (classId: string, teacherId: string | null) => {
+    if (USE_CLOUD_STORAGE) {
+      if (teacherId) {
+        await api.addClassTeacher(classId, { teacherId, role: 'homeroom' });
+        return;
+      }
+      const list = await api.getClassTeachers(classId);
+      for (const t of list.filter((x) => x.role === 'homeroom')) {
+        await api.removeClassTeacher(classId, t.teacherId);
+      }
+      return;
+    }
+    for (const t of loadClassTeachersLocalSync(classId).filter((x) => x.role === 'homeroom')) {
+      unassignTeacherFromClassLocal(classId, t.teacherId);
+    }
+    if (teacherId) {
+      const teacher = teachers.find((t) => t.id === teacherId);
+      assignTeacherToClassLocal(classId, {
+        teacherId,
+        role: 'homeroom',
+        displayName: teacher?.displayName ?? null,
+      });
+    }
+  };
+
+  const handleClassExcelExport = async () => {
+    if (!currentYearId) return;
+    setError(null);
+    try {
+      const homeroomByClassId = await buildHomeroomByClassId(classes);
+      downloadClassesExport({
+        classes,
+        homeroomByClassId,
+        gradeConfig,
+        academicYearLabel: currentYear?.name ?? '',
+        isZh,
+      });
+    } catch (e: unknown) {
+      setError((e as Error)?.message || (isZh ? '导出失败' : 'Export failed'));
+    }
+  };
+
+  const handleClassExcelImport = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !currentYearId) return;
+    setError(null);
+    setClassExcelImporting(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = parseClassImportWorkbook(buf, gradeConfig, isZh);
+      if (parsed.errors.length > 0) {
+        const head = parsed.errors.slice(0, 12).join('\n');
+        const tail = parsed.errors.length > 12 ? '\n…' : '';
+        alert((isZh ? '导入失败：\n' : 'Import failed:\n') + head + tail);
+        return;
+      }
+      if (parsed.rows.length === 0) {
+        alert(isZh ? '未解析到可导入的数据行。' : 'No rows to import.');
+        return;
+      }
+      const warnings: string[] = [...parsed.warnings];
+      let workingClasses = [...classes];
+      for (const row of parsed.rows) {
+        const key = row.className.trim().toLowerCase();
+        let cls = workingClasses.find(
+          (c) => c.grade === row.grade && c.name.trim().toLowerCase() === key,
+        );
+        const homeroomId = row.homeroomTeacherName
+          ? resolveHomeroomTeacherId(row.homeroomTeacherName, teacherRefs, isZh)
+          : null;
+        if (row.homeroomTeacherName && !homeroomId) {
+          warnings.push(
+            isZh
+              ? `班级「${row.className}」：未登记班主任「${row.homeroomTeacherName}」，已跳过班主任设置。`
+              : `Class "${row.className}": homeroom teacher "${row.homeroomTeacherName}" not found; skipped.`,
+          );
+        }
+        if (!cls) {
+          const id =
+            typeof crypto !== 'undefined' && crypto.randomUUID
+              ? `class-${crypto.randomUUID()}`
+              : `class-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+          cls = await createClass({
+            id,
+            academicYearId: currentYearId,
+            grade: row.grade,
+            name: row.className.trim(),
+            teacherId: homeroomId,
+          });
+          workingClasses = [...workingClasses, cls];
+          if (homeroomId) {
+            await setHomeroomTeacher(cls.id, homeroomId);
+          }
+          continue;
+        }
+        if (homeroomId) {
+          await setHomeroomTeacher(cls.id, homeroomId);
+        }
+      }
+      if (warnings.length > 0) {
+        alert(
+          `${isZh ? '导入完成，但有提示：\n' : 'Import finished with notices:\n'}${warnings.slice(0, 10).join('\n')}${warnings.length > 10 ? '\n…' : ''}`,
+        );
+      }
+      setClasses(loadClassesSync(currentYearId));
+    } catch (err: unknown) {
+      setError((err as Error)?.message || (isZh ? '导入失败' : 'Import failed'));
+    } finally {
+      setClassExcelImporting(false);
+    }
+  };
+
   const segmentTabs = useMemo(() => {
     if (!gradeConfigHasSegments(gradeConfig)) return [];
     const segs = getRoadmapSegmentsInDisplayOrder(gradeConfig);
@@ -453,7 +601,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   }, [segmentFilteredClasses]);
 
   return (
-    <div className={`min-h-screen w-full min-w-0 bg-slate-50 ${embedded ? '' : 'pt-14'}`}>
+    <div className={`min-h-screen w-full min-w-0 ${embedded ? 'bg-transparent' : 'bg-slate-50 pt-14'}`}>
       {!embedded && (
         <AppTopBar
           title={pageTitle}
@@ -504,7 +652,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
       <main
         className={
           embedded
-            ? 'w-full max-w-none mx-0 px-0 py-4 space-y-4'
+            ? 'w-full max-w-none mx-0 px-0 py-0 space-y-4'
             : 'max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-4'
         }
       >
@@ -513,23 +661,67 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
         {!currentYearId && years.length === 0 && !loading && (
           <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
             <p className="text-sm text-slate-500">
-              {isZh ? '请在后台「基础设置 → 学年管理」中创建学年。' : 'Create academic years in Admin → Foundation → Academic years.'}
+              {isZh ? '请在后台「学校设置 → 学年管理」中创建学年。' : 'Create academic years in Admin → School settings → Academic years.'}
             </p>
           </section>
         )}
 
         {currentYearId && (
-          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-            <div className="flex items-center justify-between mb-3">
+          <section className={embedded ? '' : 'bg-white rounded-xl shadow-sm border border-slate-200 p-4'}>
+            <div className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-2 ${embedded ? 'mb-3' : 'mb-3'}`}>
               <h2 className="text-base font-semibold text-slate-800">
                 {currentYear?.name ?? currentYearId} — {isZh ? '班级列表' : 'Classes'}
+                <span className="text-slate-500 font-normal">
+                  {' '}({loading ? '…' : displayedClasses.length})
+                </span>
               </h2>
-              {canEdit && (
-                <Button size="sm" onClick={() => setDialogCreateClass(true)}>
-                  <Plus className="h-4 w-4 mr-1" />
-                  {isZh ? '新建班级' : 'New class'}
-                </Button>
-              )}
+              <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                {embedded && (
+                  <>
+                    <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
+                    <AcademicYearSelect
+                      isZh={isZh}
+                      years={years}
+                      value={currentYearId || ''}
+                      onChange={(id) => setCurrentYearId(id || null)}
+                      allowEmpty={years.length === 0}
+                      emptyLabel={isZh ? '暂无学年' : 'No years'}
+                      disabled={loading || years.length === 0}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleClassExcelExport()}
+                      disabled={loading || classExcelImporting}
+                    >
+                      {isZh ? '导出 Excel' : 'Export Excel'}
+                    </Button>
+                    <input
+                      ref={classExcelInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      className="hidden"
+                      onChange={(e) => void handleClassExcelImport(e)}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => classExcelInputRef.current?.click()}
+                      disabled={classExcelImporting || loading || !currentYearId}
+                    >
+                      {classExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+                    </Button>
+                  </>
+                )}
+                {canEdit && (
+                  <Button size="sm" onClick={() => setDialogCreateClass(true)}>
+                    <Plus className="h-4 w-4 mr-1" />
+                    {isZh ? '新建班级' : 'New class'}
+                  </Button>
+                )}
+              </div>
             </div>
             {segmentTabs.length > 0 && (
               <div
@@ -573,16 +765,14 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                   return (
                     <section
                       key={`grade-${grade}`}
-                      className={`rounded-xl border border-slate-200 transition-all duration-200 ${
-                        gradeExpanded
-                          ? 'bg-white shadow-md ring-2 ring-slate-300/80 scale-[1.01]'
-                          : 'bg-slate-50/70'
+                      className={`rounded-xl border border-slate-200 bg-white transition-all duration-200 ${
+                        gradeExpanded ? 'shadow-md ring-2 ring-slate-300/80 scale-[1.01]' : ''
                       }`}
                     >
                       <div className="px-3 py-3 space-y-3">
                         {/* 年级标签与班级按钮同一行：左侧为年级「头部」，右侧横向滚动 */}
                         <div className="flex items-center gap-2 min-w-0">
-                          <div className="flex items-center gap-2 shrink-0 border-r border-slate-200/90 pr-2.5 mr-0.5">
+                          <div className="flex items-center gap-2 shrink-0 border-r border-slate-200/90 pr-2.5 mr-0.5 bg-slate-50 rounded-lg px-2.5 py-1.5">
                             <span
                               className={`inline-flex items-center justify-center rounded-lg px-2.5 py-1 text-sm font-semibold transition-all ${
                                 gradeExpanded ? 'bg-primary text-primary-foreground scale-105' : 'bg-slate-200 text-slate-700'

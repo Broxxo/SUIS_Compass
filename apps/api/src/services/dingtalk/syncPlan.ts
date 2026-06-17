@@ -158,7 +158,7 @@ export async function buildDingTalkSyncPlan(options?: BuildDingTalkSyncPlanOptio
   if (!year) {
     return {
       ok: false,
-      error: '未设置当前学年，请先在「基础设置 → 学年管理」中指定当前学年。',
+      error: '未设置当前学年，请先在「学校设置 → 学年管理」中指定当前学年。',
       academicYearId: null,
       academicYearName: null,
       dingtalkFetchedAt: null,

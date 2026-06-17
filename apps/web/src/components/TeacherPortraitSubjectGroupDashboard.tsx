@@ -15,6 +15,7 @@ import {
   FilterToolbar,
   TermSelectField,
 } from './academicPeriodSelectors';
+import type { TeacherPortraitSubjectDashboardSlice } from '../lib/teacherPortraitAIContext';
 import TeachingDiagnosisKissDisplay from './TeachingDiagnosisKissDisplay';
 
 type SourceOption = {
@@ -41,12 +42,14 @@ export default function TeacherPortraitSubjectGroupDashboard({
   years,
   yearId,
   onYearIdChange,
+  onAIContextChange,
 }: {
   isZh: boolean;
   isAdmin: boolean;
   years: AcademicYear[];
   yearId: string;
   onYearIdChange: (id: string) => void;
+  onAIContextChange?: (slice: TeacherPortraitSubjectDashboardSlice | null) => void;
 }) {
   const [term, setTerm] = useState<Term>('Semester 1');
   const [selectedSourceKey, setSelectedSourceKey] = useState('');
@@ -109,7 +112,7 @@ export default function TeacherPortraitSubjectGroupDashboard({
         ]);
 
         const reports = reportTemplates
-          .filter((t) => t.status === 'published' && t.id)
+          .filter((t) => (t.status === 'published' || t.status === 'closed') && t.id)
           .map((t) => ({
             key: `report::${t.id}`,
             dataSource: 'report' as const,
@@ -212,6 +215,43 @@ export default function TeacherPortraitSubjectGroupDashboard({
     () => diagnosisMembers.filter((m) => m.diagnosisHasContent).length,
     [diagnosisMembers],
   );
+
+  useEffect(() => {
+    if (!onAIContextChange) return;
+    if (!yearId || !effectiveGroupId || !parsedSource) {
+      onAIContextChange(null);
+      return;
+    }
+    const selectedGroup = groups.find((g) => g.id === effectiveGroupId);
+    const sourceOpt = sourceOptions.find((o) => o.key === selectedSourceKey);
+    onAIContextChange({
+      term,
+      dataSource: parsedSource.dataSource,
+      sourceTitle: dashboard?.sourceTitle ?? sourceOpt?.title ?? null,
+      groupName:
+        groupName ||
+        (selectedGroup ? (isZh ? selectedGroup.nameZh : selectedGroup.nameEn || selectedGroup.nameZh) : ''),
+      subjectLabels: dashboard?.group.subjectLabels ?? selectedGroup?.subjectLabels ?? [],
+      memberCount: dashboard?.group.memberCount ?? selectedGroup?.memberCount ?? 0,
+      dashboard,
+      loading: loadingDashboard || loadingGroups || loadingSources,
+    });
+  }, [
+    onAIContextChange,
+    yearId,
+    effectiveGroupId,
+    parsedSource,
+    term,
+    selectedSourceKey,
+    sourceOptions,
+    groups,
+    dashboard,
+    loadingDashboard,
+    loadingGroups,
+    loadingSources,
+    groupName,
+    isZh,
+  ]);
 
   if (!USE_CLOUD_STORAGE) {
     return (

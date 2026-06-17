@@ -96,7 +96,7 @@ export type TranslationKey =
   | 'ai.panel.contextNone'
   | 'ai.panel.contextCurriculum'
   | 'ai.panel.contextStudent'
-  | 'ai.panel.contextAssistant'
+  | 'ai.panel.contextTeacher'
   | 'ai.panel.back'
   | 'ai.panel.upload'
   | 'ai.panel.mode'
@@ -214,8 +214,8 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'settings.unsavedColumnOrderConfirm': '列顺序已修改但未保存，确定要关闭吗？',
     'settings.exportCourseData': '导出课程数据',
     'settings.importCourseData': '导入课程数据',
-    'settings.exportCourseDataTitle': '导出为 JSON：含 courses、semesterData、keyConcepts、categoryOrder、courseDomains 等全校共享课程数据',
-    'settings.importCourseDataTitle': '选择由本系统导出的 .json 文件；导入将覆盖当前全校课程与相关数据',
+    'settings.exportCourseDataTitle': '从数据库导出全量 JSON：含 courses、semesterData、keyConcepts、categoryOrder、courseDomains 等全校共享课程数据',
+    'settings.importCourseDataTitle': '选择由本系统导出的 .json 文件；导入将覆盖数据库中的全校课程与相关数据',
     // AI
     'ai.generate': '开始生成',
     'ai.generating': '生成中...',
@@ -244,8 +244,8 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.chats': '对话',
     'ai.panel.contextNone': '无',
     'ai.panel.contextCurriculum': '课程河流',
-    'ai.panel.contextStudent': '学生画像',
-    'ai.panel.contextAssistant': '课堂助手',
+    'ai.panel.contextStudent': '学生中心',
+    'ai.panel.contextTeacher': '教师中心',
     'ai.panel.back': '返回',
     'ai.panel.upload': '上传',
     'ai.panel.mode': '模式',
@@ -362,8 +362,8 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'settings.unsavedColumnOrderConfirm': 'Column order was changed but not saved. Close anyway?',
     'settings.exportCourseData': 'Export course data',
     'settings.importCourseData': 'Import course data',
-    'settings.exportCourseDataTitle': 'Exports JSON with school-wide courses, semesterData, keyConcepts, categoryOrder, courseDomains',
-    'settings.importCourseDataTitle': 'Choose a .json file exported by this app; import overwrites school-wide course data',
+    'settings.exportCourseDataTitle': 'Export full JSON from database: school-wide courses, semesterData, keyConcepts, categoryOrder, courseDomains',
+    'settings.importCourseDataTitle': 'Choose a .json file exported by this app; import overwrites school-wide course data in the database',
     // AI
     'ai.generate': 'Generate',
     'ai.generating': 'Generating...',
@@ -392,8 +392,8 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.chats': 'Chats',
     'ai.panel.contextNone': 'None',
     'ai.panel.contextCurriculum': 'Curriculum Roadmap',
-    'ai.panel.contextStudent': 'Student Portrait',
-    'ai.panel.contextAssistant': 'Class Assistant',
+    'ai.panel.contextStudent': 'Student Center',
+    'ai.panel.contextTeacher': 'Teacher Center',
     'ai.panel.back': 'Back',
     'ai.panel.upload': 'Upload',
     'ai.panel.mode': 'Mode',

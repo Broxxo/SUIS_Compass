@@ -6,6 +6,12 @@ import { ensureClassArchiveColumns } from '../lib/classArchiveColumns.js';
 import { ensureClassTeacherAssignmentsTable } from '../lib/ensureClassTeacherAssignmentsTable.js';
 import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
 import { upsertHomeroomStaffingFromClassTables } from '../lib/homeroomStaffingSync.js';
+import {
+  getGradeHeadClassIdsForTeacher,
+  getGradeHeadClassIdsForTeacherQuery,
+  teacherIsGradeHeadOfClass,
+  teacherIsGradeHeadOfStudent,
+} from '../lib/gradeHeadAccess.js';
 import { sanitizeExamConfigs } from '../lib/reportExamConfigSanitize.js';
 import {
   effectiveTemplateSubjectEnableScore,
@@ -598,7 +604,9 @@ async function canUserAccessStudent(req: ReqWithUserId, studentId: string, requi
      LIMIT 1`,
     [userId, studentId, requireHomeroom],
   );
-  return (result.rowCount ?? 0) > 0;
+  if ((result.rowCount ?? 0) > 0) return true;
+  if (requireHomeroom || role !== 'teacher') return false;
+  return teacherIsGradeHeadOfStudent(userId, studentId);
 }
 
 async function canHomeroomEditComment(req: ReqWithUserId, studentId: string): Promise<boolean> {
@@ -1236,7 +1244,7 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
     await ensureClassArchiveColumns(pool);
     const academicYearId = req.query.academicYearId as string | undefined;
     const role = await getUserRole(req);
-    const params: string[] = [];
+    const params: unknown[] = [];
     let sql = 'SELECT id, academic_year_id, grade, name, teacher_id, archived_at, archive_label FROM classes';
     const where: string[] = [];
     if (academicYearId) {
@@ -1251,7 +1259,8 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
       await ensureStaffingTables();
       params.push(req.userId);
       const tid = `$${params.length}`;
-      where.push(`(
+      const gradeHeadClassIds = await getGradeHeadClassIdsForTeacherQuery(req.userId, academicYearId);
+      let teacherScopeSql = `(
         EXISTS (
           SELECT 1 FROM class_teacher_assignments a
           WHERE a.class_id = classes.id
@@ -1263,8 +1272,14 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
           WHERE s.class_id = classes.id
             AND s.academic_year_id = classes.academic_year_id
             AND s.teacher_id = ${tid}
-        )
-      )`);
+        )`;
+      if (gradeHeadClassIds.length > 0) {
+        params.push(gradeHeadClassIds);
+        teacherScopeSql += `
+        OR classes.id = ANY($${params.length}::varchar[])`;
+      }
+      teacherScopeSql += ')';
+      where.push(teacherScopeSql);
     }
     if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
     sql += ' ORDER BY grade ASC, name ASC';
@@ -1335,6 +1350,55 @@ router.get('/me/subject-assignments', async (req: ReqWithUserId, res: Response) 
     });
   } catch (e) {
     console.error('get me subject-assignments', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** 当前教师在某学年下担任班主任的班级（用于学生中心「我的学生」班级筛选） */
+router.get('/me/homeroom-classes', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureClassTeacherAssignmentsTable(pool);
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const role = await getUserRole(req);
+    if (role !== 'teacher' || !req.userId) {
+      return res.json({ classIds: [] as string[] });
+    }
+    const rows = (await pool.query(
+      `SELECT DISTINCT c.id AS class_id
+       FROM classes c
+       JOIN class_teacher_assignments a
+         ON a.class_id = c.id
+        AND a.teacher_id = $1
+        AND a.role = 'homeroom'
+        AND a.unassigned_at IS NULL
+       WHERE c.academic_year_id = $2`,
+      [req.userId, academicYearId],
+    )).rows as Array<{ class_id: string }>;
+    res.json({ classIds: rows.map((r) => r.class_id) });
+  } catch (e) {
+    console.error('get me homeroom-classes', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** 当前教师在某学年下担任年级组长的管理年级内全部班级（用于学生中心「我的学生」班级筛选与班级概览） */
+router.get('/me/grade-head-classes', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const role = await getUserRole(req);
+    if (role !== 'teacher' || !req.userId) {
+      return res.json({ classIds: [] as string[] });
+    }
+    const classIds = await getGradeHeadClassIdsForTeacher(req.userId, academicYearId);
+    res.json({ classIds });
+  } catch (e) {
+    console.error('get me grade-head-classes', e);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1539,8 +1603,9 @@ router.get('/students', async (req: ReqWithUserId, res: Response) => {
       }
       await ensureStaffingTables();
       params.push(req.userId);
-      sql += `
-        WHERE (
+      const tid = `$${params.length}`;
+      const gradeHeadClassIds = await getGradeHeadClassIdsForTeacherQuery(req.userId);
+      let studentScopeSql = `(
           EXISTS (
             SELECT 1
             FROM student_enrollments e
@@ -1548,7 +1613,7 @@ router.get('/students', async (req: ReqWithUserId, res: Response) => {
               ON a.class_id = e.class_id
              AND a.unassigned_at IS NULL
             WHERE e.student_id = students.id
-              AND a.teacher_id = $1
+              AND a.teacher_id = ${tid}
           )
           OR EXISTS (
             SELECT 1
@@ -1557,10 +1622,21 @@ router.get('/students', async (req: ReqWithUserId, res: Response) => {
               ON s.class_id = e.class_id
              AND s.academic_year_id = e.academic_year_id
             WHERE e.student_id = students.id
-              AND s.teacher_id = $1
-          )
-        )
-      `;
+              AND s.teacher_id = ${tid}
+          )`;
+      if (gradeHeadClassIds.length > 0) {
+        params.push(gradeHeadClassIds);
+        studentScopeSql += `
+          OR EXISTS (
+            SELECT 1
+            FROM student_enrollments e
+            WHERE e.student_id = students.id
+              AND e.class_id = ANY($${params.length}::varchar[])
+          )`;
+      }
+      studentScopeSql += `
+        )`;
+      sql += ` WHERE ${studentScopeSql}`;
     }
     sql += ' ORDER BY name ASC';
     const result = await pool.query(sql, params);
@@ -1740,7 +1816,8 @@ router.get('/enrollments', async (req: ReqWithUserId, res: Response) => {
       await ensureStaffingTables();
       params.push(req.userId);
       const tid = params.length;
-      where.push(`(
+      const gradeHeadClassIds = await getGradeHeadClassIdsForTeacherQuery(req.userId, academicYearId);
+      let enrollmentScopeSql = `(
         EXISTS (
           SELECT 1 FROM class_teacher_assignments a
           WHERE a.class_id = student_enrollments.class_id
@@ -1752,8 +1829,14 @@ router.get('/enrollments', async (req: ReqWithUserId, res: Response) => {
           WHERE s.class_id = student_enrollments.class_id
             AND s.academic_year_id = student_enrollments.academic_year_id
             AND s.teacher_id = $${tid}
-        )
-      )`);
+        )`;
+      if (gradeHeadClassIds.length > 0) {
+        params.push(gradeHeadClassIds);
+        enrollmentScopeSql += `
+        OR student_enrollments.class_id = ANY($${params.length}::varchar[])`;
+      }
+      enrollmentScopeSql += ')';
+      where.push(enrollmentScopeSql);
     }
     if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
     sql += ' ORDER BY academic_year_id DESC, class_id ASC';
@@ -2694,6 +2777,168 @@ router.get('/reports/templates/:templateId', async (req: ReqWithUserId, res: Res
   }
 });
 
+router.get('/reports/templates/:templateId/classes/:classId/class-insights-summary', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureStudentPortraitTables();
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    const classId = String(req.params.classId ?? '').trim();
+    if (!templateId || !classId) {
+      res.status(400).json({ error: 'templateId, classId required' });
+      return;
+    }
+    const role = await getUserRole(req);
+    if (role === 'student' || !req.userId) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const template = await getTemplateForReportWorkflow(templateId);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+    const classRow = (await pool.query(
+      `SELECT id
+       FROM classes
+       WHERE id = $1 AND academic_year_id = $2
+       LIMIT 1`,
+      [classId, template.academicYearId],
+    )).rows[0] as { id: string } | undefined;
+    if (!classRow) {
+      res.status(404).json({ error: 'Class not found in selected academic year' });
+      return;
+    }
+    const isAdminRole = role === 'system-admin' || role === 'admin';
+    if (!isAdminRole && role === 'teacher') {
+      const canHomeroom = await teacherIsHomeroomOfClass(req.userId, classId);
+      const canGradeHead = await teacherIsGradeHeadOfClass(req.userId, classId, template.academicYearId);
+      if (!canHomeroom && !canGradeHead) {
+        res.status(403).json({ error: 'Forbidden: homeroom or grade-head teacher access only' });
+        return;
+      }
+    }
+    const insightRows = (await pool.query(
+      `SELECT subject_key, class_overall_analysis, updated_at
+       FROM student_report_subject_class_insights
+       WHERE template_id = $1 AND class_id = $2`,
+      [templateId, classId],
+    )).rows as Array<{ subject_key: string; class_overall_analysis: string | null; updated_at: Date | null }>;
+    const teacherRows = (await pool.query(
+      `SELECT a.subject_key,
+              COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
+       FROM class_subject_teacher_assignments a
+       JOIN users u ON u.id = a.teacher_id
+       WHERE a.academic_year_id = $1 AND a.class_id = $2 AND COALESCE(a.teacher_slot, 0) = 0`,
+      [template.academicYearId, classId],
+    )).rows as Array<{ subject_key: string; teacher_name: string }>;
+    const insightByKey = new Map(insightRows.map((r) => [r.subject_key, r] as const));
+    const teacherByKey = new Map(teacherRows.map((r) => [r.subject_key, r.teacher_name] as const));
+    const subjects = template.subjects
+      .filter((s) => !!s.subjectKey)
+      .slice()
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+      .map((s) => {
+        const insight = insightByKey.get(s.subjectKey);
+        return {
+          subjectKey: s.subjectKey,
+          subjectName: s.subjectName || s.subjectNameZh || s.subjectKey,
+          teacherName: teacherByKey.get(s.subjectKey) ?? null,
+          classOverallAnalysis: String(insight?.class_overall_analysis ?? '').trim() || null,
+          updatedAt: insight?.updated_at?.toISOString() ?? null,
+        };
+      });
+    res.json({ subjects });
+  } catch (e) {
+    console.error('get class insights summary', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** 某学生在一次学业报告下，各学科教师填写的个别学情与支持计划（校内记录，不进学生报告） */
+router.get('/reports/templates/:templateId/students/:studentId/subject-insights', async (req: ReqWithUserId, res: Response) => {
+  try {
+    await ensureStudentPortraitTables();
+    await ensureClassTeacherAssignmentsTable(pool);
+    await ensureStaffingTables();
+    const templateId = String(req.params.templateId ?? '').trim();
+    const studentId = String(req.params.studentId ?? '').trim();
+    if (!templateId || !studentId) {
+      res.status(400).json({ error: 'templateId, studentId required' });
+      return;
+    }
+    if (!req.userId) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const canView = await canUserAccessStudent(req, studentId, false);
+    if (!canView) {
+      res.status(403).json({ error: 'Forbidden: no access to this student' });
+      return;
+    }
+    const template = await getTemplateForReportWorkflow(templateId);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+    const classId = await enrollmentClassForStudentYear(studentId, template.academicYearId);
+    if (!classId) {
+      res.json({ insights: [] as Array<Record<string, unknown>> });
+      return;
+    }
+    const insightRows = (await pool.query(
+      `SELECT subject_key, student_analysis_rows
+       FROM student_report_subject_class_insights
+       WHERE template_id = $1 AND class_id = $2`,
+      [templateId, classId],
+    )).rows as Array<{ subject_key: string; student_analysis_rows: unknown }>;
+    const teacherRows = (await pool.query(
+      `SELECT a.subject_key,
+              COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name
+       FROM class_subject_teacher_assignments a
+       JOIN users u ON u.id = a.teacher_id
+       WHERE a.academic_year_id = $1 AND a.class_id = $2 AND COALESCE(a.teacher_slot, 0) = 0`,
+      [template.academicYearId, classId],
+    )).rows as Array<{ subject_key: string; teacher_name: string }>;
+    const teacherByKey = new Map(teacherRows.map((r) => [r.subject_key, r.teacher_name] as const));
+    const subjectNameByKey = new Map(
+      template.subjects.filter((s) => s.subjectKey).map((s) => [s.subjectKey, s.subjectName || s.subjectNameZh || s.subjectKey] as const),
+    );
+    const insights: Array<{
+      subjectKey: string;
+      subjectName: string;
+      teacherName: string | null;
+      learningAnalysis: string | null;
+      supportPlan: string | null;
+    }> = [];
+    for (const row of insightRows) {
+      const parsed = parseStudentAnalysisRowsFromDb(row.student_analysis_rows);
+      const match = parsed.find((r) => r.studentId === studentId);
+      if (!match) continue;
+      const learningAnalysis = String(match.learningAnalysis ?? '').trim() || null;
+      const supportPlan = String(match.supportPlan ?? '').trim() || null;
+      if (!learningAnalysis && !supportPlan) continue;
+      const subjectKey = row.subject_key;
+      insights.push({
+        subjectKey,
+        subjectName: subjectNameByKey.get(subjectKey) ?? subjectKey,
+        teacherName: teacherByKey.get(subjectKey) ?? null,
+        learningAnalysis,
+        supportPlan,
+      });
+    }
+    insights.sort((a, b) => {
+      const ai = template.subjects.find((s) => s.subjectKey === a.subjectKey)?.sortOrder ?? 0;
+      const bi = template.subjects.find((s) => s.subjectKey === b.subjectKey)?.sortOrder ?? 0;
+      return ai - bi;
+    });
+    res.json({ insights });
+  } catch (e) {
+    console.error('get student subject insights', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey/class-insights', async (req: ReqWithUserId, res: Response) => {
   try {
     await ensureStudentPortraitTables();
@@ -2945,7 +3190,10 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
     const segmentId = String(template.schoolSegmentId ?? '').trim();
     const inclusionCtx = await loadReportYearInclusionContext(academicYearId);
     const templateSubjectKeys = template.subjects.map((s) => s.subjectKey).filter((k) => !!k);
-    let filterTeacherSubjectsToStaffing = viewerRole === 'teacher' && !!req.userId;
+    const portraitScope = String(req.query.portraitScope ?? '').trim();
+    const overviewPortrait = portraitScope === 'overview';
+    /** 学业报告：任课教师仅看自己学科；学生画像概览：本班任课教师可看全科 */
+    let filterTeacherSubjectsToStaffing = viewerRole === 'teacher' && !!req.userId && !overviewPortrait;
     if (filterTeacherSubjectsToStaffing) {
       await ensureClassTeacherAssignmentsTable(pool);
       const hm = await pool.query(
@@ -2962,6 +3210,11 @@ router.get('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       );
       if ((hm.rowCount ?? 0) > 0) {
         filterTeacherSubjectsToStaffing = false;
+      } else {
+        const cid = await enrollmentClassForStudentYear(studentId, academicYearId);
+        if (cid && (await teacherIsGradeHeadOfClass(req.userId!, cid, academicYearId))) {
+          filterTeacherSubjectsToStaffing = false;
+        }
       }
     }
     const gradeCatalogIdForResolve = await gradeCatalogIdForStudentEnrollment(studentId, academicYearId);

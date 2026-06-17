@@ -114,8 +114,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return true;
         }
       } catch {
-        // API 不可用时回退到本地预设（方便本地测试）
+        // 云端模式：API 失败即登录失败，不回退本地预设账号
       }
+      return false;
     }
     const presetUser = authenticateUser(username, password);
     if (presetUser) {

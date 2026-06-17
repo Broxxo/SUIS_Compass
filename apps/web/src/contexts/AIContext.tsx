@@ -5,8 +5,16 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import { Course, Semester } from '../types';
 import { loadCoursesSync, loadKeyConceptsSync } from '../lib/storage';
+import type { StudentPortraitAIPayload } from '../lib/studentPortraitAIContext';
+import type { TeacherPortraitAIPayload } from '../lib/teacherPortraitAIContext';
 
-export type AIScreenId = 'hub' | 'curriculum-roadmap' | 'student-portrait' | 'class-assistant' | null;
+export type AIScreenId =
+  | 'hub'
+  | 'curriculum-roadmap'
+  | 'student-portrait'
+  | 'teacher-portrait'
+  | 'class-assistant'
+  | null;
 
 export interface CurriculumRoadmapPayload {
   viewMode?: 'overview' | 'focus';
@@ -17,7 +25,11 @@ export interface CurriculumRoadmapPayload {
   basic?: boolean;
 }
 
-export type AIContextPayload = CurriculumRoadmapPayload | Record<string, unknown>;
+export type AIContextPayload =
+  | CurriculumRoadmapPayload
+  | StudentPortraitAIPayload
+  | TeacherPortraitAIPayload
+  | Record<string, unknown>;
 
 interface AIContextType {
   screenId: AIScreenId;
@@ -41,6 +53,16 @@ export function buildBasicCurriculumPayload(): CurriculumRoadmapPayload {
   const courses = loadCoursesSync();
   const keyConcepts = loadKeyConceptsSync();
   return { courses, keyConcepts, basic: true, viewMode: 'overview' };
+}
+
+/** 从 Hub / SUIS AI 主入口手动选择「学生中心」时使用：无具体班级/学生明细 */
+export function buildBasicStudentPortraitPayload(): StudentPortraitAIPayload {
+  return { view: 'idle' };
+}
+
+/** 从 Hub / SUIS AI 主入口手动选择「教师中心」时使用：无具体看板明细 */
+export function buildBasicTeacherPortraitPayload(): TeacherPortraitAIPayload {
+  return { view: 'idle' };
 }
 
 export function AIContextProvider({ children }: { children: ReactNode }) {

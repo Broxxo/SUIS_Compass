@@ -554,7 +554,70 @@ export async function saveKeyConcepts(concepts: string[]): Promise<void> {
 }
 
 /**
+ * 将课程管理导出数据写入本地缓存（导出/导入后保持与数据库一致）
+ */
+export function cacheCurriculumDataLocally(data: {
+  courses?: Course[];
+  semesterData?: Record<string, SemesterData>;
+  keyConcepts?: string[];
+  categoryOrder?: string[];
+  courseDomains?: CourseDomainsConfig;
+  gradeConfig?: GradeConfig;
+}): void {
+  try {
+    if (data.courses) {
+      localStorage.setItem(STORAGE_KEYS.COURSES, JSON.stringify(data.courses));
+    }
+    if (data.keyConcepts) {
+      localStorage.setItem(STORAGE_KEYS.KEY_CONCEPTS, JSON.stringify(data.keyConcepts));
+    }
+    if (data.categoryOrder) {
+      localStorage.setItem(STORAGE_KEYS.CATEGORY_ORDER, JSON.stringify(data.categoryOrder));
+    }
+    if (data.courseDomains) {
+      localStorage.setItem(STORAGE_KEYS.COURSE_DOMAINS, JSON.stringify(normalizeCourseDomainsConfig(data.courseDomains)));
+    }
+    if (data.gradeConfig) {
+      localStorage.setItem(STORAGE_KEYS.SCHOOL_GRADE_STRUCTURE, JSON.stringify(normalizeGradeConfig(data.gradeConfig)));
+    }
+    if (data.semesterData) {
+      for (const [key, semesterData] of Object.entries(data.semesterData)) {
+        const storageKey = key.startsWith(STORAGE_KEYS.SEMESTER_PREFIX)
+          ? key
+          : getSemesterStorageKey(semesterData.courseId, semesterData.grade, semesterData.semester);
+        localStorage.setItem(storageKey, JSON.stringify(semesterData));
+      }
+    }
+  } catch (error) {
+    logError('Failed to cache curriculum data locally', error);
+  }
+}
+
+/**
  * 导出所有数据（课程、学期数据、概念、类别排序）
+ * 云端模式：从数据库全量拉取；本地模式：读取 localStorage 缓存
+ */
+export async function exportAllData(): Promise<{
+  courses: Course[];
+  semesterData: Record<string, SemesterData>;
+  keyConcepts: string[];
+  categoryOrder: string[];
+  courseDomains: CourseDomainsConfig;
+  gradeConfig: GradeConfig;
+  exportDate: string;
+  version: string;
+  source?: 'database' | 'local';
+}> {
+  if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+    const data = await api.exportCurriculumData();
+    cacheCurriculumDataLocally(data);
+    return { ...data, source: 'database' };
+  }
+  return { ...exportAllDataSync(), source: 'local' };
+}
+
+/**
+ * 导出所有数据（同步，仅读 localStorage；云端模式请使用 exportAllData）
  */
 export function exportAllDataSync(): {
   courses: Course[];
@@ -659,6 +722,37 @@ export async function importAllData(data: {
       data && typeof data === 'object' && 'data' in (data as any) && (data as any).data && typeof (data as any).data === 'object'
         ? (data as any).data
         : data;
+
+    const hasRecognizableFields =
+      (normalized.courses && Array.isArray(normalized.courses)) ||
+      (normalized.semesterData && typeof normalized.semesterData === 'object') ||
+      (normalized.keyConcepts && Array.isArray(normalized.keyConcepts)) ||
+      (normalized.categoryOrder && Array.isArray(normalized.categoryOrder)) ||
+      normalized.courseDomains != null ||
+      normalized.gradeConfig != null;
+
+    if (!hasRecognizableFields) {
+      return {
+        success: false,
+        error:
+          'Invalid import file: no recognizable fields (expected courses / semesterData / keyConcepts / categoryOrder / gradeConfig).',
+      };
+    }
+
+    // 云端模式：直接写入数据库，成功后同步本地缓存
+    if (USE_CLOUD_STORAGE && getCurrentUserId()) {
+      try {
+        await api.importCurriculumData(normalized);
+        cacheCurriculumDataLocally(normalized);
+        return { success: true };
+      } catch (err) {
+        logError('Cloud curriculum import failed', err);
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : '云端导入失败，请检查网络与权限后重试。',
+        };
+      }
+    }
 
     let didImportAnything = false;
 

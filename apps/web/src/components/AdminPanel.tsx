@@ -69,6 +69,7 @@ import {
   getRoadmapSegmentsInDisplayOrder,
   getGradeLevelById,
   filterClassesBySchoolSegment,
+  ROADMAP_OVERVIEW_TAB_ALL,
 } from '../lib/gradeConfig';
 import {
   sortCoursesLikeCurriculumRoadmap,
@@ -101,6 +102,7 @@ import {
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
 import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, FunctionalRoleAssignment, FunctionalRoleType, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term, AcademicYearPromotionPreview } from '../types/classManagement';
 import CurriculumRoadmap from './CurriculumRoadmap';
+import ClassManagement from './ClassManagement';
 import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
 import PromoteAcademicYearPreviewDialog from './admin/PromoteAcademicYearPreviewDialog';
@@ -129,8 +131,9 @@ import {
   FilterSelect,
   FilterToolbar,
   TermSelectField,
+  filterSelectClassName,
 } from './academicPeriodSelectors';
-import { ArrowDown, ArrowUp, Eye, EyeOff, LogIn, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Eye, EyeOff, Pencil, Plus, Settings, Trash2, X } from 'lucide-react';
 import {
   REPORT_PRESET_UNIFIED_LEVEL_DEFAULTS,
   fullUnifiedLevelTextFromPreset,
@@ -468,10 +471,6 @@ type StaffingLoadLineItem = {
   periods: number;
 };
 
-function randomSixDigitPassword(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
 const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   'system-admin': { zh: '系统管理员', en: 'System Admin' },
   admin: { zh: '管理员', en: 'Admin' },
@@ -640,8 +639,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   /** 教职工列表：表头排序（部门 / 主学科） */
   const [userStaffSortKey, setUserStaffSortKey] = useState<'department' | 'primarySubject' | null>(null);
   const [userStaffSortDir, setUserStaffSortDir] = useState<'asc' | 'desc'>('asc');
-  /** 学生账号列表：关键词 */
-  const [userStudentFilterSearch, setUserStudentFilterSearch] = useState('');
   /** 每行密码是否可见（仅影响展示，默认隐藏） */
   const [passwordRevealed, setPasswordRevealed] = useState<Record<string, boolean>>({});
   /** 批量操作：选中的用户 id */
@@ -659,16 +656,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
   const [adminTab, setAdminTab] = useState<
     | 'users'
-    | 'students'
     | 'foundation'
+    | 'classes'
+    | 'students'
     | 'courses'
     | 'staffing'
-    | 'weekly-load'
     | 'report-settings'
     | 'teacher-portrait-settings'
     | 'database'
   >('users');
-  const [foundationSubTab, setFoundationSubTab] = useState<FoundationSubTab>('years');
+  const [foundationSubTab, setFoundationSubTab] = useState<FoundationSubTab>('structure');
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [currentYearId, setCurrentYearId] = useState<string | null>(null);
   const [yearLoading, setYearLoading] = useState(false);
@@ -685,7 +682,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [promotePreview, setPromotePreview] = useState<AcademicYearPromotionPreview | null>(null);
   const [currentYearClassCount, setCurrentYearClassCount] = useState<number | null>(null);
   const [currentYearStudentCount, setCurrentYearStudentCount] = useState<number | null>(null);
-  const [currentYearClasses, setCurrentYearClasses] = useState<{ cls: ClassItem; studentCount: number }[]>([]);
 
   const [students, setStudents] = useState<Student[]>([]);
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
@@ -693,7 +689,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [allYears, setAllYears] = useState<AcademicYear[]>([]);
   const [studentLoading, setStudentLoading] = useState(false);
   const [studentFilterName, setStudentFilterName] = useState('');
-  const [studentFilterGrade, setStudentFilterGrade] = useState('');
+  const [studentFilterSegmentId, setStudentFilterSegmentId] = useState(ROADMAP_OVERVIEW_TAB_ALL);
+  const [studentFilterGradeLevel, setStudentFilterGradeLevel] = useState('');
   const [studentFilterClass, setStudentFilterClass] = useState('');
   const [studentSortField, setStudentSortField] = useState<'nameZh' | 'nameEn' | 'currentGrade' | 'gender' | 'studentNumber' | 'dateOfBirth'>('nameZh');
   const [studentSortDir, setStudentSortDir] = useState<'asc' | 'desc'>('asc');
@@ -852,8 +849,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc'
   >('total-desc');
 
-  /** 用户管理：教职工列表 | 学生账号列表 */
-  const [userListScope, setUserListScope] = useState<'staff' | 'students'>('staff');
   const [studentLoginOpen, setStudentLoginOpen] = useState(false);
   const [studentLoginPreview, setStudentLoginPreview] = useState<
     Array<{ studentId: string; nameZh: string; nameEn: string; studentNumber: string; password: string }>
@@ -866,8 +861,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const canEditYears = currentUser?.role === 'system-admin';
   const canEditSchoolStructure =
     currentUser?.role === 'system-admin' || currentUser?.role === 'admin';
+  const canManageStudents = canEditSchoolStructure;
   const isSystemAdmin = currentUser?.role === 'system-admin';
-  const staffingDataTabActive = adminTab === 'staffing' || adminTab === 'weekly-load';
+  const staffingDataTabActive = adminTab === 'staffing';
 
   /** 当前用户可创建的权限类型：系统管理员可创建管理员+教师，管理员只能创建教师 */
   const assignableRoles = useMemo((): User['role'][] => {
@@ -876,13 +872,12 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     return [];
   }, [currentUser?.role]);
 
-  /** 列表展示：学生账号为独立 scope；教职工仍按权限过滤 */
+  /** 列表展示：按当前登录身份过滤教职工 */
   const displayedUsers = useMemo(() => {
-    if (userListScope === 'students') return users;
     if (currentUser?.role === 'system-admin') return users.filter((u) => u.role === 'admin' || u.role === 'teacher');
     if (currentUser?.role === 'admin') return users.filter((u) => u.role === 'teacher');
     return users;
-  }, [users, currentUser?.role, userListScope]);
+  }, [users, currentUser?.role]);
 
   /** 当前用户可否编辑该行（权限、部门等）：学生账号不可在此编辑 */
   const canEditUser = (u: AdminUser) => {
@@ -945,61 +940,40 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [displayedUsers]);
 
   const usersShownInUsersSection = useMemo(() => {
-    let list: AdminUser[];
-    if (userListScope === 'students') {
-      const q = userStudentFilterSearch.trim().toLowerCase();
-      if (!q) list = [...displayedUsers];
-      else {
-        list = displayedUsers.filter((u) => {
-          const hay = [
-            u.username,
-            u.displayName || '',
-            u.nameZh || '',
-            u.nameEn || '',
-            u.studentNameZh || '',
-            u.studentNameEn || '',
-          ]
-            .join('\n')
-            .toLowerCase();
-          return hay.includes(q);
-        });
+    let list = displayedUsers.filter((u) => {
+      if (userStaffFilterRole && u.role !== userStaffFilterRole) return false;
+      if (userStaffFilterDepartment) {
+        const d = (u.department ?? '').trim();
+        if (userStaffFilterDepartment === USER_FILTER_NONE) {
+          if (d) return false;
+        } else if (d !== userStaffFilterDepartment) return false;
       }
-    } else {
-      list = displayedUsers.filter((u) => {
-        if (userStaffFilterRole && u.role !== userStaffFilterRole) return false;
-        if (userStaffFilterDepartment) {
-          const d = (u.department ?? '').trim();
-          if (userStaffFilterDepartment === USER_FILTER_NONE) {
-            if (d) return false;
-          } else if (d !== userStaffFilterDepartment) return false;
-        }
-        if (userStaffFilterPrimarySubject) {
-          const s = (u.primarySubject ?? '').trim();
-          if (userStaffFilterPrimarySubject === USER_FILTER_NONE) {
-            if (s) return false;
-          } else if (s !== userStaffFilterPrimarySubject) return false;
-        }
-        if (userStaffFilterSearch.trim()) {
-          const fq = userStaffFilterSearch.trim().toLowerCase();
-          const roleLabel = ROLE_LABELS[u.role as User['role']]?.[isZh ? 'zh' : 'en'] ?? u.role;
-          const blob = [
-            u.username,
-            u.displayName || '',
-            u.nameZh || '',
-            u.nameEn || '',
-            u.department || '',
-            u.primarySubject || '',
-            roleLabel,
-          ]
-            .join(' ')
-            .toLowerCase();
-          if (!blob.includes(fq)) return false;
-        }
-        return true;
-      });
-    }
+      if (userStaffFilterPrimarySubject) {
+        const s = (u.primarySubject ?? '').trim();
+        if (userStaffFilterPrimarySubject === USER_FILTER_NONE) {
+          if (s) return false;
+        } else if (s !== userStaffFilterPrimarySubject) return false;
+      }
+      if (userStaffFilterSearch.trim()) {
+        const fq = userStaffFilterSearch.trim().toLowerCase();
+        const roleLabel = ROLE_LABELS[u.role as User['role']]?.[isZh ? 'zh' : 'en'] ?? u.role;
+        const blob = [
+          u.username,
+          u.displayName || '',
+          u.nameZh || '',
+          u.nameEn || '',
+          u.department || '',
+          u.primarySubject || '',
+          roleLabel,
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!blob.includes(fq)) return false;
+      }
+      return true;
+    });
 
-    if (userListScope === 'staff' && userStaffSortKey) {
+    if (userStaffSortKey) {
       const sortVal = (u: AdminUser) =>
         userStaffSortKey === 'department'
           ? (u.department ?? '').trim().toLowerCase()
@@ -1014,8 +988,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     return list;
   }, [
     displayedUsers,
-    userListScope,
-    userStudentFilterSearch,
     userStaffFilterDepartment,
     userStaffFilterPrimarySubject,
     userStaffFilterRole,
@@ -1025,15 +997,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     isZh,
   ]);
 
+  const hasActiveStaffUserFilters =
+    Boolean(userStaffFilterDepartment)
+    || Boolean(userStaffFilterPrimarySubject)
+    || Boolean(userStaffFilterRole)
+    || Boolean(userStaffFilterSearch.trim());
+
   useEffect(() => {
+    if (adminTab !== 'users') return;
     setUserStaffFilterDepartment('');
     setUserStaffFilterPrimarySubject('');
     setUserStaffFilterRole('');
     setUserStaffFilterSearch('');
-    setUserStudentFilterSearch('');
     setUserStaffSortKey(null);
     setUserStaffSortDir('asc');
-  }, [userListScope]);
+  }, [adminTab]);
 
   const toggleStaffTableSort = (key: 'department' | 'primarySubject') => {
     if (userStaffSortKey === key) {
@@ -1054,11 +1032,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     if (adminTab !== 'users') return;
     setLoading(true);
     setError(null);
-    loadUsers(userListScope)
+    loadUsers('staff')
       .then((data) => setUsers(data))
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load users'))
       .finally(() => setLoading(false));
-  }, [adminTab, userListScope]);
+  }, [adminTab]);
 
   const refreshYears = async () => {
     const list = await loadAcademicYears();
@@ -1800,19 +1778,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
 
       setCurrentYearClassCount(classesForYear.length);
       setCurrentYearStudentCount(studentIds.size);
-      setCurrentYearClasses(
-        classesForYear
-          .slice()
-          .sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name))
-          .map((cls) => ({
-            cls,
-            studentCount: classToStudentSet.get(cls.id)?.size ?? 0,
-          })),
-      );
     } catch {
       setCurrentYearClassCount(null);
       setCurrentYearStudentCount(null);
-      setCurrentYearClasses([]);
     }
   }, [adminTab, foundationSubTab, currentYearId]);
 
@@ -1901,7 +1869,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   }, [staffingYearId]);
 
   useEffect(() => {
-    if ((adminTab !== 'staffing' && adminTab !== 'weekly-load' && adminTab !== 'report-settings') || !USE_CLOUD_STORAGE) return;
+    if ((adminTab !== 'staffing' && adminTab !== 'report-settings') || !USE_CLOUD_STORAGE) return;
     let cancelled = false;
     void Promise.all([hydrateCategoryOrderFromCloud(), hydrateCourseDomainsFromCloud()]).then(() => {
       if (!cancelled) setStaffingCategoryOrderNonce((n) => n + 1);
@@ -1978,24 +1946,55 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   };
 
   const filteredAndSortedStudents = useMemo(() => {
+    const gradeConfig = normalizeGradeConfig(loadGradeConfigSync());
+    const classesInYear = studentCurrentYearId
+      ? allClasses.filter((c) => c.academicYearId === studentCurrentYearId)
+      : [];
     let list = [...students];
+    if (studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL) {
+      list = list.filter((s) => {
+        const yearEnr = studentCurrentYearId
+          ? enrollments.find((e) => e.studentId === s.id && e.academicYearId === studentCurrentYearId)
+          : undefined;
+        const cls = yearEnr ? classesInYear.find((c) => c.id === yearEnr.classId) : undefined;
+        if (cls) {
+          return filterClassesBySchoolSegment(gradeConfig, [cls], studentFilterSegmentId).length > 0;
+        }
+        if (s.currentGrade != null) {
+          const catalogId = getGradeCatalogIdForClass(gradeConfig, s.currentGrade, { className: '' });
+          const seg = gradeConfig.segments?.find((item) => item.id === studentFilterSegmentId);
+          return seg ? seg.gradeIds.includes(catalogId) : true;
+        }
+        return false;
+      });
+    }
+    if (studentFilterGradeLevel) {
+      const gradeLevel = Number(studentFilterGradeLevel);
+      list = list.filter((s) => {
+        const yearEnr = studentCurrentYearId
+          ? enrollments.find((e) => e.studentId === s.id && e.academicYearId === studentCurrentYearId)
+          : undefined;
+        const cls = yearEnr ? classesInYear.find((c) => c.id === yearEnr.classId) : undefined;
+        return (cls?.grade ?? s.currentGrade) === gradeLevel;
+      });
+    }
+    if (studentFilterClass.trim()) {
+      const classId = studentFilterClass;
+      const enrolledIds = new Set(
+        enrollments
+          .filter((e) => e.classId === classId && (!studentCurrentYearId || e.academicYearId === studentCurrentYearId))
+          .map((e) => e.studentId),
+      );
+      list = list.filter((s) => enrolledIds.has(s.id));
+    }
     if (studentFilterName.trim()) {
       const q = studentFilterName.trim().toLowerCase();
       list = list.filter((s) =>
         (s.nameZh ?? '').toLowerCase().includes(q) ||
         (s.nameEn ?? '').toLowerCase().includes(q) ||
         s.name.toLowerCase().includes(q) ||
-        (s.studentNumber?.toLowerCase().includes(q))
+        (s.studentNumber?.toLowerCase().includes(q)),
       );
-    }
-    if (studentFilterGrade.trim()) {
-      const q = studentFilterGrade.trim().toLowerCase();
-      list = list.filter((s) => String(s.currentGrade ?? '').toLowerCase().includes(q));
-    }
-    if (studentFilterClass.trim()) {
-      const classId = studentFilterClass;
-      const enrolledIds = new Set(enrollments.filter((e) => e.classId === classId).map((e) => e.studentId));
-      list = list.filter((s) => enrolledIds.has(s.id));
     }
     list.sort((a, b) => {
       let cmp = 0;
@@ -2024,7 +2023,65 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       return studentSortDir === 'asc' ? cmp : -cmp;
     });
     return list;
-  }, [students, enrollments, studentFilterName, studentFilterGrade, studentFilterClass, studentSortField, studentSortDir]);
+  }, [
+    students,
+    enrollments,
+    allClasses,
+    studentCurrentYearId,
+    studentFilterSegmentId,
+    studentFilterGradeLevel,
+    studentFilterClass,
+    studentFilterName,
+    studentSortField,
+    studentSortDir,
+  ]);
+
+  const studentGradeConfig = useMemo(() => normalizeGradeConfig(loadGradeConfigSync()), []);
+
+  const studentSegmentOptions = useMemo(() => {
+    const allOption = { id: ROADMAP_OVERVIEW_TAB_ALL, label: isZh ? '全部学段' : 'All segments' };
+    if (!gradeConfigHasSegments(studentGradeConfig)) return [allOption];
+    const segs = getRoadmapSegmentsInDisplayOrder(studentGradeConfig);
+    if (segs.length === 0) return [allOption];
+    return [allOption, ...segs.map((seg) => ({ id: seg.id, label: seg.label }))];
+  }, [studentGradeConfig, isZh]);
+
+  const studentFilterGradeOptions = useMemo(() => {
+    let items = studentGradeConfig.items;
+    if (studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL && studentGradeConfig.segments?.length) {
+      const seg = studentGradeConfig.segments.find((s) => s.id === studentFilterSegmentId);
+      if (seg?.gradeIds?.length) {
+        items = items.filter((item) => seg.gradeIds.includes(item.id));
+      }
+    }
+    return items;
+  }, [studentGradeConfig, studentFilterSegmentId]);
+
+  const studentFilterClassOptions = useMemo(() => {
+    if (!studentCurrentYearId) return [];
+    let cls = allClasses.filter((c) => c.academicYearId === studentCurrentYearId);
+    if (studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL) {
+      cls = filterClassesBySchoolSegment(studentGradeConfig, cls, studentFilterSegmentId);
+    }
+    if (studentFilterGradeLevel) {
+      const gradeLevel = Number(studentFilterGradeLevel);
+      cls = cls.filter((c) => c.grade === gradeLevel);
+    }
+    return cls.slice().sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  }, [allClasses, studentCurrentYearId, studentFilterSegmentId, studentFilterGradeLevel, studentGradeConfig]);
+
+  const clearStudentFilters = () => {
+    setStudentFilterSegmentId(ROADMAP_OVERVIEW_TAB_ALL);
+    setStudentFilterGradeLevel('');
+    setStudentFilterClass('');
+    setStudentFilterName('');
+  };
+
+  const hasActiveStudentFilters =
+    studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL ||
+    !!studentFilterGradeLevel ||
+    !!studentFilterClass ||
+    !!studentFilterName.trim();
 
   const openEditStudent = (s: Student) => {
     setEditStudent(s);
@@ -2243,9 +2300,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     setDeleteYearTarget(null);
     setDeleteYearConfirmInput('');
   };
-
-  const getGradeLabel = (level: number): string =>
-    getGradeLabelByLevel(normalizeGradeConfig(loadGradeConfigSync()), level);
 
   const makeEmptyStaffDraft = (): StaffCreateDraftRow => {
     const first = assignableRoles[0];
@@ -2513,32 +2567,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
   };
 
-  const openStudentLoginDialog = async () => {
-    if (!USE_CLOUD_STORAGE) return;
-    setStudentLoginBusy(true);
-    setStudentLoginPhase('preview');
-    setStudentLoginResult(null);
-    setError(null);
-    try {
-      const list = await loadStudents();
-      const withNumber = list.filter((s) => s.studentNumber != null && String(s.studentNumber).trim() !== '');
-      setStudentLoginPreview(
-        withNumber.map((s) => ({
-          studentId: s.id,
-          nameZh: s.nameZh ?? '',
-          nameEn: s.nameEn ?? '',
-          studentNumber: String(s.studentNumber).trim(),
-          password: randomSixDigitPassword(),
-        })),
-      );
-      setStudentLoginOpen(true);
-    } catch (e: unknown) {
-      setError((e as Error)?.message || 'Failed to load students');
-    } finally {
-      setStudentLoginBusy(false);
-    }
-  };
-
   const confirmStudentLoginImport = async () => {
     if (studentLoginPreview.length === 0) return;
     setStudentLoginBusy(true);
@@ -2549,10 +2577,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       );
       setStudentLoginResult({ created: created.length, skipped: skipped.length });
       setStudentLoginPhase('done');
-      if (adminTab === 'users' && userListScope === 'students') {
-        const next = await loadUsers('students');
-        setUsers(next);
-      }
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Import failed');
     } finally {
@@ -4886,11 +4910,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         role: 'system-admin' as const,
         panel: true,
         users: L('全管', 'Full'),
-        foundation: L('全管（含班级）', 'Full incl. classes'),
-        classes: L('—', '—'),
+        foundation: L('全管', 'Full'),
+        classes: L('全管', 'Full'),
         courses: L('新建/维护', 'Create/edit'),
-        staffing: L('全管', 'Full'),
-        weeklyLoad: L('查看/导出', 'View & export'),
+        staffing: L('全管（含周课时统计）', 'Full incl. weekly load'),
         students: L('增删改', 'Full'),
         portrait: L('创建与管理', 'Create & manage'),
         teacherPortrait: L('创建与管理', 'Create & manage'),
@@ -4900,11 +4923,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         role: 'admin' as const,
         panel: true,
         users: L('可管教师', 'Manage teachers'),
-        foundation: L('学年只读；学段/班级可编', 'Years view; stages & classes edit'),
-        classes: L('—', '—'),
+        foundation: L('学年只读；学段/组织可编', 'Years view; stages & org edit'),
+        classes: L('可编', 'Edit'),
         courses: L('无新建；可编单元', 'No new course; units'),
-        staffing: L('全管', 'Full'),
-        weeklyLoad: L('查看/导出', 'View & export'),
+        staffing: L('全管（含周课时统计）', 'Full incl. weekly load'),
         students: L('可增不可删', 'Add, not delete'),
         portrait: L('创建与管理', 'Create & manage'),
         teacherPortrait: L('创建与管理', 'Create & manage'),
@@ -4918,7 +4940,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         classes: L('仅查看', 'View'),
         courses: L('—', '—'),
         staffing: L('—', '—'),
-        weeklyLoad: L('—', '—'),
         students: L('关联班级', 'Linked classes'),
         portrait: L('任课范围', 'Teaching scope'),
         teacherPortrait: L('—', '—'),
@@ -4951,17 +4972,24 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           </button>
           <button
             type="button"
+            onClick={() => { setAdminTab('foundation'); setError(null); }}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'foundation' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            {isZh ? '学校设置' : 'School settings'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setAdminTab('classes'); setError(null); }}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'classes' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            {isZh ? '班级管理' : 'Classes'}
+          </button>
+          <button
+            type="button"
             onClick={() => { setAdminTab('students'); setError(null); }}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'students' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
             {isZh ? '学生管理' : 'Students'}
-          </button>
-          <button
-            type="button"
-            onClick={() => { setAdminTab('foundation'); setError(null); }}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'foundation' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
-          >
-            {isZh ? '基础设置' : 'Foundation'}
           </button>
           <button
             type="button"
@@ -4976,13 +5004,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'staffing' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
             {isZh ? '岗位安排' : 'Staffing'}
-          </button>
-          <button
-            type="button"
-            onClick={() => { setAdminTab('weekly-load'); setError(null); }}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'weekly-load' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
-          >
-            {isZh ? '周课时统计' : 'Weekly load'}
           </button>
           <button
             type="button"
@@ -5033,7 +5054,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         )}
         {adminTab === 'users' && (
         <>
-        {userListScope === 'staff' && (
         <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6">
           <h2 className="text-base sm:text-lg font-semibold text-slate-800 mb-3">
             {isZh ? '权限说明' : 'Permission reference'}
@@ -5045,11 +5065,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '权限' : 'Access level'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '后台' : 'Panel'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '用户管理' : 'Users'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学校设置' : 'School settings'}</th>
+                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '班级管理' : 'Classes'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生管理' : 'Students'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '基础设置' : 'Foundation'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '课程管理' : 'Courses'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '岗位安排' : 'Staffing'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '周课时统计' : 'Weekly load'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生画像' : 'Student portrait'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '教师画像' : 'Teacher portrait'}</th>
                   <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '数据库' : 'Database'}</th>
@@ -5061,11 +5081,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <td className="py-2 px-2 font-medium text-slate-800 whitespace-nowrap">{ROLE_LABELS[row.role][isZh ? 'zh' : 'en']}</td>
                     <td className="py-2 px-2 whitespace-nowrap">{row.panel ? (isZh ? '✓' : 'Yes') : '—'}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.users}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.students}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.foundation}</td>
+                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.classes}</td>
+                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.students}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.courses}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.staffing}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.weeklyLoad}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.portrait}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.teacherPortrait}</td>
                     <td className="py-2 px-2 text-slate-600 min-w-[5rem]">{row.database}</td>
@@ -5074,13 +5094,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-slate-500 mt-2">
-            {isZh
-              ? '列名对应后台顶部各板块。「权限」为登录身份：系统管理员可升降「管理员 / 教师」；学生账号在「学生管理 → 学生登录」开通，在「用户管理 → 学生账号」查看。'
-              : 'Columns match admin tabs. Access level is the signed-in role: system admin can promote/demote Admin or Teacher. Student logins: Students → Student login; list: Users → Student accounts.'}
-          </p>
         </section>
-        )}
 
         <Dialog
           open={createUserDialogOpen}
@@ -5246,74 +5260,57 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         </Dialog>
 
         <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6">
-          <div className="flex flex-col gap-3 mb-3">
-            <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 pb-3">
-              <span className="text-xs font-medium text-slate-500 uppercase tracking-wide">
-                {isZh ? '列表' : 'List'}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-3">
+            <h2 className="text-base font-semibold text-slate-800">
+              {isZh ? '所有用户（教职工）' : 'All users (staff)'}
+              <span className="text-slate-500 font-normal">
+                {' '}({loading ? '…' : usersShownInUsersSection.length}
+                {hasActiveStaffUserFilters && !loading && usersShownInUsersSection.length !== displayedUsers.length
+                  ? ` / ${displayedUsers.length}`
+                  : ''}
+                )
               </span>
-              <button
-                type="button"
-                onClick={() => { setUserListScope('staff'); setSelectedIds(new Set()); }}
-                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${userListScope === 'staff' ? 'border-slate-800 bg-slate-50 text-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-              >
-                {isZh ? '教职工' : 'Staff'}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setUserListScope('students'); setSelectedIds(new Set()); }}
-                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${userListScope === 'students' ? 'border-slate-800 bg-slate-50 text-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-              >
-                {isZh ? '学生账号' : 'Student accounts'}
-              </button>
-              {userListScope === 'staff' && (
-                <div className="ml-auto flex flex-wrap items-center gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={handleExportStaffUsersExcel}>
-                    {isZh ? '导出 Excel' : 'Export Excel'}
-                  </Button>
-                  <Button type="button" size="sm" onClick={openCreateUserDialog}>
-                    {isZh ? '新建 / 批量导入' : 'Add or import'}
-                  </Button>
-                </div>
-              )}
+            </h2>
+            <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+              <Button type="button" variant="outline" size="sm" onClick={handleExportStaffUsersExcel} disabled={loading}>
+                {isZh ? '导出 Excel' : 'Export Excel'}
+              </Button>
+              <Button type="button" size="sm" onClick={openCreateUserDialog} disabled={loading}>
+                <Plus className="h-4 w-4 mr-1" />
+                {isZh ? '新建 / 批量导入' : 'Add or import'}
+              </Button>
             </div>
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <h2 className="text-base sm:text-lg font-semibold text-slate-800">
-                {userListScope === 'staff' ? (isZh ? '所有用户（教职工）' : 'All users (staff)') : (isZh ? '所有用户（学生账号）' : 'All users (students)')}
-              </h2>
-              {loading && (
-                <span className="text-xs text-slate-500">
-                  {isZh ? '加载中…' : 'Loading…'}
-                </span>
-              )}
-              {!loading && userListScope === 'staff' && usersShownInUsersSection.length > 0 && selectedIds.size > 0 && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-slate-500">
-                    {isZh ? `已选 ${selectedIds.size} 人` : `Selected ${selectedIds.size}`}
-                  </span>
-                  <input
-                    value={batchDepartment}
-                    onChange={(e) => setBatchDepartment(e.target.value)}
-                    list="admin-batch-department-options"
-                    className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm w-40"
-                    placeholder={isZh ? '部门名称' : 'Department'}
-                  />
-                  <datalist id="admin-batch-department-options">
-                    {departmentOptions.map((d) => (
-                      <option key={d} value={d} />
-                    ))}
-                  </datalist>
-                  <Button
-                    size="sm"
-                    onClick={handleBatchDepartment}
-                    disabled={batchDeptLoading}
-                  >
-                    {batchDeptLoading ? (isZh ? '处理中…' : 'Updating…') : isZh ? '设为分组' : 'Set group'}
-                  </Button>
-                </div>
-              )}
+          </div>
+
+          {!loading && usersShownInUsersSection.length > 0 && selectedIds.size > 0 && (
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <span className="text-xs text-slate-500">
+                {isZh ? `已选 ${selectedIds.size} 人` : `Selected ${selectedIds.size}`}
+              </span>
+              <input
+                value={batchDepartment}
+                onChange={(e) => setBatchDepartment(e.target.value)}
+                list="admin-batch-department-options"
+                className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm w-40"
+                placeholder={isZh ? '部门名称' : 'Department'}
+              />
+              <datalist id="admin-batch-department-options">
+                {departmentOptions.map((d) => (
+                  <option key={d} value={d} />
+                ))}
+              </datalist>
+              <Button
+                size="sm"
+                onClick={handleBatchDepartment}
+                disabled={batchDeptLoading}
+              >
+                {batchDeptLoading ? (isZh ? '处理中…' : 'Updating…') : isZh ? '设为分组' : 'Set group'}
+              </Button>
             </div>
-            {!loading && userListScope === 'staff' && displayedUsers.length > 0 && (
-              <div className="flex flex-wrap items-end gap-2 pb-2 border-b border-slate-100">
+          )}
+
+          {!loading && displayedUsers.length > 0 && (
+            <div className="flex flex-wrap items-end gap-2 pb-2 mb-3 border-b border-slate-100">
                 <div className="flex flex-col gap-0.5">
                   <span className="text-[10px] uppercase text-slate-400">{isZh ? '部门' : 'Dept.'}</span>
                   <select
@@ -5364,31 +5361,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   />
                 </div>
               </div>
-            )}
-            {!loading && userListScope === 'students' && displayedUsers.length > 0 && (
-              <div className="flex flex-wrap items-end gap-2 pb-2 border-b border-slate-100">
-                <div className="flex flex-col gap-0.5 flex-1 min-w-[12rem]">
-                  <span className="text-[10px] uppercase text-slate-400">{isZh ? '筛选' : 'Filter'}</span>
-                  <input
-                    value={userStudentFilterSearch}
-                    onChange={(e) => setUserStudentFilterSearch(e.target.value)}
-                    className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm w-full max-w-md"
-                    placeholder={isZh ? '用户名、账号姓名、学籍姓名…' : 'Login, account or student names…'}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-          {!loading && userListScope === 'students' && !USE_CLOUD_STORAGE && (
-            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
-              {isZh ? '当前为本地模式，学生账号列表与导入仅在使用云端存储时可用。请在 .env 中启用 VITE_USE_CLOUD_STORAGE=true 并登录。' : 'Local mode: student account list and import require cloud mode. Set VITE_USE_CLOUD_STORAGE=true and sign in.'}
-            </p>
           )}
+
           {!loading && displayedUsers.length === 0 && (
             <p className="text-sm text-slate-500">
-              {userListScope === 'students'
-                ? (isZh ? '暂无学生登录账号。可在「学生管理」中使用「学生登录」批量开通。' : 'No student accounts yet. Use Student login under Students.')
-                : (isZh ? '暂时没有用户数据。' : 'No users yet.')}
+              {isZh ? '暂时没有用户数据。' : 'No users yet.'}
             </p>
           )}
           {!loading && usersShownInUsersSection.length === 0 && displayedUsers.length > 0 && (
@@ -5396,7 +5373,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               {isZh ? '当前筛选条件下没有匹配的用户。' : 'No users match the current filters.'}
             </p>
           )}
-          {usersShownInUsersSection.length > 0 && userListScope === 'staff' && (
+          {usersShownInUsersSection.length > 0 && (
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
@@ -5592,81 +5569,6 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               </table>
             </div>
           )}
-          {usersShownInUsersSection.length > 0 && userListScope === 'students' && USE_CLOUD_STORAGE && (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
-                    <th className="py-2 pr-4">ID</th>
-                    <th className="py-2 pr-4">{isZh ? '学号（登录名）' : 'Student no. (login)'}</th>
-                    <th className="py-2 pr-4">{isZh ? '密码' : 'Password'}</th>
-                    <th className="py-2 pr-4">{isZh ? '账号中文名' : 'Account (ZH)'}</th>
-                    <th className="py-2 pr-4">{isZh ? '账号英文名' : 'Account (EN)'}</th>
-                    <th className="py-2 pr-4">{isZh ? '权限' : 'Access'}</th>
-                    <th className="py-2 pr-4">{isZh ? '学籍中文名' : 'Student (ZH)'}</th>
-                    <th className="py-2 pr-4">{isZh ? '学籍英文名' : 'Student (EN)'}</th>
-                    <th className="py-2 pr-4">{isZh ? '学籍 ID' : 'Student record'}</th>
-                    <th className="py-2 pr-4">{isZh ? '创建时间' : 'Created at'}</th>
-                    <th className="py-2 pr-2 w-10" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {usersShownInUsersSection.map((u) => {
-                    const hasPassword = u.password != null && u.password !== '';
-                    const revealed = passwordRevealed[u.id];
-                    return (
-                      <tr key={u.id} className="border-b border-slate-100 last:border-b-0">
-                        <td className="py-2 pr-4 font-mono text-xs text-slate-500 truncate max-w-[100px]">{u.id}</td>
-                        <td className="py-2 pr-4 font-mono">{u.username}</td>
-                        <td className="py-2 pr-4">
-                          {hasPassword ? (
-                            <span className="inline-flex items-center gap-1">
-                              <span className="font-mono text-xs">
-                                {revealed ? u.password : '••••••'}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => setPasswordRevealed((prev) => ({ ...prev, [u.id]: !prev[u.id] }))}
-                                className="p-1 rounded hover:bg-slate-100 text-slate-500 hover:text-slate-700"
-                                title={revealed ? (isZh ? '隐藏密码' : 'Hide password') : (isZh ? '显示密码' : 'Show password')}
-                              >
-                                {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                              </button>
-                            </span>
-                          ) : (
-                            <span className="text-slate-400 text-xs">{isZh ? '不可查看' : 'N/A'}</span>
-                          )}
-                        </td>
-                        <td className="py-2 pr-4">{(u.nameZh ?? '').trim() || '—'}</td>
-                        <td className="py-2 pr-4">{(u.nameEn ?? '').trim() || '—'}</td>
-                        <td className="py-2 pr-4 text-slate-600">{ROLE_LABELS.student[isZh ? 'zh' : 'en']}</td>
-                        <td className="py-2 pr-4">{u.studentNameZh ?? '—'}</td>
-                        <td className="py-2 pr-4">{u.studentNameEn ?? '—'}</td>
-                        <td className="py-2 pr-4 font-mono text-xs text-slate-600">{u.studentId ?? '—'}</td>
-                        <td className="py-2 pr-4 text-xs text-slate-500">
-                          {u.createdAt ? new Date(u.createdAt).toLocaleString() : '-'}
-                        </td>
-                        <td className="py-2 pr-2">
-                          {canDeleteUser(u) ? (
-                            <button
-                              type="button"
-                              onClick={() => openDeleteConfirm(u)}
-                              className="p-1.5 rounded hover:bg-red-50 text-slate-500 hover:text-red-600"
-                              title={isZh ? '删除登录账号' : 'Remove login'}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          ) : (
-                            <span className="text-slate-300">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
         </section>
         </>
         )}
@@ -5691,12 +5593,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             promotePreviewLoading={promotePreviewLoading}
             currentYearClassCount={currentYearClassCount}
             currentYearStudentCount={currentYearStudentCount}
-            currentYearClasses={currentYearClasses}
-            getGradeLabel={getGradeLabel}
             onOrgError={(msg) => setError(msg)}
             onDepartmentsChange={loadOrgDepartmentLabels}
             onDefaultYearChanged={refreshYears}
           />
+        )}
+
+        {adminTab === 'classes' && (
+          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <ClassManagement onBackToHub={() => {}} embedded hideYearGear />
+          </section>
         )}
 
         {adminTab === 'staffing' && (
@@ -5720,33 +5626,45 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   disabled={staffingLoading || allYears.length === 0}
                 />
                 {USE_CLOUD_STORAGE && staffingYearId ? (
-                  <>
+                  staffingSubTab === 'weekly-load' ? (
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={handleStaffingRosterExport}
-                      disabled={staffingLoading}
+                      onClick={handleWeeklyLoadExport}
+                      disabled={staffingLoading || staffingLoadGrandRows.length === 0}
                     >
                       {isZh ? '导出 Excel' : 'Export Excel'}
                     </Button>
-                    <input
-                      ref={staffingExcelInputRef}
-                      type="file"
-                      accept=".xlsx,.xls"
-                      className="hidden"
-                      onChange={(e) => void handleStaffingRosterExcelImport(e)}
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => staffingExcelInputRef.current?.click()}
-                      disabled={staffingExcelImporting || staffingLoading}
-                    >
-                      {staffingExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
-                    </Button>
-                  </>
+                  ) : (
+                    <>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleStaffingRosterExport}
+                        disabled={staffingLoading}
+                      >
+                        {isZh ? '导出 Excel' : 'Export Excel'}
+                      </Button>
+                      <input
+                        ref={staffingExcelInputRef}
+                        type="file"
+                        accept=".xlsx,.xls"
+                        className="hidden"
+                        onChange={(e) => void handleStaffingRosterExcelImport(e)}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => staffingExcelInputRef.current?.click()}
+                        disabled={staffingExcelImporting || staffingLoading}
+                      >
+                        {staffingExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+                      </Button>
+                    </>
+                  )
                 ) : null}
               </>
             }
@@ -6053,157 +5971,118 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   </>
                 )}
 
-          </StaffingSettingsPanel>
-        )}
-
-        {adminTab === 'weekly-load' && (
-          <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
-            {staffingLoading ? (
-              <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>
-            ) : !staffingYearId ? (
-              <p className="text-sm text-slate-500">{isZh ? '请先创建学年。' : 'Create an academic year first.'}</p>
-            ) : !USE_CLOUD_STORAGE ? (
-              <p className="text-sm text-slate-500">
-                {isZh ? '周课时统计需要云端模式（VITE_USE_CLOUD_STORAGE=true）。' : 'Weekly load requires cloud mode.'}
-              </p>
-            ) : (
-              <div className="space-y-6">
-                {staffingCourseColumnGroups.length === 0 ? (
-                  <p className="text-sm text-slate-500">
-                    {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
-                  </p>
-                ) : staffingTeachers.length === 0 ? (
-                  <p className="text-sm text-slate-500">{isZh ? '暂无教师账号。' : 'No teacher accounts.'}</p>
-                ) : (
-                  <>
-                    {staffingLoadLineItems.length === 0 && (
-                      <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-                        {isZh
-                          ? '当前学年在岗位安排中尚未指定任课教师，下方合计均为 0。请前往「岗位安排 → 课程岗位」进行排课。'
-                          : 'No course staffing for this year yet; totals are zero. Assign teachers under Staffing → Course staffing.'}
+                {staffingSubTab === 'weekly-load' && (
+                  <div className="space-y-6">
+                    {staffingCourseColumnGroups.length === 0 ? (
+                      <p className="text-sm text-slate-500">
+                        {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
                       </p>
-                    )}
+                    ) : staffingTeachers.length === 0 ? (
+                      <p className="text-sm text-slate-500">{isZh ? '暂无教师账号。' : 'No teacher accounts.'}</p>
+                    ) : (
+                      <>
+                        {staffingLoadLineItems.length === 0 && (
+                          <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                            {isZh
+                              ? '当前学年在课程岗位中尚未指定任课教师，下方合计均为 0。请先在「课程岗位」进行排课。'
+                              : 'No course staffing for this year yet; totals are zero. Assign teachers under Course staffing first.'}
+                          </p>
+                        )}
 
-                    <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 mb-4 text-sm">
-                      <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
-                        <div className="flex flex-col gap-1 min-w-[10rem]">
-                          <label className="text-xs font-medium text-slate-600">
-                            {isZh ? '主学科筛选' : 'Primary subject'}
-                          </label>
-                          <select
-                            value={staffingLoadGrandFilterPrimary}
-                            onChange={(e) => setStaffingLoadGrandFilterPrimary(e.target.value)}
-                            className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm max-w-[16rem]"
-                          >
-                            <option value="">{isZh ? '全部' : 'All'}</option>
-                            {staffingLoadGrandPrimaryFilterOptions.map((key) => (
-                              <option key={key} value={key}>
-                                {key === STAFFING_LOAD_PRIMARY_NONE
-                                  ? (isZh ? '未设置主学科' : 'Not set')
-                                  : key}
-                              </option>
-                            ))}
-                          </select>
+                        <div className="flex flex-wrap items-end gap-x-4 gap-y-3 mb-4 text-sm">
+                          <div className="flex flex-col gap-1 min-w-[10rem]">
+                            <label className="text-xs font-medium text-slate-600">
+                              {isZh ? '主学科筛选' : 'Primary subject'}
+                            </label>
+                            <select
+                              value={staffingLoadGrandFilterPrimary}
+                              onChange={(e) => setStaffingLoadGrandFilterPrimary(e.target.value)}
+                              className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm max-w-[16rem]"
+                            >
+                              <option value="">{isZh ? '全部' : 'All'}</option>
+                              {staffingLoadGrandPrimaryFilterOptions.map((key) => (
+                                <option key={key} value={key}>
+                                  {key === STAFFING_LOAD_PRIMARY_NONE
+                                    ? (isZh ? '未设置主学科' : 'Not set')
+                                    : key}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex flex-col gap-1 min-w-[11rem]">
+                            <label className="text-xs font-medium text-slate-600">
+                              {isZh ? '排序' : 'Sort'}
+                            </label>
+                            <select
+                              value={staffingLoadGrandSort}
+                              onChange={(e) =>
+                                setStaffingLoadGrandSort(
+                                  e.target.value as 'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc',
+                                )
+                              }
+                              className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                            >
+                              <option value="total-desc">{isZh ? '周课时（多→少）' : 'Periods (high → low)'}</option>
+                              <option value="total-asc">{isZh ? '周课时（少→多）' : 'Periods (low → high)'}</option>
+                              <option value="name-asc">{isZh ? '教师姓名（A→Z）' : 'Teacher name (A → Z)'}</option>
+                              <option value="primary-asc">{isZh ? '主学科（A→Z）' : 'Primary subject (A → Z)'}</option>
+                            </select>
+                          </div>
                         </div>
-                        <div className="flex flex-col gap-1 min-w-[11rem]">
-                          <label className="text-xs font-medium text-slate-600">
-                            {isZh ? '排序' : 'Sort'}
-                          </label>
-                          <select
-                            value={staffingLoadGrandSort}
-                            onChange={(e) =>
-                              setStaffingLoadGrandSort(
-                                e.target.value as 'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc',
-                              )
-                            }
-                            className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
-                          >
-                            <option value="total-desc">{isZh ? '周课时（多→少）' : 'Periods (high → low)'}</option>
-                            <option value="total-asc">{isZh ? '周课时（少→多）' : 'Periods (low → high)'}</option>
-                            <option value="name-asc">{isZh ? '教师姓名（A→Z）' : 'Teacher name (A → Z)'}</option>
-                            <option value="primary-asc">{isZh ? '主学科（A→Z）' : 'Primary subject (A → Z)'}</option>
-                          </select>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-end gap-x-3 gap-y-3">
-                        <div className="flex flex-col gap-1">
-                          <label className="text-xs font-medium text-slate-600">
-                            {isZh ? '学年' : 'Year'}
-                          </label>
-                          <AcademicYearSelect
-                            isZh={isZh}
-                            years={allYears}
-                            value={staffingYearId}
-                            onChange={setStaffingYearId}
-                            allowEmpty={allYears.length === 0}
-                            emptyLabel={isZh ? '暂无学年' : 'No years'}
-                            disabled={staffingLoading || allYears.length === 0}
-                          />
-                        </div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={handleWeeklyLoadExport}
-                          disabled={staffingLoading || staffingLoadGrandRows.length === 0}
-                        >
-                          {isZh ? '导出 Excel' : 'Export Excel'}
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="overflow-x-auto rounded-lg border border-slate-200">
-                      <table className="min-w-full text-sm">
-                        <thead className="bg-slate-50 text-left text-xs text-slate-600">
-                            <tr>
-                              <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
-                                {isZh ? '教职工' : 'Staff'}
-                              </th>
-                              <th className="py-2 px-3 font-medium whitespace-nowrap w-[7rem]">
-                                {isZh ? '主学科' : 'Primary'}
-                              </th>
-                              <th className="py-2 px-3 font-medium min-w-[12rem]">
-                                {isZh ? '课时构成' : 'Breakdown'}
-                              </th>
-                              <th className="py-2 px-3 font-medium whitespace-nowrap text-right w-[7.5rem]">
-                                {isZh ? '周课时（节/周）' : 'Periods / wk'}
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {staffingLoadGrandRows.length === 0 ? (
-                              <tr className="border-t border-slate-200 bg-white">
-                                <td colSpan={4} className="py-3 px-3 text-sm text-slate-500">
-                                  {isZh
-                                    ? '当前筛选下暂无教师行，请调整主学科筛选或确认岗位安排。'
-                                    : 'No rows for this filter. Change the primary-subject filter or check staffing.'}
-                                </td>
+                        <div className="overflow-x-auto rounded-lg border border-slate-200">
+                          <table className="min-w-full text-sm">
+                            <thead className="bg-slate-50 text-left text-xs text-slate-600">
+                              <tr>
+                                <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
+                                  {isZh ? '教职工' : 'Staff'}
+                                </th>
+                                <th className="py-2 px-3 font-medium whitespace-nowrap w-[7rem]">
+                                  {isZh ? '主学科' : 'Primary'}
+                                </th>
+                                <th className="py-2 px-3 font-medium min-w-[12rem]">
+                                  {isZh ? '课时构成' : 'Breakdown'}
+                                </th>
+                                <th className="py-2 px-3 font-medium whitespace-nowrap text-right w-[7.5rem]">
+                                  {isZh ? '周课时（节/周）' : 'Periods / wk'}
+                                </th>
                               </tr>
-                            ) : (
-                              staffingLoadGrandRows.map((r) => (
-                                <tr key={r.teacherId} className="border-t border-slate-200 bg-white">
-                                  <td className="py-2 px-3 text-slate-800 align-top whitespace-nowrap font-medium">
-                                    {r.teacherName}
-                                  </td>
-                                  <td className="py-2 px-3 text-slate-700 align-top text-xs sm:text-sm whitespace-nowrap">
-                                    {r.primarySubjectLabel}
-                                  </td>
-                                  <td className="py-2 px-3 text-slate-600 text-xs sm:text-sm leading-relaxed align-top break-words max-w-[min(48rem,85vw)]">
-                                    {r.detail}
-                                  </td>
-                                  <td className="py-2 px-3 font-semibold text-slate-900 tabular-nums text-right align-top">
-                                    {formatWeeklyLoadValue(r.total)}
+                            </thead>
+                            <tbody>
+                              {staffingLoadGrandRows.length === 0 ? (
+                                <tr className="border-t border-slate-200 bg-white">
+                                  <td colSpan={4} className="py-3 px-3 text-sm text-slate-500">
+                                    {isZh
+                                      ? '当前筛选下暂无教师行，请调整主学科筛选或确认课程岗位。'
+                                      : 'No rows for this filter. Change the primary-subject filter or check course staffing.'}
                                   </td>
                                 </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
-                    </div>
-                  </>
+                              ) : (
+                                staffingLoadGrandRows.map((r) => (
+                                  <tr key={r.teacherId} className="border-t border-slate-200 bg-white">
+                                    <td className="py-2 px-3 text-slate-800 align-top whitespace-nowrap font-medium">
+                                      {r.teacherName}
+                                    </td>
+                                    <td className="py-2 px-3 text-slate-700 align-top text-xs sm:text-sm whitespace-nowrap">
+                                      {r.primarySubjectLabel}
+                                    </td>
+                                    <td className="py-2 px-3 text-slate-600 text-xs sm:text-sm leading-relaxed align-top break-words max-w-[min(48rem,85vw)]">
+                                      {r.detail}
+                                    </td>
+                                    <td className="py-2 px-3 font-semibold text-slate-900 tabular-nums text-right align-top">
+                                      {formatWeeklyLoadValue(r.total)}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
-              </div>
-            )}
-          </section>
+
+          </StaffingSettingsPanel>
         )}
 
         {adminTab === 'students' && (
@@ -6214,7 +6093,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   ? `${allYears.find((y) => y.id === studentCurrentYearId)?.name ?? ''} — ${isZh ? '学生列表' : 'Students'}`
                   : (isZh ? '学生列表' : 'Student list')}
                 <span className="text-slate-500 font-normal">
-                  {' '}({studentLoading ? '…' : students.length})
+                  {' '}({studentLoading ? '…' : filteredAndSortedStudents.length}
+                  {hasActiveStudentFilters && !studentLoading && filteredAndSortedStudents.length !== students.length
+                    ? ` / ${students.length}`
+                    : ''}
+                  )
                 </span>
               </h2>
               <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
@@ -6253,39 +6136,98 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 >
                   {studentExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
                 </Button>
+                {canManageStudents && (
+                  <Button size="sm" onClick={() => setDialogCreateStudent(true)} disabled={studentLoading}>
+                    <Plus className="h-4 w-4 mr-1" />
+                    {isZh ? '新建学生' : 'New student'}
+                  </Button>
+                )}
               </div>
             </div>
 
-            <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
-                <span className="text-slate-500">{isZh ? '筛选：' : 'Filter:'}</span>
-                <input
-                  value={studentFilterName}
-                  onChange={(e) => setStudentFilterName(e.target.value)}
-                  placeholder={isZh ? '中文名/英文名/学号' : 'Chinese/English name or ID'}
-                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm w-36 placeholder:text-slate-400"
-                />
-                <input
-                  value={studentFilterGrade}
-                  onChange={(e) => setStudentFilterGrade(e.target.value)}
-                  placeholder={isZh ? '当前年级' : 'Current grade'}
-                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm w-24 placeholder:text-slate-400"
-                />
-                <select
+            <FilterToolbar className="mb-3 gap-2">
+              <FilterField size="sm" label={isZh ? '学段' : 'Segment'} htmlFor="student-filter-segment">
+                <FilterSelect
+                  id="student-filter-segment"
+                  controlSize="sm"
+                  width="sm"
+                  value={studentFilterSegmentId}
+                  disabled={studentSegmentOptions.length <= 1}
+                  onChange={(e) => {
+                    setStudentFilterSegmentId(e.target.value);
+                    setStudentFilterGradeLevel('');
+                    setStudentFilterClass('');
+                  }}
+                >
+                  {studentSegmentOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </FilterSelect>
+              </FilterField>
+              <FilterField size="sm" label={isZh ? '年级' : 'Grade'} htmlFor="student-filter-grade">
+                <FilterSelect
+                  id="student-filter-grade"
+                  controlSize="sm"
+                  width="sm"
+                  value={studentFilterGradeLevel}
+                  onChange={(e) => {
+                    setStudentFilterGradeLevel(e.target.value);
+                    setStudentFilterClass('');
+                  }}
+                >
+                  <option value="">{isZh ? '全部年级' : 'All grades'}</option>
+                  {studentFilterGradeOptions.map((item) => (
+                    <option key={item.id} value={String(item.level)}>
+                      {getGradeLabelByLevel(studentGradeConfig, item.level)}
+                    </option>
+                  ))}
+                </FilterSelect>
+              </FilterField>
+              <FilterField size="sm" label={isZh ? '班级' : 'Class'} htmlFor="student-filter-class">
+                <FilterSelect
+                  id="student-filter-class"
+                  controlSize="sm"
+                  width="sm"
                   value={studentFilterClass}
+                  disabled={!studentCurrentYearId}
                   onChange={(e) => setStudentFilterClass(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm bg-white min-w-[120px] text-slate-700"
                 >
                   <option value="">{isZh ? '全部班级' : 'All classes'}</option>
-                  {allClasses.map((c) => {
-                    const year = allYears.find((y) => y.id === c.academicYearId);
-                    return (
-                      <option key={c.id} value={c.id}>
-                        {year ? `${year.name} · ` : ''}{c.name}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
+                  {studentFilterClassOptions.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {getGradeLabelByLevel(studentGradeConfig, c.grade)} · {c.name}
+                    </option>
+                  ))}
+                </FilterSelect>
+              </FilterField>
+              <FilterField
+                size="sm"
+                label={isZh ? '详细信息搜索' : 'Search'}
+                htmlFor="student-filter-search"
+                className="flex-1 min-w-[9rem]"
+              >
+                <input
+                  id="student-filter-search"
+                  value={studentFilterName}
+                  onChange={(e) => setStudentFilterName(e.target.value)}
+                  placeholder={isZh ? '中文名 / 英文名 / 学号' : 'Chinese / English name or student no.'}
+                  className={filterSelectClassName('sm', 'w-full placeholder:text-slate-400', 'sm')}
+                />
+              </FilterField>
+              {hasActiveStudentFilters ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={clearStudentFilters}
+                  className="h-7 px-2 text-xs text-slate-600 self-end"
+                >
+                  {isZh ? '清除' : 'Clear'}
+                </Button>
+              ) : null}
+            </FilterToolbar>
 
               {studentLoading ? (
                 <p className="text-sm text-slate-500 py-4">{isZh ? '加载中…' : 'Loading…'}</p>
@@ -6930,7 +6872,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           {studentLoginPhase === 'done' && studentLoginResult && (
             <p className="text-sm text-slate-700 py-2">
               {isZh
-                ? `成功开通 ${studentLoginResult.created} 个账号；跳过 ${studentLoginResult.skipped} 条。可在「用户管理 → 学生账号」中查看。`
+                ? `成功开通 ${studentLoginResult.created} 个账号；跳过 ${studentLoginResult.skipped} 条。`
                 : `Created ${studentLoginResult.created} account(s); skipped ${studentLoginResult.skipped}. See Users → Student accounts.`}
             </p>
           )}

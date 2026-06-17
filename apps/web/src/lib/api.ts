@@ -17,6 +17,7 @@ import type {
   ReportYearDimensionPreset,
   ReportTemplateProgress,
   ReportClassSubjectInsights,
+  ReportClassSubjectAnalysisSummaryItem,
   ReportTeachingDiagnosis,
   TeacherReportTemplateProgress,
   TeacherPortraitCollectionTemplateSummary,
@@ -50,7 +51,7 @@ function getHeaders(): HeadersInit {
   const userId = getCurrentUserId();
   return {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : userId ? { 'X-User-Id': userId } : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : import.meta.env.DEV && userId ? { 'X-User-Id': userId } : {}),
   };
 }
 
@@ -205,6 +206,49 @@ export const api = {
       const error = await response.json().catch(() => ({ error: 'Failed to delete course' }));
       throw new Error(error.error || 'Failed to delete course');
     }
+  },
+
+  /** 从数据库全量导出课程管理数据 */
+  async exportCurriculumData(): Promise<{
+    courses: Course[];
+    semesterData: Record<string, SemesterData>;
+    keyConcepts: string[];
+    categoryOrder: string[];
+    courseDomains: CourseDomainsConfig;
+    gradeConfig: GradeConfig;
+    exportDate: string;
+    version: string;
+    source?: 'database';
+  }> {
+    const response = await fetch(apiUrl('/api/curriculum/export'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Failed to export curriculum data: ${response.status} - ${errorText}`);
+    }
+    return response.json();
+  },
+
+  /** 将课程管理数据全量写入数据库（覆盖现有全校课程数据） */
+  async importCurriculumData(data: {
+    courses?: Course[];
+    semesterData?: Record<string, SemesterData>;
+    keyConcepts?: string[];
+    categoryOrder?: string[];
+    courseDomains?: CourseDomainsConfig;
+    gradeConfig?: GradeConfig;
+  }): Promise<{ success: boolean; coursesImported?: number; semesterRowsImported?: number }> {
+    const response = await fetch(apiUrl('/api/curriculum/import'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to import curriculum data' }));
+      throw new Error(error.error || 'Failed to import curriculum data');
+    }
+    return response.json();
   },
 
   /**
@@ -801,6 +845,32 @@ export const api = {
     return (data.assignments ?? []) as Array<{ classId: string; subjectKey: string }>;
   },
 
+  async getMyHomeroomClassIds(academicYearId: string): Promise<string[]> {
+    const response = await fetch(
+      apiUrl(`/api/classes/me/homeroom-classes?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to fetch homeroom classes');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch homeroom classes');
+    return (data.classIds ?? []) as string[];
+  },
+
+  async getMyGradeHeadClassIds(academicYearId: string): Promise<string[]> {
+    const response = await fetch(
+      apiUrl(`/api/classes/me/grade-head-classes?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to fetch grade-head classes');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch grade-head classes');
+    return (data.classIds ?? []) as string[];
+  },
+
   async createClass(item: ClassItem): Promise<ClassItem> {
     const response = await fetch(apiUrl('/api/classes'), {
       method: 'POST',
@@ -1056,10 +1126,14 @@ export const api = {
     academicYearId: string,
     term: Term,
     templateId: string,
+    opts?: { portraitScope?: 'overview' },
   ): Promise<{ report: StudentTermReport; template: ReportTemplate | null }> {
+    const q = new URLSearchParams();
+    if (opts?.portraitScope === 'overview') q.set('portraitScope', 'overview');
+    const qs = q.toString();
     const response = await fetch(
       apiUrl(
-        `/api/classes/reports/students/${encodeURIComponent(studentId)}/terms/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}/templates/${encodeURIComponent(templateId)}`
+        `/api/classes/reports/students/${encodeURIComponent(studentId)}/terms/${encodeURIComponent(academicYearId)}/${encodeURIComponent(term)}/templates/${encodeURIComponent(templateId)}${qs ? `?${qs}` : ''}`,
       ),
       { headers: getHeaders() }
     );
@@ -1187,6 +1261,54 @@ export const api = {
     }
     const data = await readJsonOrThrow(response, 'Failed to fetch class insights');
     return data.insights as ReportClassSubjectInsights;
+  },
+
+  async getReportClassInsightsSummary(
+    templateId: string,
+    classId: string,
+  ): Promise<ReportClassSubjectAnalysisSummaryItem[]> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/templates/${encodeURIComponent(templateId)}/classes/${encodeURIComponent(classId)}/class-insights-summary`,
+      ),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch class insights summary');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch class insights summary');
+    return (data.subjects ?? []) as ReportClassSubjectAnalysisSummaryItem[];
+  },
+
+  async getStudentSubjectInsights(
+    templateId: string,
+    studentId: string,
+  ): Promise<Array<{
+    subjectKey: string;
+    subjectName: string;
+    teacherName: string | null;
+    learningAnalysis: string | null;
+    supportPlan: string | null;
+  }>> {
+    const response = await fetch(
+      apiUrl(
+        `/api/classes/reports/templates/${encodeURIComponent(templateId)}/students/${encodeURIComponent(studentId)}/subject-insights`,
+      ),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch student subject insights');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch student subject insights');
+    return (data.insights ?? []) as Array<{
+      subjectKey: string;
+      subjectName: string;
+      teacherName: string | null;
+      learningAnalysis: string | null;
+      supportPlan: string | null;
+    }>;
   },
 
   async upsertReportClassSubjectInsights(
@@ -1948,7 +2070,7 @@ export const api = {
       const data = await response.json().catch(() => ({}));
       throw new Error((data as { error?: string }).error || 'Failed to fetch subject groups');
     }
-    return readJsonOrThrow(response, 'Failed to fetch subject groups') as {
+    return (await readJsonOrThrow(response, 'Failed to fetch subject groups')) as {
       groups: import('../types/classManagement').SubjectGroupPortraitSummary[];
       isAdmin: boolean;
     };

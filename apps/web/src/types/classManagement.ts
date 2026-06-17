@@ -521,6 +521,15 @@ export interface ReportClassSubjectInsights {
   updatedAt: string | null;
 }
 
+/** 班主任在学生中心查看的学科教师班级整体分析汇总项 */
+export interface ReportClassSubjectAnalysisSummaryItem {
+  subjectKey: string;
+  subjectName: string;
+  teacherName: string | null;
+  classOverallAnalysis: string | null;
+  updatedAt: string | null;
+}
+
 export interface StaffingAssignment {
   id: string;
   academicYearId: string;

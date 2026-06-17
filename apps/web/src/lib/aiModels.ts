@@ -12,9 +12,9 @@ export interface AIModel {
 
 export const AI_MODELS: AIModel[] = [
   {
-    id: 'kimi-k25',
-    name: 'Kimi K2.5',
-    code: 'Pro/moonshotai/Kimi-K2.5',
+    id: 'kimi-k26',
+    name: 'Kimi K2.6',
+    code: 'Pro/moonshotai/Kimi-K2.6',
     description: 'Kimi 新一代通用对话模型',
     kind: 'chat',
   },
@@ -26,17 +26,17 @@ export const AI_MODELS: AIModel[] = [
     kind: 'chat',
   },
   {
-    id: 'glm-5',
-    name: 'GLM 5',
-    code: 'Pro/zai-org/GLM-5',
-    description: '智谱 AI 通用模型',
+    id: 'deepseek-v4-flash',
+    name: 'DeepSeek V4 Flash',
+    code: 'deepseek-ai/DeepSeek-V4-Flash',
+    description: 'DeepSeek V4 快速对话模型',
     kind: 'chat',
   },
   {
-    id: 'kimi-k2-thinking',
-    name: 'Kimi K2 Thinking',
-    code: 'moonshotai/Kimi-K2-Thinking',
-    description: 'Kimi 推理模型（Thinking 版本）',
+    id: 'glm-5.1',
+    name: 'GLM 5.1',
+    code: 'Pro/zai-org/GLM-5.1',
+    description: '智谱 AI 通用模型',
     kind: 'chat',
   },
   {
@@ -48,13 +48,20 @@ export const AI_MODELS: AIModel[] = [
   },
 ];
 
-export const DEFAULT_MODEL_ID = 'kimi-k25';
+export const DEFAULT_MODEL_ID = 'deepseek-v4-flash';
 
-// 从localStorage获取保存的模型ID（兼容旧版 glm-4.7 -> glm-5）
+const LEGACY_MODEL_ID_MAP: Record<string, string> = {
+  'glm-4.7': 'glm-5.1',
+  'glm-5': 'glm-5.1',
+  'kimi-k25': 'kimi-k26',
+  'kimi-k2-thinking': 'kimi-k26',
+};
+
+// 从localStorage获取保存的模型ID（兼容旧版选型）
 export function getSavedModelId(): string {
   try {
     let saved = localStorage.getItem('ai-model-selection');
-    if (saved === 'glm-4.7') saved = 'glm-5';
+    if (saved && LEGACY_MODEL_ID_MAP[saved]) saved = LEGACY_MODEL_ID_MAP[saved];
     if (saved && AI_MODELS.find(m => m.id === saved)) {
       return saved;
     }
@@ -75,6 +82,7 @@ export function saveModelId(modelId: string): void {
 
 // 根据ID获取模型代码
 export function getModelCode(modelId: string): string {
-  const model = AI_MODELS.find(m => m.id === modelId);
+  const resolvedId = LEGACY_MODEL_ID_MAP[modelId] ?? modelId;
+  const model = AI_MODELS.find(m => m.id === resolvedId);
   return model?.code || AI_MODELS.find(m => m.id === DEFAULT_MODEL_ID)!.code;
 }

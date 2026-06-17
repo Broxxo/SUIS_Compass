@@ -2,7 +2,11 @@ import express, { Request } from 'express';
 
 const router = express.Router();
 const SILICONFLOW_API_URL = 'https://api.siliconflow.cn/v1/chat/completions';
-const API_KEY = process.env.SILICONFLOW_API_KEY;
+
+function getSiliconFlowApiKey(): string | undefined {
+  const key = process.env.SILICONFLOW_API_KEY?.trim();
+  return key || undefined;
+}
 
 function getUserId(req: Request): string | undefined {
   return (req as Request & { userId?: string }).userId;
@@ -13,7 +17,7 @@ router.post('/chat', async (req, res) => {
   if (!getUserId(req)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  if (!API_KEY) {
+  if (!getSiliconFlowApiKey()) {
     return res.status(503).json({ error: 'AI service not configured (SILICONFLOW_API_KEY)' });
   }
 
@@ -35,7 +39,7 @@ router.post('/chat', async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${getSiliconFlowApiKey()}`,
       },
       body: JSON.stringify({
         model,
@@ -84,7 +88,7 @@ router.post('/generate', async (req, res) => {
   if (!getUserId(req)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  if (!API_KEY) {
+  if (!getSiliconFlowApiKey()) {
     return res.status(503).json({ error: 'AI service not configured (SILICONFLOW_API_KEY)' });
   }
 
@@ -104,7 +108,7 @@ router.post('/generate', async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${getSiliconFlowApiKey()}`,
       },
       body: JSON.stringify({
         model,

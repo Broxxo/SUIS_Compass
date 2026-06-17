@@ -212,12 +212,6 @@ export default function GradeStructureEditor({ language, canEdit, onSaved }: Gra
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-slate-600">
-        {isZh
-          ? '先建学段（如小学、初中），再在学段内添加年级。保存后学期数据按自上而下依次对应第 1、2… 年级；课程河流整体视图可按学段筛选。'
-          : 'Create stages (e.g. primary, middle), then add grades inside each. Semester data maps top-to-bottom to levels 1, 2, …'}
-      </p>
-
       {loading && <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
       {savedHint && !error && (

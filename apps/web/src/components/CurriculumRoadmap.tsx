@@ -41,7 +41,7 @@ import {
   saveCourseDomains,
   hydrateCourseDomainsFromCloud,
   hydrateCategoryOrderFromCloud,
-  exportAllDataSync,
+  exportAllData,
   importAllData,
   loadGradeConfig,
 } from '../lib/storage';
@@ -338,6 +338,7 @@ export default function CurriculumRoadmap({
   const isRefreshingSemesterCacheRef = useRef(false);
   const courseDataImportInputRef = useRef<HTMLInputElement>(null);
   const [isImportingCourseData, setIsImportingCourseData] = useState(false);
+  const [isExportingCourseData, setIsExportingCourseData] = useState(false);
   const overviewRowRef = useRef<HTMLDivElement>(null);
   const [overviewRowWidthPx, setOverviewRowWidthPx] = useState(0);
 
@@ -630,9 +631,10 @@ export default function CurriculumRoadmap({
     setEditingCourse(null);
   };
 
-  const handleExportCourseData = () => {
+  const handleExportCourseData = async () => {
+    setIsExportingCourseData(true);
     try {
-      const data = exportAllDataSync();
+      const data = await exportAllData();
       const jsonStr = JSON.stringify(data, null, 2);
       const blob = new Blob([jsonStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -643,10 +645,26 @@ export default function CurriculumRoadmap({
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      alert(language === 'zh' ? '数据导出成功！' : 'Data exported successfully!');
+      const sourceHint =
+        data.source === 'database'
+          ? language === 'zh'
+            ? '（已从数据库导出全量数据）'
+            : ' (full export from database)'
+          : '';
+      alert(
+        language === 'zh'
+          ? `数据导出成功！${sourceHint}`
+          : `Data exported successfully!${sourceHint}`,
+      );
     } catch (error) {
       logError('Export failed', error);
-      alert(language === 'zh' ? '数据导出失败，请重试。' : 'Export failed, please try again.');
+      alert(
+        language === 'zh'
+          ? '数据导出失败，请检查网络连接后重试。'
+          : 'Export failed. Please check your connection and try again.',
+      );
+    } finally {
+      setIsExportingCourseData(false);
     }
   };
 
@@ -664,9 +682,13 @@ export default function CurriculumRoadmap({
       const data = JSON.parse(text);
 
       const confirmMsg =
-        language === 'zh'
-          ? '导入数据将覆盖当前全校课程数据（课程、单元、概念等），确定要继续吗？'
-          : 'Importing will overwrite all school-wide course data (courses, units, concepts, etc.). Continue?';
+        USE_CLOUD_STORAGE && language === 'zh'
+          ? '导入数据将覆盖数据库中的全校课程数据（课程、单元、概念等），确定要继续吗？'
+          : USE_CLOUD_STORAGE
+            ? 'Importing will overwrite all school-wide course data in the database (courses, units, concepts, etc.). Continue?'
+            : language === 'zh'
+              ? '导入数据将覆盖当前全校课程数据（课程、单元、概念等），确定要继续吗？'
+              : 'Importing will overwrite all school-wide course data (courses, units, concepts, etc.). Continue?';
 
       if (window.confirm(confirmMsg)) {
         const result = await importAllData(data);
@@ -751,7 +773,7 @@ export default function CurriculumRoadmap({
       >
         <SlidersHorizontal className="h-4 w-4" />
       </Button>
-      <div className="relative">
+      <div className="relative z-50">
         <Button
           variant="outline"
           size="icon"
@@ -762,7 +784,7 @@ export default function CurriculumRoadmap({
           <Settings className="h-4 w-4" />
         </Button>
         {isSettingsMenuOpen && (
-          <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-200 bg-white shadow-lg py-1 text-sm text-slate-800 z-30">
+          <div className="absolute right-0 top-full z-50 mt-2 w-56 rounded-xl border border-slate-200 bg-white py-1 text-sm text-slate-800 shadow-lg">
             <button
               type="button"
               className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
@@ -787,11 +809,12 @@ export default function CurriculumRoadmap({
             </button>
             <button
               type="button"
-              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors"
+              disabled={isExportingCourseData}
+              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
               title={t('settings.exportCourseDataTitle')}
               onClick={() => {
                 setIsSettingsMenuOpen(false);
-                handleExportCourseData();
+                void handleExportCourseData();
               }}
             >
               <Download className="h-4 w-4" />
@@ -847,11 +870,11 @@ export default function CurriculumRoadmap({
 
       {showRoadmapTabToolbar && (
         <div
-          className={`flex-shrink-0 border-b border-slate-200 bg-white px-3 sm:px-4 py-2 ${
+          className={`relative z-40 flex-shrink-0 overflow-visible border-b border-slate-200 bg-white px-3 sm:px-4 py-2 ${
             showRoadmapTopBar ? 'mt-14' : ''
           }`}
         >
-          <div className="relative flex min-h-[40px] items-center justify-center">
+          <div className="relative flex min-h-[40px] items-center justify-center overflow-visible">
             <div className="min-w-0 max-w-full overflow-x-auto no-scrollbar">
               <RoadmapViewTabStrip
                 gradeConfig={gradeConfig}

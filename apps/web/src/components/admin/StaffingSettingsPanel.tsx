@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { SegmentTabButton } from '../ui/segment-tab-button';
 
-export type StaffingSubTab = 'grade-mgmt' | 'teaching-mgmt' | 'course';
+export type StaffingSubTab = 'grade-mgmt' | 'teaching-mgmt' | 'course' | 'weekly-load';
 
 type StaffingSettingsPanelProps = {
   isZh: boolean;
@@ -36,6 +36,9 @@ export default function StaffingSettingsPanel({
           </SegmentTabButton>
           <SegmentTabButton active={subTab === 'course'} onClick={() => onSubTabChange('course')}>
             {isZh ? '课程岗位' : 'Course staffing'}
+          </SegmentTabButton>
+          <SegmentTabButton active={subTab === 'weekly-load'} onClick={() => onSubTabChange('weekly-load')}>
+            {isZh ? '周课时统计' : 'Weekly load'}
           </SegmentTabButton>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">{toolbar}</div>

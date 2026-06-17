@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { Bot } from 'lucide-react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAIContext } from '../contexts/AIContext';
 import type {
   AcademicYear,
   ClassItem,
@@ -42,6 +44,18 @@ import {
 } from '../lib/gradeConfig';
 import { loadGradeConfig, loadGradeConfigSync } from '../lib/storage';
 import { PortraitLensWorkspace, type PortraitLensTab } from './student-portrait/PortraitLensWorkspace';
+import { StudentOverviewPanel } from './student-portrait/StudentOverviewPanel';
+import {
+  buildExamScoreTrendSeries,
+  buildOverviewReportSortKey,
+  buildSubjectScoreScales,
+  buildSubjectScoreScalesForSnapshot,
+  gradeCatalogIdForOverviewStudent,
+  type OverviewReportSnapshot,
+  type ReportSubjectScoreScaleSet,
+  type StudentSubjectInsightItem,
+} from '../lib/studentPortraitOverview';
+import { buildStudentPortraitAIPayload } from '../lib/studentPortraitAIContext';
 import {
   AcademicYearSelect,
   FilterSelect,
@@ -914,15 +928,20 @@ export default function StudentPortrait({
   initialWorkbenchTemplateId,
   initialReportYearId,
   initialReportTerm,
+  isAIOpen = false,
+  onToggleAI,
 }: {
   onBackToHub: () => void;
   initialTab?: PortraitTab;
   initialWorkbenchTemplateId?: string;
   initialReportYearId?: string;
   initialReportTerm?: Term;
+  isAIOpen?: boolean;
+  onToggleAI?: () => void;
 }) {
   const { user } = useAuth();
   const { language } = useLanguage();
+  const { setContextFromApp } = useAIContext();
   const isZh = language === 'zh';
   const isStudentSelf = user?.role === 'student';
   const workbenchTeacherDisplayName = useMemo(() => {
@@ -935,9 +954,9 @@ export default function StudentPortrait({
     return en || dn || un;
   }, [user, isZh]);
   const [tab, setTab] = useState<PortraitTab>(initialTab);
-  const [portraitLensTab, setPortraitLensTab] = useState<PortraitLensTab>('academic');
+  const [portraitLensTab, setPortraitLensTab] = useState<PortraitLensTab>('overview');
   /** 「我的学生」画像区模块（与学籍生本人画像的 tab 状态分离） */
-  const [myStudentsLensTab, setMyStudentsLensTab] = useState<PortraitLensTab>('academic');
+  const [myStudentsLensTab, setMyStudentsLensTab] = useState<PortraitLensTab>('overview');
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [currentYearId, setCurrentYearId] = useState<string | null>(null);
   const [classes, setClasses] = useState<ClassItem[]>([]);
@@ -967,6 +986,8 @@ export default function StudentPortrait({
   const [reportDetail, setReportDetail] = useState<StudentTermReport | null>(null);
   const [reportTemplate, setReportTemplate] = useState<ReportTemplate | null>(null);
   const [mySubjectAssignments, setMySubjectAssignments] = useState<Array<{ classId: string; subjectKey: string }>>([]);
+  const [myHomeroomClassIds, setMyHomeroomClassIds] = useState<string[]>([]);
+  const [myGradeHeadClassIds, setMyGradeHeadClassIds] = useState<string[]>([]);
   const [workbenchTemplates, setWorkbenchTemplates] = useState<ReportTemplate[]>([]);
   const [workbenchTemplateId, setWorkbenchTemplateId] = useState<string>('');
   const [workbenchProgress, setWorkbenchProgress] = useState<TeacherReportTemplateProgress | null>(null);
@@ -992,6 +1013,19 @@ export default function StudentPortrait({
   const [classReportLoading, setClassReportLoading] = useState(false);
   const [classReportExporting, setClassReportExporting] = useState(false);
   const [classReportError, setClassReportError] = useState<string | null>(null);
+  const [classSubjectAnalyses, setClassSubjectAnalyses] = useState<
+    Array<{
+      subjectKey: string;
+      subjectName: string;
+      teacherName: string | null;
+      classOverallAnalysis: string | null;
+      updatedAt: string | null;
+    }>
+  >([]);
+  const [classSubjectAnalysesLoading, setClassSubjectAnalysesLoading] = useState(false);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [overviewSnapshots, setOverviewSnapshots] = useState<OverviewReportSnapshot[]>([]);
+  const [overviewSubjectInsights, setOverviewSubjectInsights] = useState<StudentSubjectInsightItem[]>([]);
   const workbenchPdfExportRef = useRef<HTMLDivElement>(null);
   const studentReportPdfExportRef = useRef<HTMLDivElement>(null);
   /** 教师手动切换学业报告模板后，不再自动改选（直至离开本 tab） */
@@ -1103,9 +1137,19 @@ export default function StudentPortrait({
   }, [isStudentSelf, user?.studentId, user?.id, isZh]);
 
   useEffect(() => {
-    setPortraitLensTab('academic');
-    setMyStudentsLensTab('academic');
+    if (tab === 'my-students') {
+      setMyStudentsLensTab('overview');
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    setPortraitLensTab('overview');
+    setMyStudentsLensTab('overview');
   }, [selectedStudentId]);
+
+  useEffect(() => {
+    setMyStudentsLensTab('overview');
+  }, [selectedClassId]);
 
   const yearClasses = useMemo(
     () => classes.filter((c) => !currentYearId || c.academicYearId === currentYearId),
@@ -1236,11 +1280,22 @@ export default function StudentPortrait({
       .slice()
       .sort((a, b) => a.grade - b.grade || String(a.name).localeCompare(String(b.name)));
     if (user?.role === 'teacher') {
-      const ids = new Set(mySubjectAssignments.map((a) => a.classId));
+      const ids = new Set([
+        ...mySubjectAssignments.map((a) => a.classId),
+        ...myHomeroomClassIds,
+        ...myGradeHeadClassIds,
+      ]);
       return inYear.filter((c) => ids.has(c.id));
     }
     return inYear;
-  }, [schoolCurrentYearIdForMyStudents, classes, user?.role, mySubjectAssignments]);
+  }, [
+    schoolCurrentYearIdForMyStudents,
+    classes,
+    user?.role,
+    mySubjectAssignments,
+    myHomeroomClassIds,
+    myGradeHeadClassIds,
+  ]);
 
   useEffect(() => {
     if (myStudentsClassOptions.length === 0) return;
@@ -1303,14 +1358,40 @@ export default function StudentPortrait({
       .catch(() => setHomeroomEditable(false));
   }, [selectedClassId, user?.id, user?.role, isStudentSelf]);
 
+  const gradeHeadOfSelectedClass = useMemo(() => {
+    if (!selectedClassId) return false;
+    return myGradeHeadClassIds.includes(selectedClassId);
+  }, [selectedClassId, myGradeHeadClassIds]);
+
   const canViewMyStudentsClassAggregate = useMemo(() => {
     if (!selectedClassId) return false;
     if (isAdminRole) return true;
-    if (user?.role === 'teacher') return homeroomEditable;
+    if (user?.role === 'teacher') return homeroomEditable || gradeHeadOfSelectedClass;
     return false;
-  }, [selectedClassId, isAdminRole, user?.role, homeroomEditable]);
+  }, [selectedClassId, isAdminRole, user?.role, homeroomEditable, gradeHeadOfSelectedClass]);
 
   const canExportWholeClassPdf = canViewMyStudentsClassAggregate;
+
+  /** 学生个人概览：本班班主任、年级组长（所管年级）与任课教师均可查看 */
+  const canViewStudentOverview = useMemo(() => {
+    if (!selectedStudentId) return false;
+    if (isStudentSelf) return true;
+    if (isAdminRole) return true;
+    if (user?.role === 'teacher' && selectedClassId) {
+      if (homeroomEditable || gradeHeadOfSelectedClass) return true;
+      return mySubjectAssignments.some((a) => a.classId === selectedClassId);
+    }
+    return false;
+  }, [
+    selectedStudentId,
+    isStudentSelf,
+    isAdminRole,
+    user?.role,
+    selectedClassId,
+    homeroomEditable,
+    gradeHeadOfSelectedClass,
+    mySubjectAssignments,
+  ]);
 
   useEffect(() => {
     if (isStudentSelf || !USE_CLOUD_STORAGE || user?.role !== 'teacher') {
@@ -1330,6 +1411,54 @@ export default function StudentPortrait({
       })
       .catch(() => {
         if (!cancelled) setMySubjectAssignments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStudentSelf, user?.role, schoolCurrentYearIdForMyStudents]);
+
+  useEffect(() => {
+    if (isStudentSelf || !USE_CLOUD_STORAGE || user?.role !== 'teacher') {
+      setMyHomeroomClassIds([]);
+      return;
+    }
+    const yid = schoolCurrentYearIdForMyStudents;
+    if (!yid) {
+      setMyHomeroomClassIds([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getMyHomeroomClassIds(yid)
+      .then((ids) => {
+        if (!cancelled) setMyHomeroomClassIds(ids);
+      })
+      .catch(() => {
+        if (!cancelled) setMyHomeroomClassIds([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStudentSelf, user?.role, schoolCurrentYearIdForMyStudents]);
+
+  useEffect(() => {
+    if (isStudentSelf || !USE_CLOUD_STORAGE || user?.role !== 'teacher') {
+      setMyGradeHeadClassIds([]);
+      return;
+    }
+    const yid = schoolCurrentYearIdForMyStudents;
+    if (!yid) {
+      setMyGradeHeadClassIds([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getMyGradeHeadClassIds(yid)
+      .then((ids) => {
+        if (!cancelled) setMyGradeHeadClassIds(ids);
+      })
+      .catch(() => {
+        if (!cancelled) setMyGradeHeadClassIds([]);
       });
     return () => {
       cancelled = true;
@@ -1400,6 +1529,121 @@ export default function StudentPortrait({
       cancelled = true;
     };
   }, [selectedStudentId, currentYearId, user?.role, isStudentSelf]);
+
+  useEffect(() => {
+    if (!USE_CLOUD_STORAGE || !selectedStudentId) {
+      setOverviewSnapshots([]);
+      setOverviewSubjectInsights([]);
+      setOverviewLoading(false);
+      return;
+    }
+    const released = reportList.filter((r) => !!r.releasedAt && !!r.templateId);
+    if (released.length === 0) {
+      setOverviewSnapshots([]);
+      setOverviewSubjectInsights([]);
+      setOverviewLoading(false);
+      return;
+    }
+    const studentId = selectedStudentId;
+    let cancelled = false;
+    setOverviewLoading(true);
+    const sorted = [...released].sort((a, b) =>
+      buildOverviewReportSortKey({
+        academicYearId: a.academicYearId,
+        term: a.term,
+        releasedAt: a.releasedAt,
+      }).localeCompare(
+        buildOverviewReportSortKey({
+          academicYearId: b.academicYearId,
+          term: b.term,
+          releasedAt: b.releasedAt,
+        }),
+      ),
+    );
+    const stu = students.find((s) => s.id === studentId);
+    const yearIds = Array.from(new Set(sorted.map((r) => r.academicYearId)));
+    Promise.all([
+      Promise.all(
+        sorted.map((r) =>
+          api.getStudentTermReportBundle(studentId, r.academicYearId, r.term, r.templateId as string, {
+            portraitScope: 'overview',
+          }),
+        ),
+      ),
+      Promise.all(yearIds.map((yid) => api.getTeacherReportYearDimensionExamPreset(yid).catch(() => null))),
+    ])
+      .then(async ([bundles, presets]) => {
+        if (cancelled || selectedStudentId !== studentId) return;
+        const presetByYear = new Map(yearIds.map((yid, idx) => [yid, presets[idx]] as const));
+        const snapshots: OverviewReportSnapshot[] = sorted.map((r, idx) => {
+          const bundle = bundles[idx];
+          const enrForYear = enrollments.find(
+            (e) => e.studentId === studentId && e.academicYearId === r.academicYearId,
+          );
+          const clsForYear = enrForYear ? classes.find((c) => c.id === enrForYear.classId) : undefined;
+          const snapGradeCatalogId = gradeCatalogIdForOverviewStudent(
+            gradeConfig,
+            clsForYear?.grade ?? stu?.currentGrade ?? null,
+            clsForYear?.name,
+          );
+          return {
+            meta: {
+              academicYearId: r.academicYearId,
+              academicYearName: r.academicYearName,
+              term: r.term,
+              templateId: r.templateId as string,
+              templateTitle: r.templateTitle,
+              releasedAt: r.releasedAt,
+              label: `${r.academicYearName} · ${reportTermLabel(r.term, isZh)}${r.templateTitle ? ` · ${r.templateTitle}` : ''}`,
+              sortKey: buildOverviewReportSortKey({
+                academicYearId: r.academicYearId,
+                term: r.term,
+                releasedAt: r.releasedAt,
+              }),
+            },
+            report: mergeStudentTermReportWithTemplate(
+              bundle.report,
+              bundle.template,
+              snapGradeCatalogId,
+              { padMissingSubjects: false, blankUnsetRatings: true },
+            ),
+            template: bundle.template,
+            gradeCatalogId: snapGradeCatalogId,
+            examPreset: presetByYear.get(r.academicYearId) ?? null,
+          };
+        });
+        setOverviewSnapshots(snapshots);
+        const latest = sorted[sorted.length - 1];
+        if (canViewStudentOverview && !isStudentSelf && latest.templateId) {
+          const insights = await api.getStudentSubjectInsights(latest.templateId, studentId);
+          if (!cancelled && selectedStudentId === studentId) setOverviewSubjectInsights(insights);
+        } else if (!cancelled && selectedStudentId === studentId) {
+          setOverviewSubjectInsights([]);
+        }
+      })
+      .catch(() => {
+        if (!cancelled && selectedStudentId === studentId) {
+          setOverviewSnapshots([]);
+          setOverviewSubjectInsights([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled && selectedStudentId === studentId) setOverviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedStudentId,
+    reportList,
+    students,
+    enrollments,
+    classes,
+    gradeConfig,
+    isZh,
+    canViewStudentOverview,
+    isStudentSelf,
+  ]);
 
   useEffect(() => {
     if (!USE_CLOUD_STORAGE) return;
@@ -2010,6 +2254,40 @@ export default function StudentPortrait({
       byGrade: Array.from(byGrade.entries()).sort((a, b) => a[0].localeCompare(b[0])),
     };
   }, [activeEnrollments, students, classes, gradeConfig, isZh]);
+
+  const studentCenterPermissionMatrix = useMemo(() => {
+    const L = (zh: string, en: string) => (isZh ? zh : en);
+    return [
+      {
+        role: L('班主任', 'Homeroom teacher'),
+        classOverview: L('本班整体概览', 'Own class overview'),
+        studentOverview: L('本班学生，全科数据', 'Class students, all subjects'),
+        reportEntry: L('班主任评语；兼任学科可填', 'Homeroom comments; own subjects if teaching'),
+        studentReport: L('已推送报告全科', 'All subjects (released)'),
+      },
+      {
+        role: L('任课教师', 'Subject teacher'),
+        classOverview: L('—', '—'),
+        studentOverview: L('任课班学生，全科数据', 'Taught classes, all subjects'),
+        reportEntry: L('仅任教学科', 'Assigned subjects only'),
+        studentReport: L('仅任教学科', 'Assigned subjects only'),
+      },
+      {
+        role: L('年级组长', 'Grade head'),
+        classOverview: L('所管年级全部班级', 'All classes in managed grades'),
+        studentOverview: L('所管年级学生，全科数据', 'Managed grades, all subjects'),
+        reportEntry: L('仅所带班级与任教学科', 'Own classes & assigned subjects only'),
+        studentReport: L('所管年级已推送报告全科', 'All subjects (released, managed grades)'),
+      },
+      {
+        role: L('管理员', 'Admin'),
+        classOverview: L('全部', 'All'),
+        studentOverview: L('全部', 'All'),
+        reportEntry: L('全部（含只读查看）', 'All (incl. read-only)'),
+        studentReport: L('全部', 'All'),
+      },
+    ];
+  }, [isZh]);
 
   const exportStudentReportPdf = useCallback(async () => {
     if (typeof window === 'undefined') return;
@@ -2918,6 +3196,38 @@ export default function StudentPortrait({
     [classReportOptions, selectedClassReportKey],
   );
 
+  useEffect(() => {
+    if (isStudentSelf || !USE_CLOUD_STORAGE || !selectedClassId || !selectedClassReportKey) {
+      setClassSubjectAnalyses([]);
+      return;
+    }
+    if (!canViewMyStudentsClassAggregate) {
+      setClassSubjectAnalyses([]);
+      return;
+    }
+    const templateId = selectedClassReportKey.split('::')[2];
+    if (!templateId) {
+      setClassSubjectAnalyses([]);
+      return;
+    }
+    let cancelled = false;
+    setClassSubjectAnalysesLoading(true);
+    api
+      .getReportClassInsightsSummary(templateId, selectedClassId)
+      .then((rows) => {
+        if (!cancelled) setClassSubjectAnalyses(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setClassSubjectAnalyses([]);
+      })
+      .finally(() => {
+        if (!cancelled) setClassSubjectAnalysesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStudentSelf, selectedClassId, selectedClassReportKey, canViewMyStudentsClassAggregate]);
+
   const classAcademicInsight = useMemo(() => {
     const total = classReportSnapshotItems.length;
     if (total === 0) {
@@ -2926,6 +3236,7 @@ export default function StudentPortrait({
         completedStudents: 0,
         completionRate: 0,
         homeroomCompleted: 0,
+        homeroomCompletionRate: 0,
         subjectScoreAverages: [] as Array<{ subject: string; avg: number; count: number }>,
         levelCounts: { A: 0, B: 0, C: 0, D: 0 } as Record<TargetLevel, number>,
       };
@@ -2965,19 +3276,354 @@ export default function StudentPortrait({
       completedStudents,
       completionRate: Math.round((completedStudents / Math.max(total, 1)) * 100),
       homeroomCompleted,
+      homeroomCompletionRate: Math.round((homeroomCompleted / Math.max(total, 1)) * 100),
       subjectScoreAverages,
       levelCounts,
     };
   }, [classReportSnapshotItems]);
 
+  const classSubjectAnalysesFilled = useMemo(
+    () => classSubjectAnalyses.filter((item) => (item.classOverallAnalysis ?? '').trim()),
+    [classSubjectAnalyses],
+  );
+
+  const overviewLatestSnapshot = useMemo(
+    () => (overviewSnapshots.length > 0 ? overviewSnapshots[overviewSnapshots.length - 1] : null),
+    [overviewSnapshots],
+  );
+
+  const overviewTrendSeries = useMemo(
+    () =>
+      buildExamScoreTrendSeries({
+        snapshots: overviewSnapshots,
+        gradeConfig,
+        studentGrade: selectedStudent?.currentGrade ?? null,
+      }),
+    [overviewSnapshots, gradeConfig, selectedStudent?.currentGrade],
+  );
+
+  const overviewShowHomeroom = useMemo(() => {
+    const tpl = overviewLatestSnapshot?.template;
+    if (tpl) return tpl.homeroomCommentMode !== 'disabled';
+    return true;
+  }, [overviewLatestSnapshot?.template]);
+
+  const schoolCurrentYearNameForMyStudents = useMemo(
+    () => years.find((y) => y.id === schoolCurrentYearIdForMyStudents)?.name ?? null,
+    [years, schoolCurrentYearIdForMyStudents],
+  );
+
+  const studentOverviewSubjectScoreScaleSet = useMemo((): ReportSubjectScoreScaleSet | null => {
+    const latest = overviewLatestSnapshot;
+    if (!latest?.template) return null;
+    return {
+      reportLabel: latest.meta.label,
+      term: latest.meta.term,
+      templateTitle: latest.meta.templateTitle,
+      scales: buildSubjectScoreScalesForSnapshot(latest, gradeConfig, selectedStudent?.currentGrade ?? null),
+    };
+  }, [overviewLatestSnapshot, gradeConfig, selectedStudent?.currentGrade]);
+
+  const classOverviewSubjectScoreScaleSet = useMemo((): ReportSubjectScoreScaleSet | null => {
+    if (!classReportTemplate || !reportYearExamPreset || !selectedClassRecord || !selectedClassReportOption) {
+      return null;
+    }
+    const gradeCatalogId = getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
+      className: selectedClassRecord.name,
+    });
+    const subjects: Array<{ subjectKey: string; subjectName: string }> = [];
+    const seen = new Set<string>();
+    for (const item of classReportSnapshotItems) {
+      for (const s of item.report.subjectReports) {
+        if (!s.subjectKey || seen.has(s.subjectKey)) continue;
+        seen.add(s.subjectKey);
+        subjects.push({ subjectKey: s.subjectKey, subjectName: s.subjectName || s.subjectKey });
+      }
+    }
+    const termRaw = selectedClassReportKey.split('::')[1] as Term | undefined;
+    return {
+      reportLabel: selectedClassReportOption.label,
+      term: termRaw === 'Semester 1' || termRaw === 'Semester 2' ? termRaw : classReportTemplate.term,
+      templateTitle: classReportTemplate.title ?? null,
+      scales: buildSubjectScoreScales({
+        subjects,
+        template: classReportTemplate,
+        examPreset: reportYearExamPreset,
+        gradeCatalogId,
+        gradeConfig,
+        studentGrade: selectedClassRecord.grade,
+      }),
+    };
+  }, [
+    classReportTemplate,
+    reportYearExamPreset,
+    selectedClassRecord,
+    classReportSnapshotItems,
+    gradeConfig,
+    selectedClassReportOption,
+    selectedClassReportKey,
+  ]);
+
+  const subjectScoreScaleSetForAI = useMemo((): ReportSubjectScoreScaleSet | null => {
+    if (isStudentSelf || (tab === 'my-students' && selectedStudentId)) {
+      return studentOverviewSubjectScoreScaleSet;
+    }
+    if (tab === 'my-students' && !selectedStudentId) {
+      return classOverviewSubjectScoreScaleSet;
+    }
+    return null;
+  }, [
+    isStudentSelf,
+    tab,
+    selectedStudentId,
+    studentOverviewSubjectScoreScaleSet,
+    classOverviewSubjectScoreScaleSet,
+  ]);
+
+  const studentPortraitAIPayload = useMemo(
+    () =>
+      buildStudentPortraitAIPayload({
+        tab,
+        isStudentSelf,
+        selectedStudentId,
+        myStudentsLensTab,
+        selectedClassRecord,
+        schoolCurrentYearName: schoolCurrentYearNameForMyStudents,
+        selectedStudent,
+        selectedClassReportOption,
+        classAcademicInsight,
+        classSubjectAnalysesFilled,
+        classReportSnapshotItems,
+        overviewSubjectInsights,
+        overviewTrendSeries,
+        overviewLatestSnapshot,
+        subjectScoreScaleSet: subjectScoreScaleSetForAI,
+        tabLabels: {
+          school: isZh ? '学校看板' : 'School dashboard',
+          myStudents: isZh ? '我的学生' : 'My Students',
+          reportEntry: isZh ? '报告填写' : 'Report entry',
+        },
+        isZh,
+      }),
+    [
+      tab,
+      isStudentSelf,
+      selectedStudentId,
+      myStudentsLensTab,
+      selectedClassRecord,
+      schoolCurrentYearNameForMyStudents,
+      selectedStudent,
+      selectedClassReportOption,
+      classAcademicInsight,
+      classSubjectAnalysesFilled,
+      classReportSnapshotItems,
+      overviewSubjectInsights,
+      overviewTrendSeries,
+      overviewLatestSnapshot,
+      subjectScoreScaleSetForAI,
+      isZh,
+    ],
+  );
+
+  useEffect(() => {
+    if (!onToggleAI) return;
+    setContextFromApp('student-portrait', studentPortraitAIPayload);
+  }, [studentPortraitAIPayload, setContextFromApp, onToggleAI]);
+
+  const renderStudentOverviewPanel = () => (
+    <StudentOverviewPanel
+      isZh={isZh}
+      loading={overviewLoading}
+      subjectInsights={overviewSubjectInsights}
+      trendSeries={overviewTrendSeries}
+      homeroomComment={overviewLatestSnapshot?.report.homeroomComment ?? null}
+      showHomeroomSection={overviewShowHomeroom}
+      showSubjectSupport={canViewStudentOverview && !isStudentSelf}
+    />
+  );
+
+  const renderClassOverviewPanel = () => (
+    <div className="border border-slate-200 rounded-xl p-3 space-y-3">
+      <div className="flex flex-wrap items-stretch gap-2">
+        <select
+          value={selectedClassReportKey}
+          onChange={(e) => setSelectedClassReportKey(e.target.value)}
+          disabled={classReportOptions.length === 0}
+          className="h-9 min-w-0 flex-1 max-w-xl rounded-lg border border-slate-300 px-3 text-sm bg-white disabled:opacity-60"
+        >
+          {classReportOptions.length === 0 ? (
+            <option value="">{isZh ? '该班暂无已推送学业报告' : 'No released reports for this class'}</option>
+          ) : (
+            classReportOptions.map((opt) => (
+              <option key={opt.key} value={opt.key}>
+                {opt.label}
+              </option>
+            ))
+          )}
+        </select>
+        {canExportWholeClassPdf && (
+          <Button
+            type="button"
+            variant="default"
+            size="default"
+            className="h-9 shrink-0 bg-sky-600 text-white hover:bg-sky-700 shadow-sm"
+            onClick={() => void exportWholeClassReportPdf()}
+            disabled={
+              classReportExporting ||
+              classReportLoading ||
+              !selectedClassReportOption ||
+              classReportSnapshotItems.length === 0 ||
+              !canExportWholeClassPdf
+            }
+          >
+            {classReportExporting
+              ? isZh
+                ? '导出中…'
+                : 'Exporting…'
+              : isZh
+                ? '导出全班报告为PDF'
+                : 'Export Class Reports PDF'}
+          </Button>
+        )}
+      </div>
+      {classReportError && (
+        <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+          {classReportError}
+        </div>
+      )}
+      {classReportLoading ? (
+        <div className="text-sm text-slate-500">{isZh ? '加载班级报告中…' : 'Loading class report…'}</div>
+      ) : classReportSnapshotItems.length === 0 ? (
+        <div className="text-sm text-slate-500">
+          {isZh ? '请选择已推送学业报告查看班级整体画像。' : 'Select a released report to view class insights.'}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="space-y-3">
+            <div className="text-sm font-semibold text-slate-800">{isZh ? '班级整体情况' : 'Class overview'}</div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                <div className="text-xs text-slate-500">{isZh ? '当前人数' : 'Students'}</div>
+                <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.totalStudents}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                <div className="text-xs text-slate-500">{isZh ? '报告完成率' : 'Completion rate'}</div>
+                <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.completionRate}%</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  {classAcademicInsight.completedStudents}/{classAcademicInsight.totalStudents}
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                <div className="text-xs text-slate-500">{isZh ? '班主任评语完成比例' : 'Homeroom comment rate'}</div>
+                <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.homeroomCompletionRate}%</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  {classAcademicInsight.homeroomCompleted}/{classAcademicInsight.totalStudents}
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-slate-200 p-3 space-y-2">
+                <div className="text-sm font-semibold text-slate-800">{isZh ? '学科均分' : 'Subject average'}</div>
+                {classAcademicInsight.subjectScoreAverages.length === 0 ? (
+                  <p className="text-sm text-slate-500">{isZh ? '暂无可计算的分数数据。' : 'No scorable data yet.'}</p>
+                ) : (
+                  classAcademicInsight.subjectScoreAverages.slice(0, 8).map((s) => (
+                    <div key={s.subject} className="flex items-center justify-between text-sm">
+                      <span className="text-slate-700">{s.subject}</span>
+                      <span className="font-medium text-slate-900">{s.avg}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="rounded-lg border border-slate-200 p-3 space-y-2">
+                <div className="text-sm font-semibold text-slate-800">
+                  {isZh ? '学习品质等第分布' : 'Learning-quality level distribution'}
+                </div>
+                <div className="h-44 rounded-md border border-slate-100 bg-slate-50/60 px-3 py-2">
+                  {(() => {
+                    const levels: TargetLevel[] = ['A', 'B', 'C', 'D'];
+                    const maxCount = Math.max(1, ...levels.map((lv) => classAcademicInsight.levelCounts[lv] ?? 0));
+                    return (
+                      <div className="h-full flex items-end justify-around gap-3">
+                        {levels.map((lv) => {
+                          const count = classAcademicInsight.levelCounts[lv] ?? 0;
+                          const hPct = Math.max(6, Math.round((count / maxCount) * 100));
+                          return (
+                            <div key={lv} className="flex-1 max-w-[4rem] h-full flex flex-col items-center justify-end gap-1">
+                              <span className="text-xs font-medium text-slate-700">{count}</span>
+                              <div className="w-full h-[76%] flex items-end">
+                                <div
+                                  className="w-full rounded-t bg-sky-500/85"
+                                  style={{ height: `${hPct}%` }}
+                                  title={`Level ${lv}: ${count}`}
+                                />
+                              </div>
+                              <span className="text-xs text-slate-600">Level {lv}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 p-3 space-y-3">
+            <div className="text-sm font-semibold text-slate-800">
+              {isZh ? '学科教师班级分析' : 'Subject teachers’ class analysis'}
+            </div>
+            {classSubjectAnalysesLoading ? (
+              <div className="text-sm text-slate-500">{isZh ? '加载学科分析中…' : 'Loading subject analyses…'}</div>
+            ) : classSubjectAnalysesFilled.length === 0 ? (
+              <div className="text-sm text-slate-500">
+                {isZh ? '暂无学科教师提交的班级整体分析。' : 'No subject teachers have submitted class analysis yet.'}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {classSubjectAnalysesFilled.map((item) => (
+                  <div key={item.subjectKey} className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm font-medium text-slate-800">{item.subjectName}</span>
+                      {item.teacherName ? (
+                        <span className="text-xs text-slate-500">
+                          {isZh ? `任课教师：${item.teacherName}` : `Teacher: ${item.teacherName}`}
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-sm text-slate-700 whitespace-pre-wrap">{item.classOverallAnalysis}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   return (
-    <div className="min-h-screen bg-slate-50 pt-14">
+    <div className={`${onToggleAI ? 'h-full min-h-0' : 'min-h-screen'} bg-slate-50 pt-14 flex flex-col`}>
       <AppTopBar
         title={isStudentSelf ? (isZh ? '我的画像' : 'My profile') : isZh ? '学生中心' : 'Student Center'}
         showBack={!isStudentSelf}
         onBack={isStudentSelf ? undefined : onBackToHub}
+        rightChildren={
+          onToggleAI && !isStudentSelf ? (
+            <Button
+              variant={isAIOpen ? 'default' : 'outline'}
+              size="icon"
+              onClick={onToggleAI}
+              className="h-9 w-9 rounded-lg flex-shrink-0"
+              title="AI"
+            >
+              <Bot className="h-4 w-4" />
+            </Button>
+          ) : undefined
+        }
       />
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-4">
+      <main className={`flex-1 min-h-0 ${onToggleAI ? 'overflow-y-auto' : ''} max-w-6xl w-full mx-auto px-4 py-6 space-y-4`}>
         {!isStudentSelf && (
           <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
             {canViewSchoolDashboard && (
@@ -2990,7 +3636,7 @@ export default function StudentPortrait({
             </Button>
             {canAccessAcademicReportsTab && (
               <Button variant={tab === 'academic-reports' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('academic-reports')}>
-                {isZh ? '学业报告' : 'Academic reports'}
+                {isZh ? '报告填写' : 'Report entry'}
               </Button>
             )}
           </div>
@@ -3015,6 +3661,7 @@ export default function StudentPortrait({
               isZh={isZh}
               activeTab={portraitLensTab}
               onTabChange={setPortraitLensTab}
+              renderOverview={renderStudentOverviewPanel}
               renderAcademic={() => (
                 <>
                   <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
@@ -3165,10 +3812,32 @@ export default function StudentPortrait({
               </div>
             </div>
 
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
-              {isZh
-                ? '教学建议：优先关注“在读状态非 active”的学生；结合「学业报告」与后续画像维度（通用学习能力、社会情感等），识别需要长期支持的方向。'
-                : 'Teaching tip: prioritize students not in active status; combine term reports and future portrait lenses (learning skills, SEL) for long-term support planning.'}
+            <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6">
+              <h3 className="text-base font-semibold text-slate-800 mb-3">{isZh ? '权限说明' : 'Permission reference'}</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-[720px] w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
+                  <thead>
+                    <tr className="bg-slate-100 text-left text-xs text-slate-600">
+                      <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '角色' : 'Role'}</th>
+                      <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '班级整体概览' : 'Class overview'}</th>
+                      <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生概览' : 'Student overview'}</th>
+                      <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '报告填写' : 'Report entry'}</th>
+                      <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生学业报告' : 'Student report'}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {studentCenterPermissionMatrix.map((row) => (
+                      <tr key={row.role} className="border-t border-slate-100">
+                        <td className="py-2 px-2 font-medium text-slate-800 whitespace-nowrap">{row.role}</td>
+                        <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.classOverview}</td>
+                        <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.studentOverview}</td>
+                        <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.reportEntry}</td>
+                        <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.studentReport}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </section>
         )}
@@ -3850,6 +4519,7 @@ export default function StudentPortrait({
                       const id = e.target.value;
                       setSelectedClassId(id);
                       setSelectedStudentId('');
+                      setMyStudentsLensTab('overview');
                       const rec = myStudentsClassOptions.find((c) => c.id === id);
                       if (rec?.academicYearId) setCurrentYearId(rec.academicYearId);
                     }}
@@ -3873,7 +4543,10 @@ export default function StudentPortrait({
                       <button
                         key={s.id}
                         type="button"
-                      onClick={() => setSelectedStudentId((prev) => (prev === s.id ? '' : s.id))}
+                      onClick={() => {
+                        setSelectedStudentId((prev) => (prev === s.id ? '' : s.id));
+                        setMyStudentsLensTab('overview');
+                      }}
                         className={`w-full text-center rounded-lg border px-3 py-2 text-sm ${
                           selectedStudentId === s.id
                             ? 'border-sky-400 bg-sky-50'
@@ -3894,151 +4567,13 @@ export default function StudentPortrait({
                 {!selectedStudent ? (
                   <div className="space-y-4">
                     {!canViewMyStudentsClassAggregate ? (
-                      <div className="rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-8 text-center text-sm text-slate-600">
                         {isZh
-                          ? '仅本班班主任或管理员可查看班级整体画像与全班导出。请选择左侧学生查看个人学业报告。'
-                          : 'Class-level insights and whole-class export are available to homeroom teachers of this class and administrators only. Select a student to view their individual academic report.'}
+                          ? '请选择左侧学生，查看个人概览与学业报告。'
+                          : 'Select a student on the left to view their overview and academic report.'}
                       </div>
                     ) : (
-                    <PortraitLensWorkspace
-                      isZh={isZh}
-                      activeTab={myStudentsLensTab}
-                      onTabChange={setMyStudentsLensTab}
-                      tabs={['academic']}
-                      renderAcademic={() => (
-                        <div className="border border-slate-200 rounded-xl p-3 space-y-3">
-                          <div className="flex flex-wrap items-stretch gap-2">
-                            <select
-                              value={selectedClassReportKey}
-                              onChange={(e) => setSelectedClassReportKey(e.target.value)}
-                              disabled={classReportOptions.length === 0}
-                              className="h-9 min-w-0 flex-1 max-w-xl rounded-lg border border-slate-300 px-3 text-sm bg-white disabled:opacity-60"
-                            >
-                              {classReportOptions.length === 0 ? (
-                                <option value="">{isZh ? '该班暂无已推送学业报告' : 'No released reports for this class'}</option>
-                              ) : (
-                                classReportOptions.map((opt) => (
-                                  <option key={opt.key} value={opt.key}>
-                                    {opt.label}
-                                  </option>
-                                ))
-                              )}
-                            </select>
-                            {canExportWholeClassPdf && (
-                              <Button
-                                type="button"
-                                variant="default"
-                                size="default"
-                                className="h-9 shrink-0 bg-sky-600 text-white hover:bg-sky-700 shadow-sm"
-                                onClick={() => void exportWholeClassReportPdf()}
-                                disabled={
-                                  classReportExporting ||
-                                  classReportLoading ||
-                                  !selectedClassReportOption ||
-                                  classReportSnapshotItems.length === 0 ||
-                                  !canExportWholeClassPdf
-                                }
-                              >
-                                {classReportExporting
-                                  ? isZh
-                                    ? '导出中…'
-                                    : 'Exporting…'
-                                  : isZh
-                                    ? '导出全班报告为PDF'
-                                    : 'Export Class Reports PDF'}
-                              </Button>
-                            )}
-                          </div>
-                          {classReportError && (
-                            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
-                              {classReportError}
-                            </div>
-                          )}
-                          {classReportLoading ? (
-                            <div className="text-sm text-slate-500">{isZh ? '加载班级报告中…' : 'Loading class report…'}</div>
-                          ) : classReportSnapshotItems.length === 0 ? (
-                            <div className="text-sm text-slate-500">
-                              {isZh ? '请选择已推送学业报告查看班级整体画像。' : 'Select a released report to view class insights.'}
-                            </div>
-                          ) : (
-                            <div className="space-y-3">
-                              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-                                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
-                                  <div className="text-xs text-slate-500">{isZh ? '学生人数' : 'Students'}</div>
-                                  <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.totalStudents}</div>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
-                                  <div className="text-xs text-slate-500">{isZh ? '报告完成率' : 'Completion rate'}</div>
-                                  <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.completionRate}%</div>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
-                                  <div className="text-xs text-slate-500">{isZh ? '已完成人数' : 'Completed'}</div>
-                                  <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.completedStudents}</div>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
-                                  <div className="text-xs text-slate-500">{isZh ? '班主任评语完成' : 'Homeroom comments'}</div>
-                                  <div className="text-lg font-semibold text-slate-800">
-                                    {classAcademicInsight.homeroomCompleted}/{classAcademicInsight.totalStudents}
-                                  </div>
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                <div className="rounded-lg border border-slate-200 p-3 space-y-2">
-                                  <div className="text-sm font-semibold text-slate-800">
-                                    {isZh ? '学科均分' : 'Subject average'}
-                                  </div>
-                                  {classAcademicInsight.subjectScoreAverages.length === 0 ? (
-                                    <p className="text-sm text-slate-500">{isZh ? '暂无可计算的分数数据。' : 'No scorable data yet.'}</p>
-                                  ) : (
-                                    classAcademicInsight.subjectScoreAverages.slice(0, 8).map((s) => (
-                                      <div key={s.subject} className="flex items-center justify-between text-sm">
-                                        <span className="text-slate-700">{s.subject}</span>
-                                        <span className="font-medium text-slate-900">{s.avg}</span>
-                                      </div>
-                                    ))
-                                  )}
-                                </div>
-                                <div className="rounded-lg border border-slate-200 p-3 space-y-2">
-                                  <div className="text-sm font-semibold text-slate-800">
-                                    {isZh ? '学习品质等第分布' : 'Learning-quality level distribution'}
-                                  </div>
-                                  <div className="h-44 rounded-md border border-slate-100 bg-slate-50/60 px-3 py-2">
-                                    {(() => {
-                                      const levels: TargetLevel[] = ['A', 'B', 'C', 'D'];
-                                      const maxCount = Math.max(
-                                        1,
-                                        ...levels.map((lv) => classAcademicInsight.levelCounts[lv] ?? 0),
-                                      );
-                                      return (
-                                        <div className="h-full flex items-end justify-around gap-3">
-                                          {levels.map((lv) => {
-                                            const count = classAcademicInsight.levelCounts[lv] ?? 0;
-                                            const hPct = Math.max(6, Math.round((count / maxCount) * 100));
-                                            return (
-                                              <div key={lv} className="flex-1 max-w-[4rem] h-full flex flex-col items-center justify-end gap-1">
-                                                <span className="text-xs font-medium text-slate-700">{count}</span>
-                                                <div className="w-full h-[76%] flex items-end">
-                                                  <div
-                                                    className="w-full rounded-t bg-sky-500/85"
-                                                    style={{ height: `${hPct}%` }}
-                                                    title={`Level ${lv}: ${count}`}
-                                                  />
-                                                </div>
-                                                <span className="text-xs text-slate-600">Level {lv}</span>
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                      );
-                                    })()}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    />
+                      renderClassOverviewPanel()
                     )}
                   </div>
                 ) : (
@@ -4047,6 +4582,7 @@ export default function StudentPortrait({
                       isZh={isZh}
                       activeTab={myStudentsLensTab}
                       onTabChange={setMyStudentsLensTab}
+                      renderOverview={renderStudentOverviewPanel}
                       renderAcademic={() => (
                         <div id="term-report-panel" className="border border-slate-200 rounded-xl p-3 space-y-3">
                           <div className="flex flex-wrap items-center gap-2">

@@ -7,6 +7,7 @@ import authRoutes from './routes/auth.js';
 import coursesRoutes from './routes/courses.js';
 import semesterRoutes from './routes/semester.js';
 import settingsRoutes from './routes/settings.js';
+import curriculumRoutes from './routes/curriculum.js';
 import aiRoutes from './routes/ai.js';
 import adminRoutes from './routes/admin.js';
 import classesRoutes from './routes/classes.js';
@@ -22,6 +23,7 @@ const PORT = parseInt(process.env.PORT || '8080', 10);
 const app = express();
 
 app.use(cors());
+app.use('/api/curriculum', express.json({ limit: '50mb' }));
 app.use(express.json({ limit: '2mb' }));
 
 // API 路由
@@ -29,6 +31,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/courses', requireValidUser, forbidStudentAccounts, coursesRoutes);
 app.use('/api/semester', requireValidUser, forbidStudentAccounts, semesterRoutes);
 app.use('/api/settings', requireValidUser, forbidStudentAccounts, settingsRoutes);
+app.use('/api/curriculum', requireValidUser, forbidStudentAccounts, curriculumRoutes);
 app.use('/api/ai', requireValidUser, forbidStudentAccounts, aiRoutes);
 app.use('/api/admin', requireValidUser, forbidStudentAccounts, adminRoutes);
 app.use('/api/classes/assistant', requireValidUser, forbidStudentAccounts, classAssistantRoutes);

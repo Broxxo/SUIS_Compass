@@ -9,9 +9,13 @@ import { useLanguage } from '../contexts/LanguageContext';
 import {
   useAIContext,
   buildBasicCurriculumPayload,
+  buildBasicStudentPortraitPayload,
+  buildBasicTeacherPortraitPayload,
   type AIScreenId,
   type CurriculumRoadmapPayload,
 } from '../contexts/AIContext';
+import { buildStudentPortraitAIContextString, type StudentPortraitAIPayload } from '../lib/studentPortraitAIContext';
+import { buildTeacherPortraitAIContextString, type TeacherPortraitAIPayload } from '../lib/teacherPortraitAIContext';
 import { Course } from '../types';
 import { loadSemesterDataSync } from '../lib/storage';
 import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/aiModels';
@@ -31,6 +35,7 @@ import {
   History,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { aiMarkdownComponents, aiRemarkPlugins } from './aiMarkdown';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import AppTopBar from './AppTopBar';
@@ -51,9 +56,9 @@ interface Message {
   reasoningTime?: number;
 }
 
-function buildContextString(screenId: AIScreenId, payload: Record<string, unknown>): string {
+function buildContextString(screenId: AIScreenId, payload: Record<string, unknown>, isZh: boolean): string {
   if (!screenId || screenId === 'hub') {
-    return '当前无特定课程或学生画像等应用上下文。用户可能从 SUIS AI 主入口直接发起对话，你需要根据提问内容，在协和双语学校真实教学与校园场景下进行理解与回答。';
+    return '当前无特定课程或学生中心等应用上下文。用户可能从 SUIS AI 主入口直接发起对话，你需要根据提问内容，在协和双语学校真实教学与校园场景下进行理解与回答。';
   }
   if (screenId === 'curriculum-roadmap') {
     const p = payload as unknown as CurriculumRoadmapPayload;
@@ -90,6 +95,12 @@ function buildContextString(screenId: AIScreenId, payload: Record<string, unknow
     }
     return ctx;
   }
+  if (screenId === 'student-portrait') {
+    return buildStudentPortraitAIContextString(payload as unknown as StudentPortraitAIPayload, isZh);
+  }
+  if (screenId === 'teacher-portrait') {
+    return buildTeacherPortraitAIContextString(payload as unknown as TeacherPortraitAIPayload, isZh);
+  }
   return `当前应用上下文：${screenId}。`;
 }
 
@@ -104,6 +115,32 @@ const SYSTEM_PROMPT_GENERAL = `你是“SUIS AI”，协和双语学校（Shangh
 - 优先明确用户的角色和目标（例如：小学语文老师、初中数学老师、德育主任等），必要时可以先用 1～2 句追问澄清。
 - 给出结构化、可落地的建议，多用分点、清单和示范表达方式，避免空泛的大话。
 - 能落到“具体课堂活动 / 操作步骤 / 话术示例”时，就不要停留在纯理论层面。
+
+请务必使用 Markdown 格式输出，利用加粗、列表、分级标题等方式让内容层次分明、易于阅读。
+
+`;
+
+const SYSTEM_PROMPT_STUDENT_PORTRAIT = `你是学生中心智能助手，辅助班主任、年级组长、学科组长与任课教师理解班级与学生学情。
+
+你可以看到用户当前在学生中心界面上能看到的结构化数据（班级统计、学科均分、学生成绩摘要、考试趋势、学科支持计划、班主任评语等）。考试学科的满分随**具体学业报告及其所属学期**从后台配置解析（同一学年上下学期、不同报告可能满分不同，如科学上学期 50、下学期 100）；上下文会标明对应报告名称，分数也可能以「得分/满分（得分率%）」形式出现。跨学期趋势中每个数据点使用**该点所属报告**的满分。分析时请结合满分与得分率，勿把不同满分的学科或不同学期的分数直接比绝对值。请基于这些数据作答，不要编造未出现在上下文中的分数或评价。
+
+回答原则：
+- 先概括整体情况，再指出值得关注的学生或学科；区分「事实数据」与「分析建议」。
+- 涉及个别学生时注意隐私与建设性表述，避免标签化。
+- 若上下文数据不足，明确说明并建议用户切换到有数据的报告或选中具体学生。
+
+请务必使用 Markdown 格式输出，利用加粗、列表、分级标题等方式让内容层次分明、易于阅读。
+
+`;
+
+const SYSTEM_PROMPT_TEACHER_PORTRAIT = `你是教师中心智能助手，辅助学科组长、年级组长、班主任与学校管理者理解教师发展、学科组质量与学校整体教学数据。
+
+你可以看到用户当前在教师中心界面上能看到的结构化数据（学校 KPI、学业报告完成度、学科看板年级×班级均分、教学诊断提交情况等）。在学科看板/全校成绩视图中，若所选为学业报告，上下文会包含该报告下各考试学科的满分（如科学 50、语文 100，随报告学期配置），均分也可能以「得分/满分（得分率%）」呈现；分析时请结合满分与得分率，勿把不同满分的学科直接比绝对值。请基于这些数据作答，不要编造未出现在上下文中的分数或评价。
+
+回答原则：
+- 学科看板场景：先概括年级与班级整体水平，再指出班级间差异、薄弱学科或需关注的教师；区分「事实数据」与「分析建议」。
+- 学校看板场景：关注完成率、待关注班级与负荷分布，给出可操作的跟进建议。
+- 若上下文数据不足，明确说明并建议用户切换到有数据的报告或进入学科看板后再提问。
 
 请务必使用 Markdown 格式输出，利用加粗、列表、分级标题等方式让内容层次分明、易于阅读。
 
@@ -265,6 +302,10 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
     setScreenId(id);
     if (id === 'curriculum-roadmap') {
       setContextPayload(buildBasicCurriculumPayload());
+    } else if (id === 'student-portrait') {
+      setContextPayload(buildBasicStudentPortraitPayload());
+    } else if (id === 'teacher-portrait') {
+      setContextPayload(buildBasicTeacherPortraitPayload());
     } else {
       setContextPayload({});
     }
@@ -290,8 +331,15 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
     setInput('');
     setIsLoading(true);
 
-    const context = buildContextString(screenId, contextPayload as Record<string, unknown>);
-    const systemBase = !screenId || screenId === 'hub' ? SYSTEM_PROMPT_GENERAL : SYSTEM_PROMPT_COURSE;
+    const context = buildContextString(screenId, contextPayload as Record<string, unknown>, language === 'zh');
+    const systemBase =
+      screenId === 'curriculum-roadmap'
+        ? SYSTEM_PROMPT_COURSE
+        : screenId === 'student-portrait'
+          ? SYSTEM_PROMPT_STUDENT_PORTRAIT
+          : screenId === 'teacher-portrait'
+            ? SYSTEM_PROMPT_TEACHER_PORTRAIT
+            : SYSTEM_PROMPT_GENERAL;
     const systemContent = systemBase + `\n${context}`;
     const systemPrompt: Message = { role: 'system', content: systemContent };
     const historyToSend = newMessages.slice(-10);
@@ -391,7 +439,9 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
         ? t('ai.panel.contextCurriculum')
         : screenId === 'student-portrait'
           ? t('ai.panel.contextStudent')
-          : t('ai.panel.contextAssistant');
+          : screenId === 'teacher-portrait'
+            ? t('ai.panel.contextTeacher')
+            : t('ai.panel.contextNone');
   const hasContext = screenId !== null && screenId !== 'hub';
 
   const chatListItems = chatList.map((c) => (
@@ -616,8 +666,12 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
                             <button type="button" onClick={() => handleContextSelect('curriculum-roadmap')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'curriculum-roadmap' ? '✓ ' : ''}{t('ai.panel.contextCurriculum')}
                             </button>
-                            <button type="button" disabled className="w-full px-3 py-2 text-left text-sm text-slate-400 cursor-not-allowed">{t('ai.panel.contextStudent')}</button>
-                            <button type="button" disabled className="w-full px-3 py-2 text-left text-sm text-slate-400 cursor-not-allowed">{t('ai.panel.contextAssistant')}</button>
+                            <button type="button" onClick={() => handleContextSelect('student-portrait')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'student-portrait' ? '✓ ' : ''}{t('ai.panel.contextStudent')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('teacher-portrait')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'teacher-portrait' ? '✓ ' : ''}{t('ai.panel.contextTeacher')}
+                            </button>
                           </div>
                         )}
                       </div>
@@ -685,13 +739,7 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
                             </div>
                           )}
                           <div className="markdown-content">
-                            <ReactMarkdown
-                              components={{
-                                p: ({ children }) => <p className="mb-1 last:mb-0">{children}</p>,
-                                ul: ({ children }) => <ul className="list-disc pl-4 mb-1">{children}</ul>,
-                                ol: ({ children }) => <ol className="list-decimal pl-4 mb-1">{children}</ol>,
-                              }}
-                            >
+                            <ReactMarkdown remarkPlugins={aiRemarkPlugins} components={aiMarkdownComponents}>
                               {msg.content}
                             </ReactMarkdown>
                           </div>
@@ -763,8 +811,12 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
                             <button type="button" onClick={() => handleContextSelect('curriculum-roadmap')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'curriculum-roadmap' ? '✓ ' : ''}{t('ai.panel.contextCurriculum')}
                             </button>
-                            <button type="button" disabled className="w-full px-3 py-2 text-left text-sm text-slate-400 cursor-not-allowed">{t('ai.panel.contextStudent')}</button>
-                            <button type="button" disabled className="w-full px-3 py-2 text-left text-sm text-slate-400 cursor-not-allowed">{t('ai.panel.contextAssistant')}</button>
+                            <button type="button" onClick={() => handleContextSelect('student-portrait')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'student-portrait' ? '✓ ' : ''}{t('ai.panel.contextStudent')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('teacher-portrait')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'teacher-portrait' ? '✓ ' : ''}{t('ai.panel.contextTeacher')}
+                            </button>
                           </div>
                         )}
                       </div>

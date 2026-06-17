@@ -421,7 +421,7 @@ export default function TeachingManagementPanel({
                 {schoolSegments.length === 0 ? (
                   <p className="text-xs text-slate-500 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                     {isZh
-                      ? '尚未在基础设置中配置学段，本组将覆盖全校班级。'
+                      ? '尚未在学校设置中配置学段，本组将覆盖全校班级。'
                       : 'No segments configured; this group applies to the whole school.'}
                   </p>
                 ) : (

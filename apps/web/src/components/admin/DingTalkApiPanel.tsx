@@ -49,14 +49,31 @@ export default function DingTalkApiPanel({ isZh, loading, data, fromCache }: Din
 
   return (
     <div className="space-y-4">
-      {fromCache && data.fetchedAt && (
-        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-          {isZh
-            ? `当前展示的是缓存数据（拉取于 ${new Date(data.fetchedAt).toLocaleString('zh-CN')}），点击「刷新」获取最新。`
-            : `Showing cached data (fetched ${new Date(data.fetchedAt).toLocaleString()}). Click Refresh for latest.`}
+      {(data.fetchedAt && (fromCache || data.campusFilter)) && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 leading-relaxed">
+          {fromCache && (
+            <>
+              {isZh
+                ? `当前展示的是缓存数据（拉取于 ${new Date(data.fetchedAt).toLocaleString('zh-CN')}），点击「刷新」获取最新。`
+                : `Showing cached data (fetched ${new Date(data.fetchedAt).toLocaleString()}). Click Refresh for latest.`}
+            </>
+          )}
+          {data.campusFilter && (
+            <>
+              {fromCache ? ' ' : ''}
+              {isZh ? '同步范围：仅包含' : 'Sync scope: include'}{' '}
+              <span className="font-medium text-slate-800">{data.campusFilter.includeRoots.join('、')}</span>
+              {data.campusFilter.excludeRoots.length > 0 && (
+                <>
+                  {' '}
+                  {isZh ? '；已排除' : '; exclude'}{' '}
+                  <span className="font-medium text-slate-800">{data.campusFilter.excludeRoots.join('、')}</span>
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
-
       {!data.configured && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           {isZh
@@ -68,19 +85,6 @@ export default function DingTalkApiPanel({ isZh, loading, data, fromCache }: Din
       {data.error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
           {data.error}
-        </div>
-      )}
-
-      {data.fetchedAt && data.campusFilter && (
-        <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
-          {isZh ? '同步范围：仅包含' : 'Sync scope: include'}{' '}
-          <span className="font-medium">{data.campusFilter.includeRoots.join('、')}</span>
-          {data.campusFilter.excludeRoots.length > 0 && (
-            <>
-              {' '}{isZh ? '；已排除' : '; exclude'}{' '}
-              <span className="font-medium">{data.campusFilter.excludeRoots.join('、')}</span>
-            </>
-          )}
         </div>
       )}
 
@@ -107,20 +111,6 @@ export default function DingTalkApiPanel({ isZh, loading, data, fromCache }: Din
               </div>
             </div>
           ))}
-        </div>
-      )}
-
-      {(data.config.appId || data.config.clientId) && (
-        <div className="text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
-          {data.config.appId && (
-            <span>{isZh ? 'App ID' : 'App ID'}: <span className="font-mono text-slate-700">{data.config.appId}</span></span>
-          )}
-          {data.config.agentId && (
-            <span>{isZh ? 'AgentId' : 'AgentId'}: <span className="font-mono text-slate-700">{data.config.agentId}</span></span>
-          )}
-          {data.config.clientId && (
-            <span>{isZh ? 'Client ID' : 'Client ID'}: <span className="font-mono text-slate-700">{data.config.clientId}</span></span>
-          )}
         </div>
       )}
 

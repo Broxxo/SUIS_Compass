@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { resolvePgSsl } from './pg-ssl.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -24,7 +25,7 @@ async function main() {
     process.exit(1);
   }
   const sql = fs.readFileSync(sqlPath, 'utf8');
-  const pool = new pg.Pool({ connectionString: url, ssl: false });
+  const pool = new pg.Pool({ connectionString: url, ssl: resolvePgSsl(url) });
 
   let lastErr;
   for (let i = 0; i < 30; i++) {

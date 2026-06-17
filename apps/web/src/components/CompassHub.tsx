@@ -623,7 +623,7 @@ export default function CompassHub({
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white pt-16 pb-6">
       <AppTopBar
-        title={isZh ? '协和智能教学中心' : 'SUIS COMPASS'}
+        title="SUIS Compass 智能教学中心"
         rightChildren={
           <Button
             variant="outline"

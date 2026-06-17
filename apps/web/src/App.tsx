@@ -23,6 +23,12 @@ type HubView =
 
 const MOBILE_BREAKPOINT = 768;
 
+/** 桌面侧窗 AI：主内容 55%，侧窗 45%（较原 50/50 侧窗收窄 10%） */
+const AI_DOCK_MAIN_OPEN = 'w-[55%] min-w-0 overflow-hidden';
+const AI_DOCK_MAIN_OPEN_FULL = 'w-[55%] min-w-0 overflow-hidden h-full';
+const AI_DOCK_PANEL =
+  'fixed inset-y-0 right-0 z-30 w-[45%] min-w-[324px] max-w-[648px] bg-white border-l border-slate-200 flex flex-col shadow-xl';
+
 function AppContent() {
   const { isAuthenticated, user } = useAuth();
   const { setScreenId, setContextPayload } = useAIContext();
@@ -109,7 +115,7 @@ function AppContent() {
     return (
       <div className="h-screen w-screen flex relative">
         <div
-          className={aiOverlayOpen && !isMobile ? 'w-1/2 min-w-0 overflow-hidden' : 'w-full'}
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN : 'w-full'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
           <CurriculumRoadmap
@@ -124,7 +130,7 @@ function AppContent() {
             className={
               isMobile
                 ? 'fixed inset-0 z-30 bg-white flex flex-col'
-                : 'fixed inset-y-0 right-0 z-30 w-1/2 min-w-[360px] max-w-[720px] bg-white border-l border-slate-200 flex flex-col shadow-xl'
+                : AI_DOCK_PANEL
             }
           >
             <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
@@ -142,39 +148,75 @@ function AppContent() {
     return <ClassAssistant onBackToHub={() => setView('hub')} />
   }
 
-  if (view === 'student-portrait') {
-    return <StudentPortrait onBackToHub={() => setView('hub')} initialTab="overview" />;
+  if (view === 'student-portrait' || view === 'academic-reports') {
+    const nav = portraitNav?.view === 'academic-reports' ? portraitNav : null;
+    return (
+      <div className="h-screen w-screen flex relative">
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <StudentPortrait
+            onBackToHub={() => {
+              setPortraitNav(null);
+              setView('hub');
+            }}
+            initialTab={view === 'academic-reports' ? 'academic-reports' : 'overview'}
+            initialWorkbenchTemplateId={nav?.templateId}
+            initialReportYearId={nav?.academicYearId}
+            initialReportTerm={nav?.term}
+            isAIOpen={aiOverlayOpen}
+            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+          />
+        </div>
+        {aiOverlayOpen && (
+          <div
+            className={
+              isMobile
+                ? 'fixed inset-0 z-30 bg-white flex flex-col'
+                : AI_DOCK_PANEL
+            }
+          >
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
   }
 
   if (view === 'teacher-portrait') {
     const nav = portraitNav?.view === 'teacher-portrait' ? portraitNav : null;
     return (
-      <TeacherPortrait
-        onBackToHub={() => {
-          setPortraitNav(null);
-          setView('hub');
-        }}
-        initialTab={nav?.portraitTab ?? (nav ? 'collections' : undefined)}
-        initialYearId={nav?.academicYearId}
-        initialTerm={nav?.term}
-        initialCollectionTemplateId={nav?.templateId}
-      />
-    );
-  }
-
-  if (view === 'academic-reports') {
-    const nav = portraitNav?.view === 'academic-reports' ? portraitNav : null;
-    return (
-      <StudentPortrait
-        onBackToHub={() => {
-          setPortraitNav(null);
-          setView('hub');
-        }}
-        initialTab="academic-reports"
-        initialWorkbenchTemplateId={nav?.templateId}
-        initialReportYearId={nav?.academicYearId}
-        initialReportTerm={nav?.term}
-      />
+      <div className="h-screen w-screen flex relative">
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <TeacherPortrait
+            onBackToHub={() => {
+              setPortraitNav(null);
+              setView('hub');
+            }}
+            initialTab={nav?.portraitTab ?? (nav ? 'collections' : undefined)}
+            initialYearId={nav?.academicYearId}
+            initialTerm={nav?.term}
+            initialCollectionTemplateId={nav?.templateId}
+            isAIOpen={aiOverlayOpen}
+            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+          />
+        </div>
+        {aiOverlayOpen && (
+          <div
+            className={
+              isMobile
+                ? 'fixed inset-0 z-30 bg-white flex flex-col'
+                : AI_DOCK_PANEL
+            }
+          >
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
     );
   }
 

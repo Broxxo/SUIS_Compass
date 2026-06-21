@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import pg from 'pg';
 import { buildReportLoadSuite } from './reportLoadContext.js';
 import { putPortraitKiss, runPool, verifyPortraitWrites } from './reportLoadRunner.js';
+import { createLegacyAuthProvider } from './loadTestAuth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../apps/api/.env') });
@@ -24,11 +25,12 @@ async function main() {
     );
     const tasks = suite.executionPlan.portraitKissTasks;
     console.log(`期中教学诊断 KISS 任务: ${tasks.length} 条，${rounds} 轮`);
+    const legacyAuth = createLegacyAuthProvider();
     for (let round = 1; round <= rounds; round += 1) {
       let ok = 0;
       let fail = 0;
       await runPool(tasks, 64, async (task) => {
-        const res = await putPortraitKiss(apiBase, task, round, 25_000);
+        const res = await putPortraitKiss(apiBase, task, round, 25_000, legacyAuth);
         if (res.ok) ok += 1;
         else fail += 1;
       }, (done, total) => {

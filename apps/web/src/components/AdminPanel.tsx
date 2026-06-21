@@ -17,7 +17,16 @@ import {
   courseIdsWithExamGrades,
   inferExamGradeInclusionFromLegacyScope,
   groupCoursesByRoadmapDisplayKey,
+  isCourseIncludedInStaffing,
+  electiveTeacherWeeklyLoads,
+  electiveScheduleMode,
+  selfStudyWeekdayLabel,
   type TeachingSubjectGroup,
+  type SelfStudyModule,
+  type SelfStudySlot,
+  type SelfStudyGradeConfig,
+  type SelfStudyWeekday,
+  type ElectiveCourse,
 } from '@repo/shared';
 import type { AdminUser } from '../lib/adminStorage';
 import {
@@ -41,7 +50,9 @@ import {
   createAcademicYear,
   deleteAcademicYear,
   promoteAcademicYearToNext,
+  undoAcademicYearPromotion,
   loadStudents,
+  loadEnrollments,
   loadEnrollmentsSync,
   loadAllClasses,
   loadAllClassesSync,
@@ -90,9 +101,11 @@ import {
 } from '../lib/staffUserImport';
 import {
   buildStaffingRosterSheetsFromBlocks,
-  downloadStaffingPackageExport,
+  downloadStaffingKeyRolesExport,
+  downloadStaffingCourseJobsExport,
   downloadWeeklyLoadExport,
-  parseStaffingPackageWorkbook,
+  parseStaffingKeyRolesWorkbook,
+  parseStaffingCourseJobsWorkbook,
   type StaffingRosterTeacherRef,
 } from '../lib/staffingRosterExcel';
 import {
@@ -106,7 +119,9 @@ import ClassManagement from './ClassManagement';
 import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
 import PromoteAcademicYearPreviewDialog from './admin/PromoteAcademicYearPreviewDialog';
-import StaffingSettingsPanel, { type StaffingSubTab } from './admin/StaffingSettingsPanel';
+import StaffingSettingsPanel, { staffingSubTabGroup, type StaffingSubTab } from './admin/StaffingSettingsPanel';
+import SelfStudyStaffingPanel from './admin/SelfStudyStaffingPanel';
+import ElectiveStaffingPanel from './admin/ElectiveStaffingPanel';
 import DatabaseSettingsPanel, { type DatabaseSubTab } from './admin/DatabaseSettingsPanel';
 import ProgramDatabasePanel from './admin/ProgramDatabasePanel';
 import DingTalkApiPanel from './admin/DingTalkApiPanel';
@@ -427,41 +442,14 @@ function stripLeadingGradeFromClassName(className: string): string {
   return stripped || t;
 }
 
-/** 周课时统计：按课程分类汇总，如「语文: P5C-6节, P5D-6节；班会: P5C-1节」 */
-function formatStaffingLoadBreakdownByCategory(items: StaffingLoadLineItem[], language: string): string {
-  if (items.length === 0) return '—';
-  const byCategory = new Map<string, { label: string; classParts: Map<string, number> }>();
-  for (const it of items) {
-    let entry = byCategory.get(it.subjectCategoryKey);
-    if (!entry) {
-      entry = { label: it.subjectCategoryLabel, classParts: new Map() };
-      byCategory.set(it.subjectCategoryKey, entry);
-    }
-    const cls = stripLeadingGradeFromClassName(it.className);
-    entry.classParts.set(cls, (entry.classParts.get(cls) ?? 0) + it.periods);
-  }
-  const categories = [...byCategory.values()].sort((a, b) =>
-    a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }),
-  );
-  const sepCat = language === 'zh' ? '；' : '; ';
-  const sepCls = language === 'zh' ? ', ' : ', ';
-  return categories
-    .map((cat) => {
-      const parts = [...cat.classParts.entries()]
-        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-        .map(([cls, periods]) =>
-          language === 'zh'
-            ? `${cls}-${formatWeeklyLoadValue(periods)}节`
-            : `${cls} ${formatWeeklyLoadValue(periods)}`,
-        );
-      return `${cat.label}: ${parts.join(sepCls)}`;
-    })
-    .join(sepCat);
-}
-
 /** 周课时统计：单行构成（过程明细） */
+type StaffingLoadKind = 'course' | 'self-study' | 'elective';
+
 type StaffingLoadLineItem = {
   teacherId: string;
+  loadKind: StaffingLoadKind;
+  /** 课时构成区块内分组标签（学科 / 自习模块 / 选修课名） */
+  breakdownGroup: string;
   subjectCategoryKey: string;
   subjectCategoryLabel: string;
   courseKey: string;
@@ -470,6 +458,80 @@ type StaffingLoadLineItem = {
   gradeLevel: number;
   periods: number;
 };
+
+function formatStaffingLoadBreakdownGroup(items: StaffingLoadLineItem[], language: string): string {
+  if (items.length === 0) return '';
+  const byGroup = new Map<string, Map<string, number>>();
+  for (const it of items) {
+    let classParts = byGroup.get(it.breakdownGroup);
+    if (!classParts) {
+      classParts = new Map();
+      byGroup.set(it.breakdownGroup, classParts);
+    }
+    const cls = stripLeadingGradeFromClassName(it.className);
+    classParts.set(cls, (classParts.get(cls) ?? 0) + it.periods);
+  }
+  const groups = [...byGroup.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }),
+  );
+  const sepGroup = language === 'zh' ? '；' : '; ';
+  const sepCls = language === 'zh' ? ', ' : ', ';
+  return groups
+    .map(([group, classParts]) => {
+      const parts = [...classParts.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+        .map(([cls, periods]) =>
+          language === 'zh'
+            ? `${cls}-${formatWeeklyLoadValue(periods)}节`
+            : `${cls} ${formatWeeklyLoadValue(periods)}`,
+        );
+      return `${group}: ${parts.join(sepCls)}`;
+    })
+    .join(sepGroup);
+}
+
+/** 课程岗位：每门课一行，如「双语体育(9节)：P4A-1, P4B-1, …」 */
+function formatStaffingLoadCourseBreakdown(items: StaffingLoadLineItem[], language: string): string {
+  if (items.length === 0) return '';
+  const isZh = language === 'zh';
+  const byCourse = new Map<string, { name: string; classes: Map<string, number> }>();
+  for (const it of items) {
+    let entry = byCourse.get(it.courseKey);
+    if (!entry) {
+      entry = { name: it.courseDisplayName, classes: new Map() };
+      byCourse.set(it.courseKey, entry);
+    }
+    const cls = stripLeadingGradeFromClassName(it.className);
+    entry.classes.set(cls, it.periods);
+  }
+  const sepCls = isZh ? ', ' : ', ';
+  const colon = isZh ? '：' : ': ';
+  return [...byCourse.values()]
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
+    .map(({ name, classes }) => {
+      const total = [...classes.values()].reduce((sum, p) => sum + p, 0);
+      const meta = isZh
+        ? `(${formatWeeklyLoadValue(total)}节)`
+        : `(${formatWeeklyLoadValue(total)})`;
+      const classParts = [...classes.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }))
+        .map(([cls, periods]) => `${cls}-${formatWeeklyLoadValue(periods)}`);
+      return `${name}${meta}${colon}${classParts.join(sepCls)}`;
+    })
+    .join('\n');
+}
+
+function formatStaffingLoadBreakdownCell(
+  items: StaffingLoadLineItem[],
+  language: string,
+  kind: StaffingLoadKind,
+): string {
+  const text =
+    kind === 'course'
+      ? formatStaffingLoadCourseBreakdown(items, language)
+      : formatStaffingLoadBreakdownGroup(items, language);
+  return text || '—';
+}
 
 const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   'system-admin': { zh: '系统管理员', en: 'System Admin' },
@@ -677,6 +739,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [newYearName, setNewYearName] = useState('');
   const [yearSubmitLoading, setYearSubmitLoading] = useState(false);
   const [promoteYearLoading, setPromoteYearLoading] = useState(false);
+  const [undoPromotionLoading, setUndoPromotionLoading] = useState(false);
   const [promotePreviewOpen, setPromotePreviewOpen] = useState(false);
   const [promotePreviewLoading, setPromotePreviewLoading] = useState(false);
   const [promotePreview, setPromotePreview] = useState<AcademicYearPromotionPreview | null>(null);
@@ -838,12 +901,19 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [subjectGroupMembers, setSubjectGroupMembers] = useState<
     Array<{ groupId: string; teacherId: string; teacherName: string | null }>
   >([]);
+  const [selfStudyModules, setSelfStudyModules] = useState<SelfStudyModule[]>([]);
+  const [selfStudyGradeConfigs, setSelfStudyGradeConfigs] = useState<SelfStudyGradeConfig[]>([]);
+  const [selfStudySlots, setSelfStudySlots] = useState<SelfStudySlot[]>([]);
+  const [electiveCourses, setElectiveCourses] = useState<ElectiveCourse[]>([]);
+  const [selfStudySavingKeys, setSelfStudySavingKeys] = useState<Set<string>>(new Set());
+  const [electiveSaving, setElectiveSaving] = useState(false);
   const [savingTeachingGroupId, setSavingTeachingGroupId] = useState<string | null>(null);
   /** 周课时统计·全校表：按主学科筛选、排序 */
   const [staffingLoadGrandFilterPrimary, setStaffingLoadGrandFilterPrimary] = useState<string>('');
   const [staffingExcelImporting, setStaffingExcelImporting] = useState(false);
   const [studentExcelImporting, setStudentExcelImporting] = useState(false);
   const staffingExcelInputRef = useRef<HTMLInputElement>(null);
+  const staffingCourseJobsExcelInputRef = useRef<HTMLInputElement>(null);
   const studentExcelInputRef = useRef<HTMLInputElement>(null);
   const [staffingLoadGrandSort, setStaffingLoadGrandSort] = useState<
     'total-desc' | 'total-asc' | 'name-asc' | 'primary-asc'
@@ -1817,24 +1887,34 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       .then(async ([yList, clsList, curYearId, courseList, userList, subjectGroups]) => {
         setAllYears(yList);
         setAllClasses(clsList);
-        setStaffingCourses(courseList);
+        setStaffingCourses(courseList.filter(isCourseIncludedInStaffing));
         setStaffingTeachers(userList.filter((u) => u.role === 'teacher'));
         setTeachingSubjectGroups(subjectGroups);
         const id = curYearId || yList[0]?.id || '';
         setStaffingYearId(id);
         if (id && USE_CLOUD_STORAGE) {
-          const [assignments, functionalRoles, members] = await Promise.all([
+          const [assignments, functionalRoles, members, selfStudyBundle, electiveBundle] = await Promise.all([
             api.getAdminStaffingAssignments(id),
             api.getAdminFunctionalRoles(id),
             api.getAdminTeachingSubjectGroupMembers(id),
+            api.getAdminSelfStudyBundle(id),
+            api.getAdminElectiveBundle(id),
           ]);
           setStaffingAssignments(assignments);
           setFunctionalRoleAssignments(functionalRoles);
           setSubjectGroupMembers(members);
+          setSelfStudyModules(selfStudyBundle.modules);
+          setSelfStudyGradeConfigs(selfStudyBundle.gradeConfigs);
+          setSelfStudySlots(selfStudyBundle.slots);
+          setElectiveCourses(electiveBundle.courses);
         } else {
           setStaffingAssignments([]);
           setFunctionalRoleAssignments([]);
           setSubjectGroupMembers([]);
+          setSelfStudyModules([]);
+          setSelfStudyGradeConfigs([]);
+          setSelfStudySlots([]);
+          setElectiveCourses([]);
         }
       })
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing data'))
@@ -1847,6 +1927,10 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setStaffingAssignments([]);
       setFunctionalRoleAssignments([]);
       setSubjectGroupMembers([]);
+      setSelfStudyModules([]);
+      setSelfStudyGradeConfigs([]);
+      setSelfStudySlots([]);
+      setElectiveCourses([]);
       return;
     }
     setStaffingLoading(true);
@@ -1863,6 +1947,35 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing assignments'))
       .finally(() => setStaffingLoading(false));
   }, [adminTab, staffingDataTabActive, staffingYearId]);
+
+  useEffect(() => {
+    if (!staffingDataTabActive) return;
+    if (!USE_CLOUD_STORAGE || !staffingYearId) {
+      setSelfStudyModules([]);
+      setSelfStudyGradeConfigs([]);
+      setSelfStudySlots([]);
+      setElectiveCourses([]);
+      return;
+    }
+    Promise.all([
+      api.getAdminSelfStudyBundle(staffingYearId),
+      api.getAdminElectiveBundle(staffingYearId),
+    ])
+      .then(([selfStudyBundle, electiveBundle]) => {
+        setSelfStudyModules(selfStudyBundle.modules);
+        setSelfStudyGradeConfigs(selfStudyBundle.gradeConfigs);
+        setSelfStudySlots(selfStudyBundle.slots);
+        setElectiveCourses(electiveBundle.courses);
+      })
+      .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load self-study / elective data'));
+  }, [adminTab, staffingDataTabActive, staffingYearId]);
+
+  useEffect(() => {
+    if (!staffingDataTabActive || staffingSubTab !== 'elective' || !staffingYearId) return;
+    void loadEnrollments(staffingYearId).then(() => {
+      setEnrollments(loadEnrollmentsSync());
+    });
+  }, [staffingDataTabActive, staffingSubTab, staffingYearId]);
 
   useEffect(() => {
     setStaffingLoadGrandFilterPrimary('');
@@ -1942,6 +2055,50 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setError((e as Error)?.message || (isZh ? '升学年失败' : 'Promotion failed'));
     } finally {
       setPromoteYearLoading(false);
+    }
+  };
+
+  const handleUndoPromotion = async () => {
+    if (undoPromotionLoading || promoteYearLoading || promotePreviewLoading) return;
+    setUndoPromotionLoading(true);
+    setError(null);
+    try {
+      const preview = await api.getAcademicYearUndoPromotionPreview();
+      if (!preview) {
+        window.alert(isZh ? '没有可撤销的升学记录。请先使用「升入新学年」。' : 'No promotion to undo.');
+        return;
+      }
+      if (!preview.canUndo) {
+        window.alert(
+          isZh
+            ? `当前无法撤回升年：${preview.warnings.join(' ')}`
+            : `Cannot undo promotion: ${preview.warnings.join(' ')}`,
+        );
+        return;
+      }
+      const confirmed = window.confirm(
+        isZh
+          ? `确定撤回升年？\n\n将把系统默认学年从「${preview.targetYearName}」恢复为「${preview.sourceYearName}」，并删除新学年的 ${preview.summary.targetClassCount} 个班级、${preview.summary.targetEnrollmentCount} 条学籍；${preview.summary.graduatedClassesToRestore} 个毕业班将取消归档。\n\n${preview.warnings.join('\n')}`
+          : `Undo the last promotion?\n\nRestore default year from "${preview.targetYearName}" to "${preview.sourceYearName}". This deletes ${preview.summary.targetClassCount} classes and ${preview.summary.targetEnrollmentCount} enrollments in the new year, and unarchives ${preview.summary.graduatedClassesToRestore} graduated classes.\n\n${preview.warnings.join('\n')}`,
+      );
+      if (!confirmed) return;
+      const result = await undoAcademicYearPromotion();
+      await refreshYears();
+      setCurrentYearId(result.sourceYearId);
+      setStaffingYearId(result.sourceYearId);
+      const classes = await loadAllClasses();
+      setAllClasses(classes);
+      const studentList = await loadStudents();
+      setStudents(studentList);
+      window.alert(
+        isZh
+          ? `已撤回升年：默认学年恢复为「${result.sourceYearName}」；恢复 ${result.studentsRestored} 名学生学籍，取消归档 ${result.classesUnarchived} 个毕业班。`
+          : `Promotion undone: default year restored to ${result.sourceYearName}; ${result.studentsRestored} students restored, ${result.classesUnarchived} classes unarchived.`,
+      );
+    } catch (e: unknown) {
+      setError((e as Error)?.message || (isZh ? '撤回升年失败' : 'Undo promotion failed'));
+    } finally {
+      setUndoPromotionLoading(false);
     }
   };
 
@@ -4356,6 +4513,137 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
   };
 
+  const handleCreateSelfStudyModule = async (input: {
+    name: string;
+    gradeConfigs: Array<{ grade: number; sessionsPerWeek: number }>;
+  }): Promise<SelfStudyModule | void> => {
+    if (!staffingYearId) return;
+    setError(null);
+    try {
+      const result = await api.createAdminSelfStudyModule({
+        academicYearId: staffingYearId,
+        name: input.name,
+        gradeConfigs: input.gradeConfigs,
+      });
+      setSelfStudyModules((prev) => [...prev, result.module]);
+      setSelfStudyGradeConfigs((prev) => [...prev, ...result.gradeConfigs]);
+      return result.module;
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to create self-study module');
+    }
+  };
+
+  const handleRenameSelfStudyModule = async (id: string, name: string) => {
+    setError(null);
+    try {
+      const mod = await api.updateAdminSelfStudyModule({ id, name });
+      setSelfStudyModules((prev) => prev.map((m) => (m.id === id ? mod : m)));
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to rename self-study module');
+    }
+  };
+
+  const handleDeleteSelfStudyModule = async (id: string) => {
+    setError(null);
+    try {
+      await api.deleteAdminSelfStudyModule(id);
+      setSelfStudyModules((prev) => prev.filter((m) => m.id !== id));
+      setSelfStudyGradeConfigs((prev) => prev.filter((g) => g.moduleId !== id));
+      setSelfStudySlots((prev) => prev.filter((s) => s.moduleId !== id));
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to delete self-study module');
+    }
+  };
+
+  const handleUpsertSelfStudySlot = async (input: {
+    id?: string;
+    moduleId: string;
+    classId: string;
+    weekday: SelfStudyWeekday;
+    teacherId: string | null;
+  }) => {
+    if (!staffingYearId) return;
+    const saveKey = input.id ? `ss-slot-${input.id}` : `ss-slot-new-${input.moduleId}-${input.classId}-${input.weekday}`;
+    setSelfStudySavingKeys((prev) => new Set(prev).add(saveKey));
+    setError(null);
+    try {
+      const slot = await api.upsertAdminSelfStudySlot({
+        ...input,
+        academicYearId: staffingYearId,
+      });
+      setSelfStudySlots((prev) => {
+        const without = prev.filter(
+          (s) =>
+            s.id !== slot.id &&
+            !(s.moduleId === slot.moduleId && s.classId === slot.classId && s.weekday === slot.weekday),
+        );
+        return [...without, slot].sort(
+          (a, b) => a.grade - b.grade || a.classId.localeCompare(b.classId) || a.weekday - b.weekday,
+        );
+      });
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save self-study slot');
+    } finally {
+      setSelfStudySavingKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(saveKey);
+        return next;
+      });
+    }
+  };
+
+  const handleDeleteSelfStudySlot = async (id: string) => {
+    setError(null);
+    try {
+      await api.deleteAdminSelfStudySlot(id);
+      setSelfStudySlots((prev) => prev.filter((s) => s.id !== id));
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to delete self-study slot');
+    }
+  };
+
+  const handleSaveElectiveCourse = async (input: {
+    id?: string;
+    name: string;
+    applicableGrades: string[];
+    durationPeriods: 1 | 2;
+    teacherId: string | null;
+    teacher2Id: string | null;
+    capacity: number;
+    location: string;
+  }) => {
+    if (!staffingYearId) return;
+    setElectiveSaving(true);
+    setError(null);
+    try {
+      const course = await api.upsertAdminElectiveCourse({
+        ...input,
+        academicYearId: staffingYearId,
+      });
+      setElectiveCourses((prev) => {
+        const without = prev.filter((c) => c.id !== course.id);
+        return [...without, course].sort((a, b) => a.sortOrder - b.sortOrder);
+      });
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to save elective course');
+    } finally {
+      setElectiveSaving(false);
+    }
+  };
+
+  const handleDeleteElectiveCourse = async (id: string) => {
+    setElectiveSaving(true);
+    setError(null);
+    try {
+      await api.deleteAdminElectiveCourse(id);
+      setElectiveCourses((prev) => prev.filter((c) => c.id !== id));
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to delete elective course');
+    } finally {
+      setElectiveSaving(false);
+    }
+  };
+
   const saveTeachingSubjectGroups = async (groups: TeachingSubjectGroup[]) => {
     if (!USE_CLOUD_STORAGE) return;
     setError(null);
@@ -4418,6 +4706,18 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [allClasses, staffingYearId],
   );
 
+  const staffingEnrollmentsForElective = useMemo(() => {
+    if (!staffingYearId) return [];
+    const classIds = new Set(staffingClassList.map((c) => c.id));
+    return enrollments.filter((e) => e.academicYearId === staffingYearId && classIds.has(e.classId));
+  }, [enrollments, staffingYearId, staffingClassList]);
+
+  const selfStudyModuleNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const mod of selfStudyModules) map.set(mod.id, mod.name);
+    return map;
+  }, [selfStudyModules]);
+
   /** 扁平任课列（Excel / 岗位匹配 subjectKey）；顺序与课程设置一致 */
   const staffingCoursesSortedFlat = useMemo(() => {
     const sorted = sortCoursesLikeCurriculumRoadmap(
@@ -4457,6 +4757,24 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   /** 年级配置变化时岗位学段划分与周课时需重算 */
   const staffingGradeConfigSyncKey =
     staffingDataTabActive ? JSON.stringify(normalizeGradeConfig(loadGradeConfigSync())) : '';
+
+  const staffingGradeItems = useMemo(
+    () => normalizeGradeConfig(loadGradeConfigSync()).items,
+    [staffingGradeConfigSyncKey],
+  );
+
+  const staffingGradeLevels = useMemo(() => {
+    const gc = normalizeGradeConfig(loadGradeConfigSync());
+    const fromConfig = [...gc.items]
+      .sort((a, b) => a.level - b.level)
+      .map((item) => ({ level: item.level, label: item.label }));
+    if (fromConfig.length > 0) return fromConfig;
+    const levels = [...new Set(staffingClassList.map((c) => c.grade))].sort((a, b) => a - b);
+    return levels.map((level) => ({
+      level,
+      label: getGradeLabelByLevel(gc, level) || `G${level}`,
+    }));
+  }, [staffingClassList, staffingGradeConfigSyncKey]);
 
   /** 按学段分块；无学段配置时退化为单块「全校」；仅课程岗位列（班主任在职能岗位） */
   const staffingSegmentBlocks = useMemo(() => {
@@ -4642,7 +4960,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     [staffingHomeroomBlocks, isZh],
   );
 
-  const handleStaffingRosterExport = () => {
+  const handleStaffingKeyRolesExport = () => {
     const year = allYears.find((y) => y.id === staffingYearId);
     const gradeHeadMap = new Map<string, string>();
     for (const a of functionalRoleAssignments) {
@@ -4656,10 +4974,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         leadMap.set(a.scopeKey, a.teacherId);
       }
     }
-    downloadStaffingPackageExport({
+    downloadStaffingKeyRolesExport({
       academicYearLabel: year?.name ?? staffingYearId,
       isZh,
       gradeConfig: normalizeGradeConfig(loadGradeConfigSync()),
+      subjectOptions: staffingSubjectOptions,
       teachers: staffingTeachersForExcel,
       gradeBlocks: staffingGradeBlocksForExcel,
       homeroomByClassId: homeroomTeacherByClassId,
@@ -4667,25 +4986,52 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       teachingGroups: teachingSubjectGroups,
       subjectGroupLeadByGroupId: leadMap,
       membersByGroupId: subjectGroupMembersByGroupId,
-      courseSheets: staffingRosterSheetsForExcel,
-      courseAssignments: staffingAssignmentsForExcel,
     });
   };
 
-  const handleStaffingRosterExcelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleStaffingCourseJobsExport = () => {
+    const year = allYears.find((y) => y.id === staffingYearId);
+    downloadStaffingCourseJobsExport({
+      academicYearLabel: year?.name ?? staffingYearId,
+      isZh,
+      gradeConfig: normalizeGradeConfig(loadGradeConfigSync()),
+      teachers: staffingTeachersForExcel,
+      courseSheets: staffingRosterSheetsForExcel,
+      courseAssignments: staffingAssignmentsForExcel,
+      selfStudyModules: selfStudyModules.map((m) => ({ id: m.id, name: m.name })),
+      selfStudySlots: selfStudySlots.map((s) => ({
+        moduleId: s.moduleId,
+        classId: s.classId,
+        grade: s.grade,
+        weekday: s.weekday,
+        teacherId: s.teacherId,
+      })),
+      allClasses: staffingClassList,
+      electiveCourses: electiveCourses.map((c) => ({
+        name: c.name,
+        applicableGrades: c.applicableGrades ?? [],
+        durationPeriods: c.durationPeriods,
+        teacherId: c.teacherId,
+        teacher2Id: c.teacher2Id,
+        capacity: c.capacity,
+        location: c.location,
+      })),
+    });
+  };
+
+  const handleStaffingKeyRolesExcelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !staffingYearId) return;
     e.target.value = '';
     setError(null);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = parseStaffingPackageWorkbook(buf, {
+      const parsed = parseStaffingKeyRolesWorkbook(buf, {
         academicYearId: staffingYearId,
-        courseSheets: staffingRosterSheetsForExcel,
         gradeBlocks: staffingGradeBlocksForExcel,
         teachingGroups: teachingSubjectGroups,
+        subjectOptions: staffingSubjectOptions,
         allClasses: staffingClassList,
-        courses: staffingCourses,
         teachers: staffingTeachersForExcel,
         gradeConfig: loadGradeConfigSync(),
         isZh,
@@ -4699,7 +5045,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       if (
         parsed.operations.length === 0 &&
         parsed.functionalRoleOps.length === 0 &&
-        parsed.teachingMemberOps.length === 0
+        parsed.teachingMemberOps.length === 0 &&
+        parsed.newTeachingGroups.length === 0
       ) {
         alert(isZh ? '未解析到可导入的数据行。' : 'No rows to import.');
         return;
@@ -4711,6 +5058,16 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         if (!ok) return;
       }
       setStaffingExcelImporting(true);
+      if (parsed.newTeachingGroups.length > 0) {
+        const byName = new Map(teachingSubjectGroups.map((g) => [g.nameZh.trim(), g]));
+        for (const g of parsed.newTeachingGroups) {
+          byName.set(g.nameZh.trim(), g);
+        }
+        const merged = [...byName.values()].sort(
+          (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.nameZh.localeCompare(b.nameZh),
+        );
+        await saveTeachingSubjectGroups(merged);
+      }
       for (const op of parsed.operations) {
         if (!op.teacherId) {
           if (op.coTeaching) {
@@ -4763,11 +5120,131 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setFunctionalRoleAssignments(refreshedRoles);
       setSubjectGroupMembers(refreshedMembers);
       const total =
-        parsed.operations.length + parsed.functionalRoleOps.length + parsed.teachingMemberOps.length;
+        parsed.operations.length +
+        parsed.functionalRoleOps.length +
+        parsed.teachingMemberOps.length +
+        parsed.newTeachingGroups.length;
       alert(
         isZh
-          ? `已导入 ${total} 条岗位相关记录（任课 ${parsed.operations.length} / 职能 ${parsed.functionalRoleOps.length} / 学科组成员 ${parsed.teachingMemberOps.length}）。`
-          : `Imported ${total} staffing record(s) (assignments ${parsed.operations.length} / roles ${parsed.functionalRoleOps.length} / members ${parsed.teachingMemberOps.length}).`,
+          ? `已导入 ${total} 条关键岗位记录（班主任/年级组长 ${parsed.operations.length} / 职能 ${parsed.functionalRoleOps.length} / 学科组成员 ${parsed.teachingMemberOps.length}${parsed.newTeachingGroups.length > 0 ? ` / 新建学科组 ${parsed.newTeachingGroups.length}` : ''}）。`
+          : `Imported ${total} key-role record(s).`,
+      );
+    } catch (err: unknown) {
+      setError((err as Error)?.message || (isZh ? '导入失败' : 'Import failed'));
+    } finally {
+      setStaffingExcelImporting(false);
+    }
+  };
+
+  const handleStaffingCourseJobsExcelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !staffingYearId) return;
+    e.target.value = '';
+    setError(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = parseStaffingCourseJobsWorkbook(buf, {
+        academicYearId: staffingYearId,
+        courseSheets: staffingRosterSheetsForExcel,
+        allClasses: staffingClassList,
+        courses: staffingCourses,
+        teachers: staffingTeachersForExcel,
+        gradeConfig: loadGradeConfigSync(),
+        isZh,
+        selfStudyModules: selfStudyModules.map((m) => ({ id: m.id, name: m.name })),
+      });
+      if (parsed.errors.length > 0) {
+        const head = parsed.errors.slice(0, 12).join('\n');
+        const tail = parsed.errors.length > 12 ? (isZh ? '\n…' : '\n…') : '';
+        alert((isZh ? '导入失败：\n' : 'Import failed:\n') + head + tail);
+        return;
+      }
+      if (
+        parsed.operations.length === 0 &&
+        parsed.selfStudySlotOps.length === 0 &&
+        parsed.electiveCourseOps.length === 0
+      ) {
+        alert(isZh ? '未解析到可导入的数据行。' : 'No rows to import.');
+        return;
+      }
+      if (parsed.warnings.length > 0) {
+        const ok = window.confirm(
+          `${isZh ? '提示：\n' : 'Notice:\n'}${parsed.warnings.slice(0, 10).join('\n')}${parsed.warnings.length > 10 ? '\n…' : ''}\n\n${isZh ? '是否继续导入？' : 'Continue import?'}`,
+        );
+        if (!ok) return;
+      }
+      setStaffingExcelImporting(true);
+      for (const op of parsed.operations) {
+        if (!op.teacherId) {
+          if (op.coTeaching) {
+            await api.deleteAdminStaffingAssignment({
+              academicYearId: op.academicYearId,
+              classId: op.classId,
+              subjectKey: op.subjectKey,
+              teacherSlot: op.teacherSlot,
+            });
+          } else {
+            await api.deleteAdminStaffingAssignment({
+              academicYearId: op.academicYearId,
+              classId: op.classId,
+              subjectKey: op.subjectKey,
+            });
+          }
+        } else {
+          await api.upsertAdminStaffingAssignment({
+            academicYearId: op.academicYearId,
+            classId: op.classId,
+            subjectKey: op.subjectKey,
+            subjectName: op.subjectName,
+            teacherId: op.teacherId,
+            teacherSlot: op.teacherSlot,
+          });
+        }
+      }
+      for (const op of parsed.selfStudySlotOps) {
+        const mod = selfStudyModules.find((m) => m.name.trim() === op.moduleName.trim());
+        if (!mod || !op.classId) continue;
+        await api.upsertAdminSelfStudySlot({
+          academicYearId: staffingYearId,
+          moduleId: mod.id,
+          classId: op.classId,
+          weekday: op.weekday,
+          teacherId: op.teacherId,
+        });
+      }
+      for (const op of parsed.electiveCourseOps) {
+        const existing = electiveCourses.find((c) => c.name.trim() === op.name.trim());
+        const applicableGrades =
+          op.applicableGrades.length > 0 ? op.applicableGrades : (existing?.applicableGrades ?? []);
+        if (applicableGrades.length === 0) continue;
+        await api.upsertAdminElectiveCourse({
+          id: existing?.id,
+          academicYearId: staffingYearId,
+          name: op.name,
+          applicableGrades,
+          durationPeriods: op.durationPeriods,
+          teacherId: op.teacherId,
+          teacher2Id: op.teacher2Id,
+          capacity: op.capacity,
+          location: op.location,
+        });
+      }
+      const [refreshedAssignments, selfStudyBundle, electiveBundle] = await Promise.all([
+        api.getAdminStaffingAssignments(staffingYearId),
+        api.getAdminSelfStudyBundle(staffingYearId),
+        api.getAdminElectiveBundle(staffingYearId),
+      ]);
+      setStaffingAssignments(refreshedAssignments);
+      setSelfStudyModules(selfStudyBundle.modules);
+      setSelfStudyGradeConfigs(selfStudyBundle.gradeConfigs);
+      setSelfStudySlots(selfStudyBundle.slots);
+      setElectiveCourses(electiveBundle.courses);
+      const total =
+        parsed.operations.length + parsed.selfStudySlotOps.length + parsed.electiveCourseOps.length;
+      alert(
+        isZh
+          ? `已导入 ${total} 条任课岗位记录（课程 ${parsed.operations.length} / 自习 ${parsed.selfStudySlotOps.length} / 选修 ${parsed.electiveCourseOps.length}）。`
+          : `Imported ${total} course-job record(s).`,
       );
     } catch (err: unknown) {
       setError((err as Error)?.message || (isZh ? '导入失败' : 'Import failed'));
@@ -4804,6 +5281,8 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       const subjectCategoryLabel = getSubjectCategoryText(col.course.subjectCategory, language) || subjectCategoryKey;
       items.push({
         teacherId: a.teacherId,
+        loadKind: 'course',
+        breakdownGroup: subjectCategoryLabel,
         subjectCategoryKey,
         subjectCategoryLabel,
         courseKey: col.key,
@@ -4812,6 +5291,47 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         gradeLevel: cls.grade,
         periods,
       });
+    }
+    for (const slot of selfStudySlots) {
+      if (!slot.teacherId || slot.academicYearId !== staffingYearId) continue;
+      const moduleName = selfStudyModuleNameById.get(slot.moduleId) || (isZh ? '自习' : 'Self-study');
+      const cls = staffingClassList.find((c) => c.id === slot.classId);
+      const gradeLabel = cls
+        ? getGradeLabelByLevel(normalizeGradeConfig(loadGradeConfigSync()), cls.grade) || `G${cls.grade}`
+        : getGradeLabelByLevel(normalizeGradeConfig(loadGradeConfigSync()), slot.grade) || `G${slot.grade}`;
+      const classLabel = cls ? `${gradeLabel} ${cls.name}` : gradeLabel;
+      items.push({
+        teacherId: slot.teacherId,
+        loadKind: 'self-study',
+        breakdownGroup: moduleName,
+        subjectCategoryKey: `self-study:${slot.moduleId}`,
+        subjectCategoryLabel: isZh ? '自习' : 'Self-study',
+        courseKey: `self-study:${slot.id}`,
+        courseDisplayName: `${moduleName} · ${classLabel} · ${selfStudyWeekdayLabel(slot.weekday, isZh)}`,
+        className: classLabel,
+        gradeLevel: cls?.grade ?? slot.grade,
+        periods: 1,
+      });
+    }
+    for (const course of electiveCourses) {
+      if (course.academicYearId !== staffingYearId) continue;
+      for (const { teacherId, periods } of electiveTeacherWeeklyLoads(course)) {
+        items.push({
+          teacherId,
+          loadKind: 'elective',
+          breakdownGroup: course.name,
+          subjectCategoryKey: 'elective',
+          subjectCategoryLabel: isZh ? '选修' : 'Elective',
+          courseKey: `elective:${course.id}:${teacherId}`,
+          courseDisplayName:
+            electiveScheduleMode(course) === 'repeat' && course.teacherId && course.teacher2Id
+              ? `${course.name}（${teacherId === course.teacherId ? (isZh ? '课时1' : 'S1') : isZh ? '课时2' : 'S2'}）`
+              : course.name,
+          className: course.location || '—',
+          gradeLevel: 0,
+          periods,
+        });
+      }
     }
     items.sort((x, y) => {
       const g = x.gradeLevel - y.gradeLevel;
@@ -4829,7 +5349,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     staffingGradeConfigSyncKey,
     courseLayoutOrderKey,
     staffingCategoryOrderNonce,
+    selfStudySlots,
+    selfStudyModuleNameById,
+    electiveCourses,
     language,
+    isZh,
   ]);
 
   /** 全校周课时表：原始行（含主学科，未应用筛选/排序） */
@@ -4849,7 +5373,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         return a.className.localeCompare(b.className, undefined, { numeric: true });
       });
       const total = list.reduce((s, x) => s + x.periods, 0);
-      const detail = formatStaffingLoadBreakdownByCategory(list, language);
+      const courseDetail = formatStaffingLoadBreakdownCell(
+        list.filter((it) => it.loadKind === 'course'),
+        language,
+        'course',
+      );
+      const electiveDetail = formatStaffingLoadBreakdownCell(
+        list.filter((it) => it.loadKind === 'elective'),
+        language,
+        'elective',
+      );
+      const selfStudyDetail = formatStaffingLoadBreakdownCell(
+        list.filter((it) => it.loadKind === 'self-study'),
+        language,
+        'self-study',
+      );
       const zh = (t.nameZh ?? '').trim();
       const en = (t.nameEn ?? '').trim();
       const primaryRaw = (t.primarySubject ?? '').trim();
@@ -4860,7 +5398,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         teacherName: zh || en || t.displayName || t.username,
         primarySubjectKey,
         primarySubjectLabel,
-        detail,
+        courseDetail,
+        electiveDetail,
+        selfStudyDetail,
         total,
       };
     });
@@ -5626,7 +6166,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   disabled={staffingLoading || allYears.length === 0}
                 />
                 {USE_CLOUD_STORAGE && staffingYearId ? (
-                  staffingSubTab === 'weekly-load' ? (
+                  staffingSubTabGroup(staffingSubTab) === 'weekly-load' ? (
                     <Button
                       type="button"
                       variant="outline"
@@ -5636,13 +6176,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     >
                       {isZh ? '导出 Excel' : 'Export Excel'}
                     </Button>
-                  ) : (
+                  ) : staffingSubTabGroup(staffingSubTab) === 'key-roles' ? (
                     <>
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={handleStaffingRosterExport}
+                        onClick={handleStaffingKeyRolesExport}
                         disabled={staffingLoading}
                       >
                         {isZh ? '导出 Excel' : 'Export Excel'}
@@ -5652,13 +6192,41 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                         type="file"
                         accept=".xlsx,.xls"
                         className="hidden"
-                        onChange={(e) => void handleStaffingRosterExcelImport(e)}
+                        onChange={(e) => void handleStaffingKeyRolesExcelImport(e)}
                       />
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
                         onClick={() => staffingExcelInputRef.current?.click()}
+                        disabled={staffingExcelImporting || staffingLoading}
+                      >
+                        {staffingExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleStaffingCourseJobsExport}
+                        disabled={staffingLoading}
+                      >
+                        {isZh ? '导出 Excel' : 'Export Excel'}
+                      </Button>
+                      <input
+                        ref={staffingCourseJobsExcelInputRef}
+                        type="file"
+                        accept=".xlsx,.xls"
+                        className="hidden"
+                        onChange={(e) => void handleStaffingCourseJobsExcelImport(e)}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => staffingCourseJobsExcelInputRef.current?.click()}
                         disabled={staffingExcelImporting || staffingLoading}
                       >
                         {staffingExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
@@ -5971,21 +6539,49 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   </>
                 )}
 
+                {staffingSubTab === 'self-study' && (
+                  <SelfStudyStaffingPanel
+                    isZh={isZh}
+                    teachers={staffingTeachers}
+                    gradeLevels={staffingGradeLevels}
+                    classes={staffingClassList}
+                    modules={selfStudyModules}
+                    gradeConfigs={selfStudyGradeConfigs}
+                    slots={selfStudySlots}
+                    savingKeys={selfStudySavingKeys}
+                    onCreateModule={handleCreateSelfStudyModule}
+                    onRenameModule={handleRenameSelfStudyModule}
+                    onDeleteModule={handleDeleteSelfStudyModule}
+                    onUpsertSlot={handleUpsertSelfStudySlot}
+                    onDeleteSlot={handleDeleteSelfStudySlot}
+                  />
+                )}
+
+                {staffingSubTab === 'elective' && (
+                  <ElectiveStaffingPanel
+                    isZh={isZh}
+                    teachers={staffingTeachers}
+                    gradeItems={staffingGradeItems}
+                    classes={staffingClassList}
+                    enrollments={staffingEnrollmentsForElective}
+                    courses={electiveCourses}
+                    saving={electiveSaving}
+                    onSaveCourse={handleSaveElectiveCourse}
+                    onDeleteCourse={handleDeleteElectiveCourse}
+                  />
+                )}
+
                 {staffingSubTab === 'weekly-load' && (
                   <div className="space-y-6">
-                    {staffingCourseColumnGroups.length === 0 ? (
-                      <p className="text-sm text-slate-500">
-                        {isZh ? '暂无课程数据，请先在「课程管理」中添加课程并设置年级跨度。' : 'No courses yet. Add courses under Admin → Courses with grade ranges.'}
-                      </p>
-                    ) : staffingTeachers.length === 0 ? (
+                    {staffingTeachers.length === 0 ? (
                       <p className="text-sm text-slate-500">{isZh ? '暂无教师账号。' : 'No teacher accounts.'}</p>
                     ) : (
                       <>
                         {staffingLoadLineItems.length === 0 && (
                           <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
                             {isZh
-                              ? '当前学年在课程岗位中尚未指定任课教师，下方合计均为 0。请先在「课程岗位」进行排课。'
-                              : 'No course staffing for this year yet; totals are zero. Assign teachers under Course staffing first.'}
+                              ? '当前学年尚未指定任课/自习/选修教师，下方合计均为 0。请先在「课程岗位」「自习」或「选修」中配置。'
+                              : 'No staffing assignments for this year yet; totals are zero. Configure under Course staffing, Self-study, or Elective first.'}
                           </p>
                         )}
 
@@ -6030,19 +6626,25 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                           </div>
                         </div>
                         <div className="overflow-x-auto rounded-lg border border-slate-200">
-                          <table className="min-w-full text-sm">
-                            <thead className="bg-slate-50 text-left text-xs text-slate-600">
+                          <table className="min-w-full w-full table-fixed text-sm">
+                            <thead className="bg-slate-50 text-xs text-slate-600">
                               <tr>
-                                <th className="py-2 px-3 font-medium whitespace-nowrap w-[8.5rem]">
+                                <th className="py-2 px-2 font-medium whitespace-nowrap w-[6.75rem] text-center">
                                   {isZh ? '教职工' : 'Staff'}
                                 </th>
-                                <th className="py-2 px-3 font-medium whitespace-nowrap w-[7rem]">
+                                <th className="py-2 px-2 font-medium whitespace-nowrap w-[5.625rem] text-center">
                                   {isZh ? '主学科' : 'Primary'}
                                 </th>
-                                <th className="py-2 px-3 font-medium min-w-[12rem]">
-                                  {isZh ? '课时构成' : 'Breakdown'}
+                                <th className="py-2 px-3 font-medium min-w-[16rem] w-[49%] text-left">
+                                  {isZh ? '课程岗位' : 'Course staffing'}
                                 </th>
-                                <th className="py-2 px-3 font-medium whitespace-nowrap text-right w-[7.5rem]">
+                                <th className="py-2 px-2 font-medium min-w-[6.3rem] w-[12.6%] text-left">
+                                  {isZh ? '选修' : 'Elective'}
+                                </th>
+                                <th className="py-2 px-2 font-medium min-w-[6.3rem] w-[12.6%] text-left">
+                                  {isZh ? '自习' : 'Self-study'}
+                                </th>
+                                <th className="py-2 px-2 font-medium whitespace-nowrap w-[6.075rem] text-center">
                                   {isZh ? '周课时（节/周）' : 'Periods / wk'}
                                 </th>
                               </tr>
@@ -6050,7 +6652,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                             <tbody>
                               {staffingLoadGrandRows.length === 0 ? (
                                 <tr className="border-t border-slate-200 bg-white">
-                                  <td colSpan={4} className="py-3 px-3 text-sm text-slate-500">
+                                  <td colSpan={6} className="py-3 px-3 text-sm text-slate-500">
                                     {isZh
                                       ? '当前筛选下暂无教师行，请调整主学科筛选或确认课程岗位。'
                                       : 'No rows for this filter. Change the primary-subject filter or check course staffing.'}
@@ -6059,16 +6661,22 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                               ) : (
                                 staffingLoadGrandRows.map((r) => (
                                   <tr key={r.teacherId} className="border-t border-slate-200 bg-white">
-                                    <td className="py-2 px-3 text-slate-800 align-top whitespace-nowrap font-medium">
+                                    <td className="py-2 px-2 text-slate-800 align-top whitespace-nowrap font-medium text-center">
                                       {r.teacherName}
                                     </td>
-                                    <td className="py-2 px-3 text-slate-700 align-top text-xs sm:text-sm whitespace-nowrap">
+                                    <td className="py-2 px-2 text-slate-700 align-top text-xs sm:text-sm whitespace-nowrap text-center">
                                       {r.primarySubjectLabel}
                                     </td>
-                                    <td className="py-2 px-3 text-slate-600 text-xs sm:text-sm leading-relaxed align-top break-words max-w-[min(48rem,85vw)]">
-                                      {r.detail}
+                                    <td className="py-2 px-3 text-slate-600 text-xs sm:text-sm leading-relaxed align-top break-words whitespace-pre-line">
+                                      {r.courseDetail}
                                     </td>
-                                    <td className="py-2 px-3 font-semibold text-slate-900 tabular-nums text-right align-top">
+                                    <td className="py-2 px-2 text-slate-600 text-xs leading-relaxed align-top break-words max-w-[9rem]">
+                                      {r.electiveDetail}
+                                    </td>
+                                    <td className="py-2 px-2 text-slate-600 text-xs leading-relaxed align-top break-words max-w-[9rem]">
+                                      {r.selfStudyDetail}
+                                    </td>
+                                    <td className="py-2 px-2 font-semibold text-slate-900 tabular-nums text-center align-top">
                                       {formatWeeklyLoadValue(r.total)}
                                     </td>
                                   </tr>
@@ -6596,6 +7204,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               isZh={isZh}
               yearId={teacherPortraitSettingYearId}
               term={teacherPortraitSettingTerm}
+              departmentOptions={departmentOptions}
             />
           </section>
         )}
@@ -6768,8 +7377,25 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               ))}
             </ul>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogYearManagement(false)}>{isZh ? '关闭' : 'Close'}</Button>
+          <DialogFooter className="sm:justify-between w-full">
+            {isSystemAdmin ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-amber-800 border-amber-300 hover:bg-amber-50"
+                onClick={() => void handleUndoPromotion()}
+                disabled={promoteYearLoading || promotePreviewLoading || undoPromotionLoading}
+              >
+                {undoPromotionLoading
+                  ? (isZh ? '撤销中…' : 'Undoing…')
+                  : (isZh ? '撤回升年' : 'Undo promotion')}
+              </Button>
+            ) : (
+              <span />
+            )}
+            <Button variant="outline" onClick={() => setDialogYearManagement(false)}>
+              {isZh ? '关闭' : 'Close'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

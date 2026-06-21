@@ -43,12 +43,15 @@ export type CurriculumImportPayload = {
   gradeConfig?: unknown;
 };
 
-let ensuredCoursesCoTeachingColumn = false;
+let ensuredCoursesExtraColumns = false;
 
-async function ensureCoursesCoTeachingColumn(): Promise<void> {
-  if (ensuredCoursesCoTeachingColumn) return;
+async function ensureCoursesExtraColumns(): Promise<void> {
+  if (ensuredCoursesExtraColumns) return;
   await pool.query('ALTER TABLE courses ADD COLUMN IF NOT EXISTS co_teaching BOOLEAN NOT NULL DEFAULT FALSE');
-  ensuredCoursesCoTeachingColumn = true;
+  await pool.query(
+    'ALTER TABLE courses ADD COLUMN IF NOT EXISTS exclude_from_staffing BOOLEAN NOT NULL DEFAULT FALSE',
+  );
+  ensuredCoursesExtraColumns = true;
 }
 
 let ensuredCourseDomainsColumn = false;
@@ -122,6 +125,7 @@ function mapCourseRow(row: Record<string, unknown>) {
     applicableGrades,
     weeklyPeriodsByGrade: parsePeriodsMap(row.weekly_periods_by_grade),
     coTeaching: Boolean(row.co_teaching),
+    excludeFromStaffing: Boolean(row.exclude_from_staffing),
     textbookVersion: row.textbook_version,
     color: row.color,
   };
@@ -141,7 +145,7 @@ async function getSchoolCategoryOrderHolderId(fallbackUserId: string): Promise<s
 }
 
 export async function exportCurriculumFromDatabase(): Promise<CurriculumExportPayload> {
-  await ensureCoursesCoTeachingColumn();
+  await ensureCoursesExtraColumns();
   await ensureCourseDomainsColumn();
 
   const coursesResult = await pool.query('SELECT * FROM courses ORDER BY created_at ASC');
@@ -309,13 +313,14 @@ async function upsertCourseRow(
       ? course.weeklyPeriodsByGrade
       : {},
   );
-  const coTeaching = Boolean(course.coTeaching);
+  const excludeFromStaffing = Boolean(course.excludeFromStaffing);
+  const coTeaching = excludeFromStaffing ? false : Boolean(course.coTeaching);
   const textbookVersion = course.textbookVersion != null ? String(course.textbookVersion) : null;
   const color = course.color != null ? String(course.color) : 'blue';
 
   const result = await client.query(
-    `INSERT INTO courses (id, user_id, name, subject_category_zh, subject_category_en, applicable_grades, weekly_periods_by_grade, co_teaching, textbook_version, color)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)
+    `INSERT INTO courses (id, user_id, name, subject_category_zh, subject_category_en, applicable_grades, weekly_periods_by_grade, co_teaching, exclude_from_staffing, textbook_version, color)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11)
      ON CONFLICT (id) DO UPDATE SET
        name = EXCLUDED.name,
        subject_category_zh = EXCLUDED.subject_category_zh,
@@ -323,11 +328,12 @@ async function upsertCourseRow(
        applicable_grades = EXCLUDED.applicable_grades,
        weekly_periods_by_grade = EXCLUDED.weekly_periods_by_grade,
        co_teaching = EXCLUDED.co_teaching,
+       exclude_from_staffing = EXCLUDED.exclude_from_staffing,
        textbook_version = EXCLUDED.textbook_version,
        color = EXCLUDED.color,
        updated_at = CURRENT_TIMESTAMP
      RETURNING *`,
-    [id, holderId, name, subjectCategoryZh, subjectCategoryEn, applicableGrades, weeklyPeriodsByGrade, coTeaching, textbookVersion, color],
+    [id, holderId, name, subjectCategoryZh, subjectCategoryEn, applicableGrades, weeklyPeriodsByGrade, coTeaching, excludeFromStaffing, textbookVersion, color],
   );
   return result.rows[0] as Record<string, unknown>;
 }
@@ -337,7 +343,7 @@ export async function importCurriculumToDatabase(
   actorUserId: string,
 ): Promise<{ coursesImported: number; semesterRowsImported: number }> {
   const payload = normalizeImportPayload(body);
-  await ensureCoursesCoTeachingColumn();
+  await ensureCoursesExtraColumns();
   await ensureCourseDomainsColumn();
 
   const holderId = (await getSchoolSettingsHolderUserId()) ?? actorUserId;

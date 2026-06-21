@@ -250,6 +250,29 @@ export async function loadYearInclusionPayload(pool: pg.Pool, academicYearId: st
     )
   ).rows[0] as { payload: unknown } | undefined;
   const payload = row?.payload ?? {};
+  return inclusionPayloadFromRawPreset(payload);
+}
+
+/** 与 GET /api/classes/reports/year-dimension-presets 返回的 preset 字段对齐 */
+export function inclusionPayloadFromApiPreset(preset: {
+  stageInclusion?: Record<string, string[]>;
+  evaluationGradeInclusion?: unknown;
+  examGradeInclusion?: unknown;
+  examConfigs?: unknown;
+  subjectKeyToCourseId?: Record<string, string>;
+}): Awaited<ReturnType<typeof loadYearInclusionPayload>> {
+  return {
+    stageInclusion: preset.stageInclusion ?? {},
+    evaluationGradeInclusion: extractEvaluationGradeInclusion(preset),
+    examGradeInclusion: extractExamGradeInclusion(preset),
+    examConfigs: sanitizeExamConfigs(
+      preset.examConfigs != null ? { examConfigs: preset.examConfigs } : preset,
+    ),
+    subjectKeyToCourseId: new Map(Object.entries(preset.subjectKeyToCourseId ?? {})),
+  };
+}
+
+function inclusionPayloadFromRawPreset(payload: unknown): Awaited<ReturnType<typeof loadYearInclusionPayload>> {
   return {
     stageInclusion: extractStageInclusion(payload),
     evaluationGradeInclusion: extractEvaluationGradeInclusion(payload),

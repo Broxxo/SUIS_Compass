@@ -922,6 +922,203 @@ async function wbPdfAppendChunkedDataTableAsImages(
   }
 }
 
+type ClassReportPdfExportContext = {
+  isZh: boolean;
+  line1: string;
+  classShort: string;
+  classReportTemplate: ReportTemplate;
+  academicYearRubric: Record<TargetLevel, string> | null;
+  reportYearExamPreset: ReportExamPresetSlice | null;
+  gradeConfig: GradeConfig;
+  selectedClassRecord: { name: string; grade: number } | null;
+  subjectShowsAssessmentScore: (
+    subjectKey: string,
+    tpl: ReportTemplate | null,
+    gradeCatalogId: string | null,
+  ) => boolean;
+};
+
+function classReportStudentDisplayName(student: Student): string {
+  const zh = (student.nameZh ?? '').trim();
+  const en = (student.nameEn ?? '').trim();
+  const fb = (student.name ?? '').trim();
+  return zh && en ? `${zh} ${en}` : zh || en || fb;
+}
+
+function safeClassReportPdfFileName(displayName: string, index: number, isZh: boolean): string {
+  const order = String(index + 1).padStart(2, '0');
+  const base = `${order}-${displayName}`.replace(/[/\\?%*:|"<>]/g, '-');
+  return `${isZh ? '学业报告' : 'academic-report'}-${base}.pdf`;
+}
+
+function buildClassReportSnapshotDom(
+  item: ClassReportSnapshotItem,
+  ctx: ClassReportPdfExportContext,
+): HTMLElement {
+  const { isZh, classReportTemplate, academicYearRubric, reportYearExamPreset, gradeConfig, selectedClassRecord, subjectShowsAssessmentScore } =
+    ctx;
+  const subjectConfigMap = new Map((classReportTemplate.subjects ?? []).map((s) => [s.subjectKey, s] as const));
+
+  const host = document.createElement('div');
+  host.setAttribute('data-academic-report-pdf-scope', '');
+  host.style.cssText =
+    'position:fixed;left:-12000px;top:0;width:780px;background:#fff;box-sizing:border-box;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#0f172a;';
+
+  const modulesWrap = document.createElement('div');
+  modulesWrap.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
+
+  const hasDims = item.report.subjectReports.some((s) => (s.dimensions ?? []).length > 0);
+  if (hasDims) {
+    const m = document.createElement('div');
+    m.setAttribute('data-student-report-pdf-module', '');
+    m.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;padding:9px 10px;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:12px;font-weight:600;line-height:1.1;margin-bottom:6px;';
+    title.textContent = isZh ? '学业报告等第说明' : 'Academic report grading rubric';
+    m.appendChild(title);
+    (['A', 'B', 'C', 'D'] as const).forEach((lv) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'font-size:11px;line-height:1.25;display:flex;gap:6px;align-items:center;margin:2px 0;';
+      row.textContent = `${lv} · ${(academicYearRubric ?? fullUnifiedLevelTextFromPreset(null))[lv]}`;
+      m.appendChild(row);
+    });
+    modulesWrap.appendChild(m);
+  }
+
+  item.report.subjectReports.forEach((s) => {
+    const subjectConfig = subjectConfigMap.get(s.subjectKey);
+    const subjectTitle = subjectConfig ? workbenchSubjectModuleLabel(subjectConfig, isZh) : s.subjectName;
+    const gradeCatalogId = selectedClassRecord
+      ? getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
+          className: selectedClassRecord.name,
+        })
+      : null;
+    const finalGrade = resolveSubjectAssessmentGrade(s, classReportTemplate, reportYearExamPreset, gradeCatalogId);
+    const mod = document.createElement('div');
+    mod.setAttribute('data-student-report-pdf-module', '');
+    const h = document.createElement('div');
+    h.style.cssText = 'font-size:14px;font-weight:600;margin:0 0 6px;';
+    h.textContent = subjectTitle || (isZh ? '未命名学科' : 'Untitled subject');
+    mod.appendChild(h);
+
+    const tableWrap = document.createElement('div');
+    tableWrap.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;';
+    const table = document.createElement('table');
+    table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;';
+    const tbody = document.createElement('tbody');
+    s.dimensions.forEach((d) => {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td');
+      td1.style.cssText = 'border:1px solid #e2e8f0;padding:0;';
+      const td1v = document.createElement('div');
+      td1v.textContent = d.dimensionLabel;
+      td1.appendChild(td1v);
+      const td2 = document.createElement('td');
+      td2.style.cssText = 'border:1px solid #e2e8f0;padding:0;width:120px;text-align:center;';
+      const td2v = document.createElement('div');
+      td2v.textContent = d.rating ?? '—';
+      td2.appendChild(td2v);
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      tbody.appendChild(tr);
+    });
+    if (subjectConfig?.enableLearningQuality !== false) {
+      const tr = document.createElement('tr');
+      tr.style.background = '#f8fafc';
+      const td1 = document.createElement('td');
+      td1.style.cssText = 'border:1px solid #e2e8f0;padding:0;';
+      const td1v = document.createElement('div');
+      td1v.textContent = isZh ? '学习品质：兴趣、习惯与态度' : 'Learning quality: interest, habits, attitude';
+      td1.appendChild(td1v);
+      const td2 = document.createElement('td');
+      td2.style.cssText = 'border:1px solid #e2e8f0;padding:0;width:120px;text-align:center;';
+      const td2v = document.createElement('div');
+      td2v.textContent = s.learningQualityGrade ?? '—';
+      td2.appendChild(td2v);
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      tbody.appendChild(tr);
+    }
+    if (
+      subjectShowsAssessmentScore(
+        s.subjectKey,
+        classReportTemplate,
+        selectedClassRecord
+          ? getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
+              className: selectedClassRecord.name,
+            })
+          : null,
+      )
+    ) {
+      const tr = document.createElement('tr');
+      tr.style.background = '#f1f5f9';
+      const td1 = document.createElement('td');
+      td1.style.cssText = 'border:1px solid #e2e8f0;padding:0;';
+      const td1v = document.createElement('div');
+      td1v.textContent = isZh ? '测评成绩' : 'Assessment';
+      td1.appendChild(td1v);
+      const td2 = document.createElement('td');
+      td2.style.cssText = 'border:1px solid #e2e8f0;padding:0;width:120px;text-align:center;';
+      const td2v = document.createElement('div');
+      td2v.textContent = finalGrade;
+      td2.appendChild(td2v);
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+    mod.appendChild(tableWrap);
+
+    modulesWrap.appendChild(mod);
+  });
+
+  if (classReportTemplate.homeroomCommentMode !== 'disabled') {
+    const homeroomMod = document.createElement('div');
+    homeroomMod.setAttribute('data-student-report-pdf-module', '');
+    const t = document.createElement('div');
+    t.style.cssText = 'font-size:14px;font-weight:600;margin:0 0 6px;';
+    t.textContent = isZh ? '班主任综合评价' : 'Homeroom comprehensive evaluation';
+    const box = document.createElement('div');
+    box.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:7px 10px;';
+    const body = document.createElement('div');
+    body.setAttribute('data-student-report-pdf-body-text', '');
+    body.style.cssText = 'white-space:pre-wrap;font-size:13px;';
+    body.textContent = item.report.homeroomComment?.trim() || (isZh ? '暂无' : 'N/A');
+    box.appendChild(body);
+    homeroomMod.appendChild(t);
+    homeroomMod.appendChild(box);
+    modulesWrap.appendChild(homeroomMod);
+  }
+  host.appendChild(modulesWrap);
+  return host;
+}
+
+async function appendClassReportStudentToPdf(
+  pdf: import('jspdf').default,
+  item: ClassReportSnapshotItem,
+  ctx: ClassReportPdfExportContext,
+  flow: { y: number },
+): Promise<void> {
+  const displayName = classReportStudentDisplayName(item.student);
+  await wbPdfAppendStudentReportPdfHeaderAsImage(pdf, {
+    line1: ctx.line1,
+    classShort: ctx.classShort,
+    displayName,
+    flow,
+  });
+  const host = buildClassReportSnapshotDom(item, ctx);
+  document.body.appendChild(host);
+  try {
+    const modules = Array.from(host.querySelectorAll<HTMLElement>('[data-student-report-pdf-module]'));
+    for (const mod of modules) {
+      await wbPdfAppendElementAsImageSlices(pdf, mod, new Set<string>(), flow);
+    }
+  } finally {
+    host.remove();
+  }
+}
+
 export default function StudentPortrait({
   onBackToHub,
   initialTab = 'overview',
@@ -1011,7 +1208,7 @@ export default function StudentPortrait({
   const [classReportTemplate, setClassReportTemplate] = useState<ReportTemplate | null>(null);
   const [classReportSnapshotItems, setClassReportSnapshotItems] = useState<ClassReportSnapshotItem[]>([]);
   const [classReportLoading, setClassReportLoading] = useState(false);
-  const [classReportExporting, setClassReportExporting] = useState(false);
+  const [classReportExporting, setClassReportExporting] = useState<false | 'whole' | 'per-student'>(false);
   const [classReportError, setClassReportError] = useState<string | null>(null);
   const [classSubjectAnalyses, setClassSubjectAnalyses] = useState<
     Array<{
@@ -2349,7 +2546,7 @@ export default function StudentPortrait({
     if (typeof window === 'undefined') return;
     const selectedOption = classReportOptions.find((o) => o.key === selectedClassReportKey) ?? null;
     if (!selectedOption || !classReportTemplate || classReportSnapshotItems.length === 0) return;
-    setClassReportExporting(true);
+    setClassReportExporting('whole');
     setClassReportError(null);
     try {
       const { jsPDF } = await import('jspdf');
@@ -2362,161 +2559,20 @@ export default function StudentPortrait({
       const line1 = `${yearName}-${reportTermLabel(selectedOption.term, isZh)}-${
         classReportTemplate.title?.trim() || (isZh ? '学业报告' : 'Academic report')
       }`;
-      const subjectConfigMap = new Map((classReportTemplate.subjects ?? []).map((s) => [s.subjectKey, s] as const));
-
-      const buildSnapshotRoot = (item: ClassReportSnapshotItem): HTMLElement => {
-        const host = document.createElement('div');
-        host.setAttribute('data-academic-report-pdf-scope', '');
-        host.style.cssText =
-          'position:fixed;left:-12000px;top:0;width:780px;background:#fff;box-sizing:border-box;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#0f172a;';
-
-        const modulesWrap = document.createElement('div');
-        modulesWrap.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
-
-        const hasDims = item.report.subjectReports.some((s) => (s.dimensions ?? []).length > 0);
-        if (hasDims) {
-          const m = document.createElement('div');
-          m.setAttribute('data-student-report-pdf-module', '');
-          m.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;padding:9px 10px;';
-          const title = document.createElement('div');
-          title.style.cssText = 'font-size:12px;font-weight:600;line-height:1.1;margin-bottom:6px;';
-          title.textContent = isZh ? '学业报告等第说明' : 'Academic report grading rubric';
-          m.appendChild(title);
-          (['A', 'B', 'C', 'D'] as const).forEach((lv) => {
-            const row = document.createElement('div');
-            row.style.cssText = 'font-size:11px;line-height:1.25;display:flex;gap:6px;align-items:center;margin:2px 0;';
-            row.textContent = `${lv} · ${(academicYearRubric ?? fullUnifiedLevelTextFromPreset(null))[lv]}`;
-            m.appendChild(row);
-          });
-          modulesWrap.appendChild(m);
-        }
-
-        item.report.subjectReports.forEach((s) => {
-          const subjectConfig = subjectConfigMap.get(s.subjectKey);
-          const subjectTitle = subjectConfig ? workbenchSubjectModuleLabel(subjectConfig, isZh) : s.subjectName;
-          const gradeCatalogId = selectedClassRecord
-            ? getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
-                className: selectedClassRecord.name,
-              })
-            : null;
-          const finalGrade = resolveSubjectAssessmentGrade(s, classReportTemplate, reportYearExamPreset, gradeCatalogId);
-          const mod = document.createElement('div');
-          mod.setAttribute('data-student-report-pdf-module', '');
-          const h = document.createElement('div');
-          h.style.cssText = 'font-size:14px;font-weight:600;margin:0 0 6px;';
-          h.textContent = subjectTitle || (isZh ? '未命名学科' : 'Untitled subject');
-          mod.appendChild(h);
-
-          const tableWrap = document.createElement('div');
-          tableWrap.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;';
-          const table = document.createElement('table');
-          table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;';
-          const tbody = document.createElement('tbody');
-          s.dimensions.forEach((d) => {
-            const tr = document.createElement('tr');
-            const td1 = document.createElement('td');
-            td1.style.cssText = 'border:1px solid #e2e8f0;padding:0;';
-            const td1v = document.createElement('div');
-            td1v.textContent = d.dimensionLabel;
-            td1.appendChild(td1v);
-            const td2 = document.createElement('td');
-            td2.style.cssText = 'border:1px solid #e2e8f0;padding:0;width:120px;text-align:center;';
-            const td2v = document.createElement('div');
-            td2v.textContent = d.rating ?? '—';
-            td2.appendChild(td2v);
-            tr.appendChild(td1);
-            tr.appendChild(td2);
-            tbody.appendChild(tr);
-          });
-          if (subjectConfig?.enableLearningQuality !== false) {
-            const tr = document.createElement('tr');
-            tr.style.background = '#f8fafc';
-            const td1 = document.createElement('td');
-            td1.style.cssText = 'border:1px solid #e2e8f0;padding:0;';
-            const td1v = document.createElement('div');
-            td1v.textContent = isZh ? '学习品质：兴趣、习惯与态度' : 'Learning quality: interest, habits, attitude';
-            td1.appendChild(td1v);
-            const td2 = document.createElement('td');
-            td2.style.cssText = 'border:1px solid #e2e8f0;padding:0;width:120px;text-align:center;';
-            const td2v = document.createElement('div');
-            td2v.textContent = s.learningQualityGrade ?? '—';
-            td2.appendChild(td2v);
-            tr.appendChild(td1);
-            tr.appendChild(td2);
-            tbody.appendChild(tr);
-          }
-          if (
-            subjectShowsAssessmentScore(
-              s.subjectKey,
-              classReportTemplate,
-              selectedClassRecord
-                ? getGradeCatalogIdForClass(gradeConfig, selectedClassRecord.grade, {
-                    className: selectedClassRecord.name,
-                  })
-                : null,
-            )
-          ) {
-            const tr = document.createElement('tr');
-            tr.style.background = '#f1f5f9';
-            const td1 = document.createElement('td');
-            td1.style.cssText = 'border:1px solid #e2e8f0;padding:0;';
-            const td1v = document.createElement('div');
-            td1v.textContent = isZh ? '测评成绩' : 'Assessment';
-            td1.appendChild(td1v);
-            const td2 = document.createElement('td');
-            td2.style.cssText = 'border:1px solid #e2e8f0;padding:0;width:120px;text-align:center;';
-            const td2v = document.createElement('div');
-            td2v.textContent = finalGrade;
-            td2.appendChild(td2v);
-            tr.appendChild(td1);
-            tr.appendChild(td2);
-            tbody.appendChild(tr);
-          }
-          table.appendChild(tbody);
-          tableWrap.appendChild(table);
-          mod.appendChild(tableWrap);
-
-          modulesWrap.appendChild(mod);
-        });
-
-        if (classReportTemplate.homeroomCommentMode !== 'disabled') {
-          const homeroomMod = document.createElement('div');
-          homeroomMod.setAttribute('data-student-report-pdf-module', '');
-          const t = document.createElement('div');
-          t.style.cssText = 'font-size:14px;font-weight:600;margin:0 0 6px;';
-          t.textContent = isZh ? '班主任综合评价' : 'Homeroom comprehensive evaluation';
-          const box = document.createElement('div');
-          box.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:7px 10px;';
-          const body = document.createElement('div');
-          body.setAttribute('data-student-report-pdf-body-text', '');
-          body.style.cssText = 'white-space:pre-wrap;font-size:13px;';
-          body.textContent = item.report.homeroomComment?.trim() || (isZh ? '暂无' : 'N/A');
-          box.appendChild(body);
-          homeroomMod.appendChild(t);
-          homeroomMod.appendChild(box);
-          modulesWrap.appendChild(homeroomMod);
-        }
-        host.appendChild(modulesWrap);
-        return host;
+      const ctx: ClassReportPdfExportContext = {
+        isZh,
+        line1,
+        classShort,
+        classReportTemplate,
+        academicYearRubric,
+        reportYearExamPreset,
+        gradeConfig,
+        selectedClassRecord,
+        subjectShowsAssessmentScore,
       };
 
       for (let i = 0; i < classReportSnapshotItems.length; i += 1) {
-        const item = classReportSnapshotItems[i];
-        const zh = (item.student.nameZh ?? '').trim();
-        const en = (item.student.nameEn ?? '').trim();
-        const fb = (item.student.name ?? '').trim();
-        const displayName = zh && en ? `${zh} ${en}` : zh || en || fb;
-        await wbPdfAppendStudentReportPdfHeaderAsImage(pdf, { line1, classShort, displayName, flow });
-        const host = buildSnapshotRoot(item);
-        document.body.appendChild(host);
-        try {
-          const modules = Array.from(host.querySelectorAll<HTMLElement>('[data-student-report-pdf-module]'));
-          for (const mod of modules) {
-            await wbPdfAppendElementAsImageSlices(pdf, mod, new Set<string>(), flow);
-          }
-        } finally {
-          host.remove();
-        }
+        await appendClassReportStudentToPdf(pdf, classReportSnapshotItems[i], ctx, flow);
         if (i < classReportSnapshotItems.length - 1) {
           if (pdf.getNumberOfPages() % 2 === 1) pdf.addPage();
           pdf.addPage();
@@ -2529,6 +2585,75 @@ export default function StudentPortrait({
       pdf.save(`${isZh ? '全班学业报告' : 'class-academic-reports'}-${classSeg}-${dateSeg}.pdf`);
     } catch (e: unknown) {
       setClassReportError((e as Error)?.message || (isZh ? '导出全班报告失败' : 'Failed to export class PDF'));
+    } finally {
+      setClassReportExporting(false);
+    }
+  }, [
+    classReportOptions,
+    selectedClassReportKey,
+    classReportTemplate,
+    classReportSnapshotItems,
+    selectedClassRecord,
+    years,
+    isZh,
+    academicYearRubric,
+    subjectShowsAssessmentScore,
+    reportYearExamPreset,
+    gradeConfig,
+  ]);
+
+  const exportPerStudentClassReportsZip = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    const selectedOption = classReportOptions.find((o) => o.key === selectedClassReportKey) ?? null;
+    if (!selectedOption || !classReportTemplate || classReportSnapshotItems.length === 0) return;
+    setClassReportExporting('per-student');
+    setClassReportError(null);
+    try {
+      const JSZip = (await import('jszip')).default;
+      const { jsPDF } = await import('jspdf');
+      const zip = new JSZip();
+      const classShort = selectedClassRecord
+        ? workbenchClassShortLabel({ className: selectedClassRecord.name, grade: selectedClassRecord.grade })
+        : '—';
+      const yearName = years.find((y) => y.id === selectedOption.academicYearId)?.name ?? selectedOption.academicYearId;
+      const line1 = `${yearName}-${reportTermLabel(selectedOption.term, isZh)}-${
+        classReportTemplate.title?.trim() || (isZh ? '学业报告' : 'Academic report')
+      }`;
+      const ctx: ClassReportPdfExportContext = {
+        isZh,
+        line1,
+        classShort,
+        classReportTemplate,
+        academicYearRubric,
+        reportYearExamPreset,
+        gradeConfig,
+        selectedClassRecord,
+        subjectShowsAssessmentScore,
+      };
+
+      for (let i = 0; i < classReportSnapshotItems.length; i += 1) {
+        const item = classReportSnapshotItems[i];
+        const pdf = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'portrait' });
+        const flow = { y: WB_PDF_MARGIN.top };
+        await appendClassReportStudentToPdf(pdf, item, ctx, flow);
+        const displayName = classReportStudentDisplayName(item.student);
+        const fileName = safeClassReportPdfFileName(displayName, i, isZh);
+        zip.file(fileName, pdf.output('blob'));
+      }
+
+      const classSeg = classShort.replace(/[/\\?%*:|"<>]/g, '-');
+      const dateSeg = new Date().toISOString().slice(0, 10);
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(zipBlob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${isZh ? '全班学业报告' : 'class-academic-reports'}-${classSeg}-${dateSeg}.zip`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setClassReportError(
+        (e as Error)?.message || (isZh ? '分学生导出失败' : 'Failed to export per-student reports'),
+      );
     } finally {
       setClassReportExporting(false);
     }
@@ -3462,28 +3587,52 @@ export default function StudentPortrait({
           )}
         </select>
         {canExportWholeClassPdf && (
-          <Button
-            type="button"
-            variant="default"
-            size="default"
-            className="h-9 shrink-0 bg-sky-600 text-white hover:bg-sky-700 shadow-sm"
-            onClick={() => void exportWholeClassReportPdf()}
-            disabled={
-              classReportExporting ||
-              classReportLoading ||
-              !selectedClassReportOption ||
-              classReportSnapshotItems.length === 0 ||
-              !canExportWholeClassPdf
-            }
-          >
-            {classReportExporting
-              ? isZh
-                ? '导出中…'
-                : 'Exporting…'
-              : isZh
-                ? '导出全班报告为PDF'
-                : 'Export Class Reports PDF'}
-          </Button>
+          <>
+            <Button
+              type="button"
+              variant="default"
+              size="default"
+              className="h-9 shrink-0 bg-sky-600 text-white hover:bg-sky-700 shadow-sm"
+              onClick={() => void exportPerStudentClassReportsZip()}
+              disabled={
+                classReportExporting !== false ||
+                classReportLoading ||
+                !selectedClassReportOption ||
+                classReportSnapshotItems.length === 0 ||
+                !canExportWholeClassPdf
+              }
+            >
+              {classReportExporting === 'per-student'
+                ? isZh
+                  ? '导出中…'
+                  : 'Exporting…'
+                : isZh
+                  ? '分学生导出'
+                  : 'Export Per Student'}
+            </Button>
+            <Button
+              type="button"
+              variant="default"
+              size="default"
+              className="h-9 shrink-0 bg-sky-600 text-white hover:bg-sky-700 shadow-sm"
+              onClick={() => void exportWholeClassReportPdf()}
+              disabled={
+                classReportExporting !== false ||
+                classReportLoading ||
+                !selectedClassReportOption ||
+                classReportSnapshotItems.length === 0 ||
+                !canExportWholeClassPdf
+              }
+            >
+              {classReportExporting === 'whole'
+                ? isZh
+                  ? '导出中…'
+                  : 'Exporting…'
+                : isZh
+                  ? '导出为一份文件(打印)'
+                  : 'Export as One File (Print)'}
+            </Button>
+          </>
         )}
       </div>
       {classReportError && (

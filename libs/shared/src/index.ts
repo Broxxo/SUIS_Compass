@@ -13,6 +13,35 @@ export {
   getCourseColorGradient,
 } from './courseColors.js';
 export { staffingSubjectKeyFromCourse } from './staffingSubjectKey.js';
+export { isCourseIncludedInStaffing } from './courseStaffing.js';
+export type { SelfStudyModule, SelfStudySlot, SelfStudyWeekday, SelfStudyGradeConfig, StaffingSemesterTerm } from './selfStudyStaffing.js';
+export { SELF_STUDY_WEEKDAY_LABELS, selfStudyWeekdayLabel, parseStaffingSemesterTerm } from './selfStudyStaffing.js';
+export type { ElectiveScheduleConfig, ElectiveCourse, ElectiveDurationPeriods, ElectiveScheduleMode } from './electiveStaffing.js';
+export {
+  ELECTIVE_PERIODS_PER_WEEK,
+  electiveTeacherWeeklyPeriods,
+  electiveTeacherWeeklyLoads,
+  electiveScheduleMode,
+  electiveDurationTypeLabel,
+  electiveDurationTypeHint,
+  parseElectiveDurationPeriods,
+  formatElectiveTeachersDisplay,
+  formatElectiveTeachersCompact,
+  formatElectiveCourseCardTitle,
+  electiveDurationTypeLabelCompact,
+} from './electiveStaffing.js';
+export type { ElectiveAgeBandId, ElectiveBandCapacitySummary, ElectiveTeacherConflict } from './electiveBands.js';
+export {
+  ELECTIVE_AGE_BANDS,
+  electiveAgeBandLabel,
+  gradeLevelToElectiveBand,
+  electiveBandGradeLevels,
+  resolveCourseElectiveBand,
+  countElectiveBandEnrollment,
+  summarizeElectiveBandCapacity,
+  findElectiveTeacherConflicts,
+  groupElectiveCoursesByBand,
+} from './electiveBands.js';
 export {
   getCourseReportSubjectLabels,
   presetSubjectKeyFromCourse,
@@ -42,6 +71,7 @@ export {
 export {
   parseAcademicYearSpan,
   suggestNextAcademicYearName,
+  suggestPreviousAcademicYearName,
   bumpIsoDateByYears,
   getGradeCatalogIdForClass,
   getSegmentGraduationLevels,

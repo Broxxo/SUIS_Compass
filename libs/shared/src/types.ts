@@ -37,6 +37,8 @@ export type Course = {
   weeklyPeriodsByGrade: Record<string, number>;
   /** 合作教学：岗位安排需填两位教师，周课时统计时两人各计该课全周课时 */
   coTeaching?: boolean;
+  /** 不纳入岗位安排：课程仍可在课程河流与周课时配置中维护，但不出现任课岗位列 */
+  excludeFromStaffing?: boolean;
   textbookVersion?: string;
   color: CourseColor;
 };

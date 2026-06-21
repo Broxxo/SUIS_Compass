@@ -25,6 +25,8 @@ export async function ensureTeacherPortraitCollectionTables(): Promise<void> {
       collection_type VARCHAR(60) NOT NULL DEFAULT 'teaching-diagnosis-kiss',
       status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'closed')),
       published_at TIMESTAMP,
+      /** 目标部门（users.department 名称）；NULL 或空数组表示全体专任教师 */
+      target_departments JSONB,
       created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
       updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -52,7 +54,48 @@ export async function ensureTeacherPortraitCollectionTables(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_teacher_portrait_collection_submissions_template
       ON teacher_portrait_collection_submissions(template_id)
   `);
+  await pool.query(`
+    ALTER TABLE teacher_portrait_collection_templates
+      ADD COLUMN IF NOT EXISTS target_departments JSONB
+  `);
   });
+}
+
+/** 解析目标部门；NULL 或空数组表示不限制（全体专任教师） */
+export function parseTargetDepartments(raw: unknown): string[] | null {
+  if (raw == null) return null;
+  if (!Array.isArray(raw)) return null;
+  const list = [...new Set(raw.map((d) => String(d ?? '').trim()).filter(Boolean))];
+  return list.length > 0 ? list : null;
+}
+
+export function teacherMatchesTargetDepartments(
+  teacherDepartment: string | null | undefined,
+  targetDepartments: string[] | null | undefined,
+): boolean {
+  if (!targetDepartments || targetDepartments.length === 0) return true;
+  const dept = (teacherDepartment ?? '').trim();
+  return dept !== '' && targetDepartments.includes(dept);
+}
+
+function sqlTeacherInTargetDepartments(
+  targetDepartments: string[] | null | undefined,
+  userAlias: string,
+  values: unknown[],
+): string {
+  if (!targetDepartments || targetDepartments.length === 0) return '';
+  values.push(targetDepartments);
+  return ` AND TRIM(COALESCE(${userAlias}.department, '')) = ANY($${values.length}::text[])`;
+}
+
+export async function getTeacherDepartment(teacherId: string): Promise<string | null> {
+  const row = (
+    await pool.query(`SELECT department FROM users WHERE id = $1 AND role = 'teacher' LIMIT 1`, [
+      teacherId,
+    ])
+  ).rows[0] as { department: string | null } | undefined;
+  const dept = (row?.department ?? '').trim();
+  return dept || null;
 }
 
 export function emptyTeachingDiagnosis(): TeachingDiagnosisPayload {
@@ -84,6 +127,7 @@ export type TeacherPortraitTemplateRow = {
   status: TeacherPortraitTemplateStatus;
   publishedAt: string | null;
   updatedAt: string | null;
+  targetDepartments: string[] | null;
 };
 
 export async function listTeacherPortraitTemplates(filters: {
@@ -109,7 +153,7 @@ export async function listTeacherPortraitTemplates(filters: {
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const rows = (await pool.query(
     `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
-            t.published_at, t.updated_at, ay.name AS academic_year_name
+            t.published_at, t.updated_at, t.target_departments, ay.name AS academic_year_name
      FROM teacher_portrait_collection_templates t
      JOIN academic_years ay ON ay.id = t.academic_year_id
      ${whereSql}
@@ -126,6 +170,7 @@ export async function listTeacherPortraitTemplates(filters: {
     status: r.status as TeacherPortraitTemplateStatus,
     publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
     updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
+    targetDepartments: parseTargetDepartments(r.target_departments),
   }));
 }
 
@@ -136,7 +181,7 @@ export async function getTeacherPortraitTemplateById(
   const row = (
     await pool.query(
       `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
-              t.published_at, t.updated_at, ay.name AS academic_year_name
+              t.published_at, t.updated_at, t.target_departments, ay.name AS academic_year_name
        FROM teacher_portrait_collection_templates t
        JOIN academic_years ay ON ay.id = t.academic_year_id
        WHERE t.id = $1
@@ -155,6 +200,7 @@ export async function getTeacherPortraitTemplateById(
     status: row.status as TeacherPortraitTemplateStatus,
     publishedAt: (row.published_at as Date | null)?.toISOString() ?? null,
     updatedAt: (row.updated_at as Date | null)?.toISOString() ?? null,
+    targetDepartments: parseTargetDepartments(row.target_departments),
   };
 }
 
@@ -186,6 +232,10 @@ export async function getTeacherPortraitTemplateProgress(templateId: string): Pr
   pending: Array<{ teacherId: string; teacherName: string }>;
 }> {
   await ensureTeacherPortraitCollectionTables();
+  const template = await getTeacherPortraitTemplateById(templateId);
+  const targetDepartments = template?.targetDepartments ?? null;
+  const values: unknown[] = [templateId];
+  const deptFilter = sqlTeacherInTargetDepartments(targetDepartments, 'u', values);
   const rows = (await pool.query(
     `SELECT u.id AS teacher_id,
             COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''),
@@ -198,9 +248,9 @@ export async function getTeacherPortraitTemplateProgress(templateId: string): Pr
      FROM users u
      LEFT JOIN teacher_portrait_collection_submissions s
        ON s.teacher_id = u.id AND s.template_id = $1
-     WHERE u.role = 'teacher'
+     WHERE u.role = 'teacher'${deptFilter}
      ORDER BY teacher_name ASC`,
-    [templateId],
+    values,
   )).rows as Array<{
     teacher_id: string;
     teacher_name: string;
@@ -283,6 +333,10 @@ export async function listTeacherPortraitSubmissions(
   templateId: string,
 ): Promise<TeacherPortraitSubmissionRow[]> {
   await ensureTeacherPortraitCollectionTables();
+  const template = await getTeacherPortraitTemplateById(templateId);
+  const targetDepartments = template?.targetDepartments ?? null;
+  const values: unknown[] = [templateId];
+  const deptFilter = sqlTeacherInTargetDepartments(targetDepartments, 'u', values);
   const rows = (await pool.query(
     `SELECT u.id AS teacher_id,
             COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''),
@@ -291,9 +345,9 @@ export async function listTeacherPortraitSubmissions(
      FROM users u
      LEFT JOIN teacher_portrait_collection_submissions s
        ON s.teacher_id = u.id AND s.template_id = $1
-     WHERE u.role = 'teacher'
+     WHERE u.role = 'teacher'${deptFilter}
      ORDER BY teacher_name ASC`,
-    [templateId],
+    values,
   )).rows as Array<{
     teacher_id: string;
     teacher_name: string;

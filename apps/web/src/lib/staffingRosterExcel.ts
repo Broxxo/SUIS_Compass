@@ -3,7 +3,7 @@
  *
  * Sheet 命名：
  * - 年级管理：年级、班级、班主任、年级组长（全校各学段合并在同一 sheet）
- * - 教学管理：学科组、学科组长、成员（、分隔）
+ * - 教学管理：学科组、学段、学科、学科组长、成员（、分隔）；导入时若学科组不存在则自动新建
  * - 课程岗位-{学段}：年级、班级、班主任、各课程列（兼容旧版仅学段名的 sheet）
  *
  * 任课单元格格式（导入/导出一致）：
@@ -14,19 +14,28 @@
  * 导入规则：系统中不存在的课程列整列跳过；未登记教师留空并给出提示，不阻断导入。
  */
 import * as XLSX from 'xlsx';
-import type { TeachingSubjectGroup } from '@repo/shared';
+import { createTeachingSubjectGroupId, type TeachingSubjectGroup } from '@repo/shared';
 import type { Course, GradeConfig } from '../types';
 import type { ClassItem } from '../types/classManagement';
 import { STAFFING_HOMEROOM_SUBJECT_KEY, staffingHomeroomSubjectName, staffingSubjectKeyFromCourse } from '@repo/shared';
+import { SELF_STUDY_WEEKDAY_LABELS, selfStudyWeekdayLabel } from '@repo/shared';
+import { electiveDurationTypeLabel, parseElectiveDurationPeriods } from '@repo/shared';
 import {
   getCurriculumGradeLevelForClass,
   getGradeCatalogIdForClass,
+  getRoadmapSegmentsInDisplayOrder,
   getSchoolGradeLabelForClass,
   normalizeGradeConfig,
+  getGradeLabelByLevel,
 } from './gradeConfig';
 import { getCourseReportSubjectLabels } from '@repo/shared';
 import { getSubjectCategoryText } from './utils';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from './courseGradeUtils';
+import {
+  formatTeachingGroupSegmentLabels,
+  formatTeachingGroupSubjectLabels,
+  type SubjectOption,
+} from './teachingSubjectGroupUtils';
 
 export type StaffingRosterColumn =
   | { kind: 'homeroom'; key: string; header: string }
@@ -87,12 +96,163 @@ export type StaffingGradeMgmtBlock = {
 export type StaffingPackageImportResult = StaffingRosterImportResult & {
   functionalRoleOps: FunctionalRoleImportOp[];
   teachingMemberOps: TeachingMembersImportOp[];
+  newTeachingGroups: TeachingSubjectGroup[];
+};
+
+export type SelfStudySlotImportOp = {
+  moduleName: string;
+  grade: number;
+  className: string;
+  classId: string | null;
+  weekday: number;
+  teacherId: string | null;
+};
+
+export type ElectiveCourseImportOp = {
+  name: string;
+  applicableGrades: string[];
+  durationPeriods: 1 | 2;
+  teacherId: string | null;
+  teacher2Id: string | null;
+  capacity: number;
+  location: string;
+};
+
+export type StaffingKeyRolesImportResult = {
+  functionalRoleOps: FunctionalRoleImportOp[];
+  teachingMemberOps: TeachingMembersImportOp[];
+  /** 导入过程中自动新建的学科组（须先写入 school_settings 再应用组长/成员） */
+  newTeachingGroups: TeachingSubjectGroup[];
+  operations: StaffingRosterAssignmentOp[];
+  errors: string[];
+  warnings: string[];
+};
+
+export type StaffingCourseJobsImportResult = StaffingRosterImportResult & {
+  selfStudySlotOps: SelfStudySlotImportOp[];
+  electiveCourseOps: ElectiveCourseImportOp[];
 };
 
 const GRADE_HEAD_HEADERS = new Set(['年级组长', 'grade head', 'grade-head', 'grade leader']);
 const GROUP_HEADERS = new Set(['学科组', 'group', 'subject group', 'teaching group']);
 const LEAD_HEADERS = new Set(['学科组长', 'group lead', 'subject group lead', 'lead']);
 const MEMBERS_HEADERS = new Set(['成员', 'members', 'teachers']);
+const SEGMENT_HEADERS = new Set(['学段', 'segments', 'school segment', 'segment']);
+const SUBJECTS_HEADERS = new Set(['学科', 'subjects', 'subject keys', 'subject']);
+
+function splitTeachingMgmtListCell(raw: string): string[] {
+  return raw
+    .split(/[、;；,，\n/|]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseTeachingSegmentIdsFromCell(
+  cell: string,
+  gradeConfig: GradeConfig,
+  isZh: boolean,
+): string[] {
+  const labels = splitTeachingMgmtListCell(cell);
+  if (labels.length === 0) return [];
+  const wholeSchool = isZh ? '全校' : 'Whole school';
+  if (labels.length === 1 && labels[0] === wholeSchool) return [];
+  const segments = getRoadmapSegmentsInDisplayOrder(normalizeGradeConfig(gradeConfig));
+  const byLabel = new Map(segments.map((s) => [s.label.trim(), s.id]));
+  const ids: string[] = [];
+  for (const label of labels) {
+    const id = byLabel.get(label);
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function parseTeachingSubjectKeysFromCell(
+  cell: string,
+  subjectOptions: readonly SubjectOption[],
+): string[] {
+  const labels = splitTeachingMgmtListCell(cell);
+  if (labels.length === 0) return [];
+  const byLabel = new Map(subjectOptions.map((o) => [o.label.trim(), o.key]));
+  const byKey = new Map(subjectOptions.map((o) => [o.key.trim(), o.key]));
+  const keys: string[] = [];
+  for (const label of labels) {
+    const key = byLabel.get(label) ?? byKey.get(label);
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+/** 从组名推断学科（如「数学组」「小学数学组」→ 数学） */
+function inferTeachingSubjectKeysFromGroupName(
+  groupName: string,
+  subjectOptions: readonly SubjectOption[],
+): string[] {
+  const trimmed = groupName.trim();
+  if (!trimmed) return [];
+  const candidates = [trimmed, trimmed.replace(/组$/u, '').trim()].filter(Boolean);
+  const sorted = [...subjectOptions].sort((a, b) => b.label.length - a.label.length);
+  for (const cand of candidates) {
+    const keys: string[] = [];
+    for (const opt of sorted) {
+      const label = opt.label.trim();
+      if (!label) continue;
+      if (cand === label || cand.endsWith(label) || cand.includes(label)) {
+        if (!keys.includes(opt.key)) keys.push(opt.key);
+      }
+    }
+    if (keys.length > 0) return keys;
+  }
+  return [];
+}
+
+type TeachingGroupImportContext = {
+  groupsByName: Map<string, TeachingSubjectGroup>;
+  newGroups: TeachingSubjectGroup[];
+  subjectOptions: readonly SubjectOption[];
+  gradeConfig: GradeConfig;
+  isZh: boolean;
+};
+
+function resolveOrCreateTeachingGroup(
+  groupName: string,
+  row: unknown[],
+  colSegment: number,
+  colSubjects: number,
+  ctx: TeachingGroupImportContext,
+  meta: { sheetName: string; rowIndex: number; warnings: string[] },
+): TeachingSubjectGroup {
+  const name = groupName.trim();
+  const existing = ctx.groupsByName.get(name);
+  if (existing) return existing;
+
+  const segmentIds =
+    colSegment >= 0
+      ? parseTeachingSegmentIdsFromCell(String(row[colSegment] ?? ''), ctx.gradeConfig, ctx.isZh)
+      : [];
+  let subjectKeys =
+    colSubjects >= 0
+      ? parseTeachingSubjectKeysFromCell(String(row[colSubjects] ?? ''), ctx.subjectOptions)
+      : [];
+  if (subjectKeys.length === 0) {
+    subjectKeys = inferTeachingSubjectKeysFromGroupName(name, ctx.subjectOptions);
+  }
+
+  const group: TeachingSubjectGroup = {
+    id: createTeachingSubjectGroupId(),
+    nameZh: name,
+    segmentIds,
+    subjectKeys,
+    sortOrder: (ctx.groupsByName.size + 1) * 10,
+  };
+  ctx.groupsByName.set(name, group);
+  ctx.newGroups.push(group);
+  meta.warnings.push(
+    ctx.isZh
+      ? `工作表「${meta.sheetName}」第 ${meta.rowIndex + 1} 行：学科组「${name}」不存在，已自动新建`
+      : `Sheet "${meta.sheetName}" row ${meta.rowIndex + 1}: created new group "${name}"`,
+  );
+  return group;
+}
 
 const HOMEROOM_HEADERS = new Set(['班主任', 'homeroom', 'class teacher', '班主任教师']);
 const GRADE_HEADERS = new Set(['年级', 'grade']);
@@ -110,6 +270,60 @@ function staffingSheetPrefix(kind: 'grade' | 'course', isZh: boolean): string {
 
 function staffingTeachingSheetName(isZh: boolean): string {
   return isZh ? '教学管理' : 'Teaching mgmt';
+}
+
+function selfStudySheetName(isZh: boolean): string {
+  return isZh ? '自习' : 'Self-study';
+}
+
+function electiveCoursesSheetName(isZh: boolean): string {
+  return isZh ? '选修' : 'Elective';
+}
+
+function writeWorkbookDownload(wb: XLSX.WorkBook, filename: string): void {
+  const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([buf], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function parseSelfStudyWeekday(cell: string): number | null {
+  const t = cell.trim();
+  if (!t) return null;
+  const n = Number(t);
+  if (Number.isFinite(n) && n >= 1 && n <= 7) return n;
+  for (const [wd, labels] of Object.entries(SELF_STUDY_WEEKDAY_LABELS)) {
+    if (labels.zh === t || labels.en === t || labels.en.toLowerCase() === t.toLowerCase()) {
+      return Number(wd);
+    }
+  }
+  return null;
+}
+
+function formatElectiveApplicableGradesForExcel(applicableGrades: readonly string[], gradeConfig: GradeConfig): string {
+  const gc = normalizeGradeConfig(gradeConfig);
+  const byId = new Map(gc.items.map((item) => [item.id, item.label]));
+  return applicableGrades.map((id) => byId.get(id) ?? id).join('、');
+}
+
+function parseElectiveApplicableGradesFromExcel(cell: string, gradeConfig: GradeConfig): string[] {
+  const raw = cell.trim();
+  if (!raw) return [];
+  const gc = normalizeGradeConfig(gradeConfig);
+  const labels = raw.split(/[、;；,，\n]/).map((s) => s.trim()).filter(Boolean);
+  const byLabel = new Map(gc.items.map((item) => [item.label.trim(), item.id]));
+  const ids: string[] = [];
+  for (const label of labels) {
+    const id = byLabel.get(label);
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
 }
 
 function buildPrefixedSheetName(kind: 'grade' | 'course', segmentLabel: string, isZh: boolean): string {
@@ -131,6 +345,9 @@ type SheetKind =
   | { kind: 'grade'; segmentLabel: string }
   | { kind: 'course'; segmentLabel: string }
   | { kind: 'teaching' }
+  | { kind: 'self-study' }
+  | { kind: 'elective-config' }
+  | { kind: 'elective-courses' }
   | { kind: 'unknown' };
 
 function classifyStaffingSheet(sheetName: string, isZh: boolean): SheetKind {
@@ -138,7 +355,14 @@ function classifyStaffingSheet(sheetName: string, isZh: boolean): SheetKind {
   const gradePrefix = staffingSheetPrefix('grade', isZh);
   const coursePrefix = staffingSheetPrefix('course', isZh);
   const teachingName = staffingTeachingSheetName(isZh);
+  const selfStudyName = selfStudySheetName(isZh);
+  const electiveCoursesName = electiveCoursesSheetName(isZh);
   if (sn === teachingName || sn.toLowerCase() === 'teaching mgmt') return { kind: 'teaching' };
+  if (sn === selfStudyName || sn.toLowerCase() === 'self-study') return { kind: 'self-study' };
+  if (sn === (isZh ? '选修-周节数' : 'Elective-weekly') || sn.toLowerCase() === 'elective-weekly') {
+    return { kind: 'elective-config' };
+  }
+  if (sn === electiveCoursesName || sn.toLowerCase() === 'elective') return { kind: 'elective-courses' };
   if (sn.startsWith(`${gradePrefix}-`) || sn === gradePrefix) {
     return {
       kind: 'grade',
@@ -295,12 +519,83 @@ function matchSheetToSegment(
 }
 
 /**
- * 导出岗位安排整包：年级管理 / 教学管理 / 课程岗位 分 sheet。
+ * 导出关键岗位：年级管理 + 教学管理。
+ */
+export function downloadStaffingKeyRolesExport(input: {
+  academicYearLabel: string;
+  isZh: boolean;
+  gradeConfig: GradeConfig;
+  subjectOptions: readonly SubjectOption[];
+  teachers: readonly StaffingRosterTeacherRef[];
+  gradeBlocks: readonly StaffingGradeMgmtBlock[];
+  homeroomByClassId: ReadonlyMap<string, string>;
+  gradeHeadByScopeKey: ReadonlyMap<string, string>;
+  teachingGroups: readonly TeachingSubjectGroup[];
+  subjectGroupLeadByGroupId: ReadonlyMap<string, string>;
+  membersByGroupId: ReadonlyMap<string, string[]>;
+}): void {
+  const wb = XLSX.utils.book_new();
+  appendGradeMgmtSheet(wb, input);
+  appendTeachingMgmtSheet(wb, input);
+  const stamp = new Date().toISOString().slice(0, 10);
+  writeWorkbookDownload(
+    wb,
+    input.isZh
+      ? `关键岗位-${input.academicYearLabel}-${stamp}.xlsx`
+      : `key-roles-${input.academicYearLabel}-${stamp}.xlsx`,
+  );
+}
+
+/**
+ * 导出任课岗位：课程岗位 + 自习 + 选修（按学年）。
+ */
+export function downloadStaffingCourseJobsExport(input: {
+  academicYearLabel: string;
+  isZh: boolean;
+  gradeConfig: GradeConfig;
+  teachers: readonly StaffingRosterTeacherRef[];
+  courseSheets: readonly StaffingRosterSegmentSheet[];
+  courseAssignments: ReadonlyMap<string, { teacherId: string }>;
+  selfStudyModules: ReadonlyArray<{ id: string; name: string }>;
+  selfStudySlots: ReadonlyArray<{
+    moduleId: string;
+    classId: string;
+    grade: number;
+    weekday: number;
+    teacherId: string | null;
+  }>;
+  allClasses: readonly ClassItem[];
+  electiveCourses: ReadonlyArray<{
+    name: string;
+    applicableGrades: readonly string[];
+    durationPeriods: 1 | 2;
+    teacherId: string | null;
+    teacher2Id?: string | null;
+    capacity: number;
+    location: string;
+  }>;
+}): void {
+  const wb = XLSX.utils.book_new();
+  appendCourseSegmentSheets(wb, input);
+  appendSelfStudySheet(wb, input);
+  appendElectiveSheets(wb, input);
+  const stamp = new Date().toISOString().slice(0, 10);
+  writeWorkbookDownload(
+    wb,
+    input.isZh
+      ? `任课岗位-${input.academicYearLabel}-${stamp}.xlsx`
+      : `course-jobs-${input.academicYearLabel}-${stamp}.xlsx`,
+  );
+}
+
+/**
+ * 导出岗位安排整包（兼容旧版）：年级管理 / 教学管理 / 课程岗位 分 sheet。
  */
 export function downloadStaffingPackageExport(input: {
   academicYearLabel: string;
   isZh: boolean;
   gradeConfig: GradeConfig;
+  subjectOptions: readonly SubjectOption[];
   teachers: readonly StaffingRosterTeacherRef[];
   gradeBlocks: readonly StaffingGradeMgmtBlock[];
   homeroomByClassId: ReadonlyMap<string, string>;
@@ -312,57 +607,106 @@ export function downloadStaffingPackageExport(input: {
   courseAssignments: ReadonlyMap<string, { teacherId: string }>;
 }): void {
   const wb = XLSX.utils.book_new();
+  appendGradeMgmtSheet(wb, input);
+  appendTeachingMgmtSheet(wb, input);
+  appendCourseSegmentSheets(wb, input);
+  const stamp = new Date().toISOString().slice(0, 10);
+  writeWorkbookDownload(
+    wb,
+    input.isZh
+      ? `岗位安排-${input.academicYearLabel}-${stamp}.xlsx`
+      : `staffing-roster-${input.academicYearLabel}-${stamp}.xlsx`,
+  );
+}
+
+function appendGradeMgmtSheet(
+  wb: XLSX.WorkBook,
+  input: {
+    isZh: boolean;
+    gradeConfig: GradeConfig;
+    teachers: readonly StaffingRosterTeacherRef[];
+    gradeBlocks: readonly StaffingGradeMgmtBlock[];
+    homeroomByClassId: ReadonlyMap<string, string>;
+    gradeHeadByScopeKey: ReadonlyMap<string, string>;
+  },
+): void {
   const gc = normalizeGradeConfig(input.gradeConfig);
   const gradeCol = input.isZh ? '年级' : 'Grade';
   const classCol = input.isZh ? '班级' : 'Class';
   const homeroomHeader = staffingHomeroomSubjectName(input.isZh);
   const gradeHeadCol = input.isZh ? '年级组长' : 'Grade head';
-
-  {
-    const header = [gradeCol, classCol, homeroomHeader, gradeHeadCol];
-    const body: string[][] = [];
-    const classesSorted = mergeGradeMgmtClasses(input.gradeBlocks).sort(
-      (a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }),
-    );
-    for (const cls of classesSorted) {
-      const scopeKey = getGradeCatalogIdForClass(gc, cls.grade, { className: cls.name });
-      const headId = input.gradeHeadByScopeKey.get(scopeKey);
-      const headT = headId ? input.teachers.find((x) => x.id === headId) : undefined;
-      const homeroomId = input.homeroomByClassId.get(cls.id);
-      const homeroomT = homeroomId ? input.teachers.find((x) => x.id === homeroomId) : undefined;
-      body.push([
-        getSchoolGradeLabelForClass(cls),
-        cls.name,
-        homeroomT ? teacherDisplayName(homeroomT, input.isZh) : '',
-        headT ? teacherDisplayName(headT, input.isZh) : '',
-      ]);
-    }
-    const ws = XLSX.utils.aoa_to_sheet([header, ...body]);
-    XLSX.utils.book_append_sheet(wb, ws, sanitizeExcelSheetName(staffingSheetPrefix('grade', input.isZh)));
+  const header = [gradeCol, classCol, homeroomHeader, gradeHeadCol];
+  const body: string[][] = [];
+  const classesSorted = mergeGradeMgmtClasses(input.gradeBlocks).sort(
+    (a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }),
+  );
+  for (const cls of classesSorted) {
+    const scopeKey = getGradeCatalogIdForClass(gc, cls.grade, { className: cls.name });
+    const headId = input.gradeHeadByScopeKey.get(scopeKey);
+    const headT = headId ? input.teachers.find((x) => x.id === headId) : undefined;
+    const homeroomId = input.homeroomByClassId.get(cls.id);
+    const homeroomT = homeroomId ? input.teachers.find((x) => x.id === homeroomId) : undefined;
+    body.push([
+      getSchoolGradeLabelForClass(cls),
+      cls.name,
+      homeroomT ? teacherDisplayName(homeroomT, input.isZh) : '',
+      headT ? teacherDisplayName(headT, input.isZh) : '',
+    ]);
   }
+  const ws = XLSX.utils.aoa_to_sheet([header, ...body]);
+  XLSX.utils.book_append_sheet(wb, ws, sanitizeExcelSheetName(staffingSheetPrefix('grade', input.isZh)));
+}
 
-  {
-    const groupCol = input.isZh ? '学科组' : 'Group';
-    const leadCol = input.isZh ? '学科组长' : 'Lead';
-    const membersCol = input.isZh ? '成员' : 'Members';
-    const teachingRows = input.teachingGroups.map((g) => {
-      const leadId = input.subjectGroupLeadByGroupId.get(g.id);
-      const leadT = leadId ? input.teachers.find((x) => x.id === leadId) : undefined;
-      const memberIds = input.membersByGroupId.get(g.id) ?? [];
-      const memberNames = memberIds
-        .map((id) => input.teachers.find((x) => x.id === id))
-        .filter((t): t is StaffingRosterTeacherRef => Boolean(t))
-        .map((t) => teacherDisplayName(t, input.isZh));
-      return [
-        g.nameZh,
-        leadT ? teacherDisplayName(leadT, input.isZh) : '',
-        memberNames.join(input.isZh ? '、' : '; '),
-      ];
-    });
-    const ws = XLSX.utils.aoa_to_sheet([[groupCol, leadCol, membersCol], ...teachingRows]);
-    XLSX.utils.book_append_sheet(wb, ws, sanitizeExcelSheetName(staffingTeachingSheetName(input.isZh)));
-  }
+function appendTeachingMgmtSheet(
+  wb: XLSX.WorkBook,
+  input: {
+    isZh: boolean;
+    gradeConfig: GradeConfig;
+    subjectOptions: readonly SubjectOption[];
+    teachers: readonly StaffingRosterTeacherRef[];
+    teachingGroups: readonly TeachingSubjectGroup[];
+    subjectGroupLeadByGroupId: ReadonlyMap<string, string>;
+    membersByGroupId: ReadonlyMap<string, string[]>;
+  },
+): void {
+  const groupCol = input.isZh ? '学科组' : 'Group';
+  const segmentCol = input.isZh ? '学段' : 'Segments';
+  const subjectsCol = input.isZh ? '学科' : 'Subjects';
+  const leadCol = input.isZh ? '学科组长' : 'Lead';
+  const membersCol = input.isZh ? '成员' : 'Members';
+  const teachingRows = input.teachingGroups.map((g) => {
+    const leadId = input.subjectGroupLeadByGroupId.get(g.id);
+    const leadT = leadId ? input.teachers.find((x) => x.id === leadId) : undefined;
+    const memberIds = input.membersByGroupId.get(g.id) ?? [];
+    const memberNames = memberIds
+      .map((id) => input.teachers.find((x) => x.id === id))
+      .filter((t): t is StaffingRosterTeacherRef => Boolean(t))
+      .map((t) => teacherDisplayName(t, input.isZh));
+    return [
+      g.nameZh,
+      formatTeachingGroupSegmentLabels(g.segmentIds, input.gradeConfig, input.isZh),
+      formatTeachingGroupSubjectLabels(g.subjectKeys, input.subjectOptions, input.isZh) ?? '',
+      leadT ? teacherDisplayName(leadT, input.isZh) : '',
+      memberNames.join(input.isZh ? '、' : '; '),
+    ];
+  });
+  const ws = XLSX.utils.aoa_to_sheet([[groupCol, segmentCol, subjectsCol, leadCol, membersCol], ...teachingRows]);
+  XLSX.utils.book_append_sheet(wb, ws, sanitizeExcelSheetName(staffingTeachingSheetName(input.isZh)));
+}
 
+function appendCourseSegmentSheets(
+  wb: XLSX.WorkBook,
+  input: {
+    isZh: boolean;
+    gradeConfig: GradeConfig;
+    teachers: readonly StaffingRosterTeacherRef[];
+    courseSheets: readonly StaffingRosterSegmentSheet[];
+    courseAssignments: ReadonlyMap<string, { teacherId: string }>;
+  },
+): void {
+  const gc = normalizeGradeConfig(input.gradeConfig);
+  const gradeCol = input.isZh ? '年级' : 'Grade';
+  const classCol = input.isZh ? '班级' : 'Class';
   const homeroomHeaderCourse = staffingHomeroomSubjectName(input.isZh);
   for (const sheet of input.courseSheets) {
     const courseCols = sheet.columns.filter((c): c is Extract<StaffingRosterColumn, { kind: 'course' }> => c.kind === 'course');
@@ -406,20 +750,101 @@ export function downloadStaffingPackageExport(input: {
     const segLabel = sheet.sheetName.trim() || (input.isZh ? '全校' : 'All');
     XLSX.utils.book_append_sheet(wb, ws, buildPrefixedSheetName('course', segLabel, input.isZh));
   }
+}
 
-  const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  const blob = new Blob([buf], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+function appendSelfStudySheet(
+  wb: XLSX.WorkBook,
+  input: {
+    isZh: boolean;
+    gradeConfig: GradeConfig;
+    teachers: readonly StaffingRosterTeacherRef[];
+    selfStudyModules: ReadonlyArray<{ id: string; name: string }>;
+    selfStudySlots: ReadonlyArray<{
+      moduleId: string;
+      classId: string;
+      grade: number;
+      weekday: number;
+      teacherId: string | null;
+    }>;
+    allClasses: readonly ClassItem[];
+  },
+): void {
+  const gc = normalizeGradeConfig(input.gradeConfig);
+  const moduleCol = input.isZh ? '模块' : 'Module';
+  const gradeCol = input.isZh ? '年级' : 'Grade';
+  const classCol = input.isZh ? '班级' : 'Class';
+  const weekdayCol = input.isZh ? '星期' : 'Weekday';
+  const teacherCol = input.isZh ? '教师' : 'Teacher';
+  const moduleNameById = new Map(input.selfStudyModules.map((m) => [m.id, m.name]));
+  const classById = new Map(input.allClasses.map((c) => [c.id, c]));
+  const rows = [...input.selfStudySlots]
+    .sort((a, b) => {
+      const clsA = classById.get(a.classId);
+      const clsB = classById.get(b.classId);
+      const ga = clsA?.grade ?? a.grade;
+      const gb = clsB?.grade ?? b.grade;
+      const na = clsA?.name ?? '';
+      const nb = clsB?.name ?? '';
+      return ga - gb || na.localeCompare(nb, undefined, { numeric: true }) || a.weekday - b.weekday;
+    })
+    .map((slot) => {
+      const cls = classById.get(slot.classId);
+      const grade = cls?.grade ?? slot.grade;
+      const t = slot.teacherId ? input.teachers.find((x) => x.id === slot.teacherId) : undefined;
+      return [
+        moduleNameById.get(slot.moduleId) ?? '',
+        getGradeLabelByLevel(gc, grade) || `G${grade}`,
+        cls?.name ?? '',
+        selfStudyWeekdayLabel(slot.weekday as 1 | 2 | 3 | 4 | 5 | 6 | 7, input.isZh),
+        t ? teacherDisplayName(t, input.isZh) : '',
+      ];
+    });
+  const ws = XLSX.utils.aoa_to_sheet([[moduleCol, gradeCol, classCol, weekdayCol, teacherCol], ...rows]);
+  XLSX.utils.book_append_sheet(wb, ws, sanitizeExcelSheetName(selfStudySheetName(input.isZh)));
+}
+
+function appendElectiveSheets(
+  wb: XLSX.WorkBook,
+  input: {
+    isZh: boolean;
+    gradeConfig: GradeConfig;
+    teachers: readonly StaffingRosterTeacherRef[];
+    electiveCourses: ReadonlyArray<{
+      name: string;
+      applicableGrades: readonly string[];
+      durationPeriods: 1 | 2;
+      teacherId: string | null;
+      teacher2Id?: string | null;
+      capacity: number;
+      location: string;
+    }>;
+  },
+): void {
+  const nameCol = input.isZh ? '课程' : 'Course';
+  const gradesCol = input.isZh ? '开设年级' : 'Grades';
+  const durationCol = input.isZh ? '时长类型' : 'Duration type';
+  const teacherCol = input.isZh ? '教师1' : 'Teacher 1';
+  const teacher2Col = input.isZh ? '教师2' : 'Teacher 2';
+  const capacityCol = input.isZh ? '容量' : 'Capacity';
+  const locationCol = input.isZh ? '地点' : 'Location';
+  const courseRows = input.electiveCourses.map((course) => {
+    const t1 = course.teacherId ? input.teachers.find((x) => x.id === course.teacherId) : undefined;
+    const t2 = course.teacher2Id ? input.teachers.find((x) => x.id === course.teacher2Id) : undefined;
+    return [
+      course.name,
+      formatElectiveApplicableGradesForExcel(course.applicableGrades ?? [], input.gradeConfig),
+      electiveDurationTypeLabel(course.durationPeriods, input.isZh),
+      t1 ? teacherDisplayName(t1, input.isZh) : '',
+      t2 ? teacherDisplayName(t2, input.isZh) : '',
+      course.capacity,
+      course.location,
+    ];
   });
-  const stamp = new Date().toISOString().slice(0, 10);
-  const a = document.createElement('a');
-  const url = URL.createObjectURL(blob);
-  a.href = url;
-  a.download = input.isZh
-    ? `岗位安排-${input.academicYearLabel}-${stamp}.xlsx`
-    : `staffing-roster-${input.academicYearLabel}-${stamp}.xlsx`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const coursesWs = XLSX.utils.aoa_to_sheet([
+    [nameCol, gradesCol, durationCol, teacherCol, teacher2Col, capacityCol, locationCol],
+    ...courseRows,
+  ]);
+  XLSX.utils.book_append_sheet(wb, coursesWs, sanitizeExcelSheetName(electiveCoursesSheetName(input.isZh)));
 }
 
 /** @deprecated 请使用 downloadStaffingPackageExport */
@@ -435,6 +860,7 @@ export function downloadStaffingRosterExport(input: {
     academicYearLabel: input.academicYearLabel,
     isZh: input.isZh,
     gradeConfig: input.gradeConfig,
+    subjectOptions: [],
     teachers: input.teachers,
     gradeBlocks: input.sheets.map((s) => ({
       sheetName: s.sheetName,
@@ -494,22 +920,40 @@ export function parseStaffingPackageWorkbook(
     courseSheets: readonly StaffingRosterSegmentSheet[];
     gradeBlocks: readonly StaffingGradeMgmtBlock[];
     teachingGroups: readonly TeachingSubjectGroup[];
+    subjectOptions?: readonly SubjectOption[];
     allClasses: readonly ClassItem[];
     courses: readonly Course[];
     teachers: readonly StaffingRosterTeacherRef[];
     gradeConfig: GradeConfig;
     isZh: boolean;
+    scope?: 'full' | 'key-roles' | 'course-jobs';
+    selfStudyModules?: ReadonlyArray<{ id: string; name: string }>;
   },
-): StaffingPackageImportResult {
+): StaffingPackageImportResult & {
+  selfStudySlotOps: SelfStudySlotImportOp[];
+  electiveCourseOps: ElectiveCourseImportOp[];
+} {
   const wb = XLSX.read(arrayBuffer, { type: 'array' });
   const operations: StaffingRosterAssignmentOp[] = [];
   const functionalRoleOps: FunctionalRoleImportOp[] = [];
   const teachingMemberOps: TeachingMembersImportOp[] = [];
+  const newTeachingGroups: TeachingSubjectGroup[] = [];
+  const selfStudySlotOps: SelfStudySlotImportOp[] = [];
+  const electiveCourseOps: ElectiveCourseImportOp[] = [];
   const errors: string[] = [];
   const warnings: string[] = [];
   const skippedUnknownCoursesAll = new Set<string>();
   const gc = normalizeGradeConfig(input.gradeConfig);
   const gradeHeadWritten = new Set<string>();
+  const scope = input.scope ?? 'full';
+  const subjectOptions = input.subjectOptions ?? [];
+  const teachingGroupCtx: TeachingGroupImportContext = {
+    groupsByName: new Map(input.teachingGroups.map((g) => [g.nameZh.trim(), g])),
+    newGroups: newTeachingGroups,
+    subjectOptions,
+    gradeConfig: input.gradeConfig,
+    isZh: input.isZh,
+  };
 
   const resolveCourseSheet = (segmentLabel: string, rawName: string) => {
     const label = segmentLabel.trim();
@@ -524,6 +968,7 @@ export function parseStaffingPackageWorkbook(
     const classified = classifyStaffingSheet(sheetName, input.isZh);
 
     if (classified.kind === 'teaching') {
+      if (scope === 'course-jobs') continue;
       const sh = wb.Sheets[sheetName];
       const data = XLSX.utils.sheet_to_json<(string | number | undefined)[]>(sh, {
         header: 1,
@@ -532,6 +977,12 @@ export function parseStaffingPackageWorkbook(
       if (data.length < 2) continue;
       const headers = (data[0] as unknown[]).map((h) => String(h ?? '').trim());
       const colGroup = headers.findIndex((h) => GROUP_HEADERS.has(h) || GROUP_HEADERS.has(h.toLowerCase()));
+      const colSegment = headers.findIndex(
+        (h) => SEGMENT_HEADERS.has(h) || SEGMENT_HEADERS.has(h.toLowerCase()),
+      );
+      const colSubjects = headers.findIndex(
+        (h) => SUBJECTS_HEADERS.has(h) || SUBJECTS_HEADERS.has(h.toLowerCase()),
+      );
       const colLead = headers.findIndex((h) => LEAD_HEADERS.has(h) || LEAD_HEADERS.has(h.toLowerCase()));
       const colMembers = headers.findIndex((h) => MEMBERS_HEADERS.has(h) || MEMBERS_HEADERS.has(h.toLowerCase()));
       if (colGroup < 0) {
@@ -546,15 +997,14 @@ export function parseStaffingPackageWorkbook(
         const row = data[ri] as unknown[];
         const groupName = String(row[colGroup] ?? '').trim();
         if (!groupName) continue;
-        const group = input.teachingGroups.find((g) => g.nameZh.trim() === groupName);
-        if (!group) {
-          warnings.push(
-            input.isZh
-              ? `工作表「${sheetName}」第 ${ri + 1} 行：未找到学科组「${groupName}」，已跳过`
-              : `Sheet "${sheetName}" row ${ri + 1}: group "${groupName}" not found, skipped`,
-          );
-          continue;
-        }
+        const group = resolveOrCreateTeachingGroup(
+          groupName,
+          row,
+          colSegment,
+          colSubjects,
+          teachingGroupCtx,
+          { sheetName, rowIndex: ri, warnings },
+        );
         if (colLead >= 0) {
           const leadName = parseTeacherNameFromRosterCellSegment(String(row[colLead] ?? '').trim());
           const leadId = leadName ? resolveStaffingTeacherId(leadName, input.teachers, input.isZh) : null;
@@ -599,6 +1049,7 @@ export function parseStaffingPackageWorkbook(
     }
 
     if (classified.kind === 'grade') {
+      if (scope === 'course-jobs') continue;
       const sh = wb.Sheets[sheetName];
       const data = XLSX.utils.sheet_to_json<(string | number | undefined)[]>(sh, {
         header: 1,
@@ -691,6 +1142,7 @@ export function parseStaffingPackageWorkbook(
     }
 
     if (classified.kind === 'course') {
+      if (scope === 'key-roles') continue;
       const segmentSheet = resolveCourseSheet(classified.segmentLabel, sheetName);
       if (!segmentSheet) {
         warnings.push(
@@ -839,6 +1291,182 @@ export function parseStaffingPackageWorkbook(
           }
         }
       }
+      continue;
+    }
+
+    if (classified.kind === 'self-study') {
+      if (scope === 'key-roles') continue;
+      const sh = wb.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json<(string | number | undefined)[]>(sh, {
+        header: 1,
+        defval: '',
+      }) as string[][];
+      if (data.length < 2) continue;
+      const headers = (data[0] as unknown[]).map((h) => String(h ?? '').trim());
+      const colModule = headers.findIndex((h) => h === '模块' || h.toLowerCase() === 'module');
+      const colGrade = headers.findIndex((h) => GRADE_HEADERS.has(h) || h.toLowerCase() === 'grade');
+      const colClass = headers.findIndex((h) => CLASS_HEADERS.has(h) || h.toLowerCase() === 'class');
+      const colWeekday = headers.findIndex((h) => h === '星期' || h.toLowerCase() === 'weekday');
+      const colTeacher = headers.findIndex((h) => h === '教师' || h.toLowerCase() === 'teacher');
+      if (colModule < 0 || colGrade < 0 || colClass < 0 || colWeekday < 0) {
+        errors.push(
+          input.isZh
+            ? `工作表「${sheetName}」缺少必要列（模块/年级/班级/星期）`
+            : `Sheet "${sheetName}" missing required columns`,
+        );
+        continue;
+      }
+      for (let ri = 1; ri < data.length; ri += 1) {
+        const row = data[ri] as unknown[];
+        const moduleName = String(row[colModule] ?? '').trim();
+        const gradeCell = String(row[colGrade] ?? '').trim();
+        const classCell = String(row[colClass] ?? '').trim();
+        const weekdayCell = String(row[colWeekday] ?? '').trim();
+        if (!moduleName && !gradeCell && !classCell && !weekdayCell) continue;
+        if (!moduleName || !gradeCell || !classCell || !weekdayCell) continue;
+        const grade = parseGradeLevelFromCell(gradeCell, gc);
+        const weekday = parseSelfStudyWeekday(weekdayCell);
+        if (grade == null) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行：无法识别年级「${gradeCell}」，已跳过`
+              : `Sheet "${sheetName}" row ${ri + 1}: grade "${gradeCell}" not recognized, skipped`,
+          );
+          continue;
+        }
+        if (weekday == null) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行：无法识别星期「${weekdayCell}」，已跳过`
+              : `Sheet "${sheetName}" row ${ri + 1}: weekday "${weekdayCell}" not recognized, skipped`,
+          );
+          continue;
+        }
+        const cls = input.allClasses.find(
+          (c) =>
+            c.academicYearId === input.academicYearId &&
+            c.grade === grade &&
+            c.name.trim() === classCell,
+        );
+        if (!cls) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行：未找到班级「${gradeCell} ${classCell}」，已跳过`
+              : `Sheet "${sheetName}" row ${ri + 1}: class "${gradeCell} ${classCell}" not found, skipped`,
+          );
+          continue;
+        }
+        const moduleHit = (input.selfStudyModules ?? []).find((m) => m.name.trim() === moduleName);
+        if (!moduleHit) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行：未找到自习模块「${moduleName}」，已跳过（请先在界面创建模块）`
+              : `Sheet "${sheetName}" row ${ri + 1}: self-study module "${moduleName}" not found, skipped`,
+          );
+          continue;
+        }
+        const teacherName =
+          colTeacher >= 0 ? parseTeacherNameFromRosterCellSegment(String(row[colTeacher] ?? '').trim()) : '';
+        const tid = teacherName ? resolveStaffingTeacherId(teacherName, input.teachers, input.isZh) : null;
+        if (teacherName && !tid) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行：未登记教师「${teacherName}」，已留空`
+              : `Sheet "${sheetName}" row ${ri + 1}: teacher "${teacherName}" not registered, left blank`,
+          );
+        }
+        selfStudySlotOps.push({
+          moduleName,
+          grade,
+          className: classCell,
+          classId: cls.id,
+          weekday,
+          teacherId: tid,
+        });
+      }
+      continue;
+    }
+
+    if (classified.kind === 'elective-config') {
+      continue;
+    }
+
+    if (classified.kind === 'elective-courses') {
+      if (scope === 'key-roles') continue;
+      const sh = wb.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json<(string | number | undefined)[]>(sh, {
+        header: 1,
+        defval: '',
+      }) as string[][];
+      if (data.length < 2) continue;
+      const headers = (data[0] as unknown[]).map((h) => String(h ?? '').trim());
+      const colName = headers.findIndex((h) => h === '课程' || h.toLowerCase() === 'course');
+      const colGrades = headers.findIndex((h) => h === '开设年级' || h.toLowerCase() === 'grades');
+      const colDuration = headers.findIndex(
+        (h) => h.includes('时长') || h.toLowerCase().includes('duration'),
+      );
+      const colTeacher = headers.findIndex((h) => h === '教师1' || h.toLowerCase() === 'teacher 1');
+      const colTeacher2 = headers.findIndex((h) => h === '教师2' || h.toLowerCase() === 'teacher 2');
+      const colCapacity = headers.findIndex((h) => h === '容量' || h.toLowerCase() === 'capacity');
+      const colLocation = headers.findIndex((h) => h === '地点' || h.toLowerCase() === 'location');
+      if (colName < 0) {
+        errors.push(
+          input.isZh ? `工作表「${sheetName}」缺少「课程」列` : `Sheet "${sheetName}" missing course column`,
+        );
+        continue;
+      }
+      for (let ri = 1; ri < data.length; ri += 1) {
+        const row = data[ri] as unknown[];
+        const name = String(row[colName] ?? '').trim();
+        if (!name) continue;
+        const gradesCell = colGrades >= 0 ? String(row[colGrades] ?? '').trim() : '';
+        const applicableGrades = parseElectiveApplicableGradesFromExcel(gradesCell, gc);
+        if (colGrades >= 0 && gradesCell && applicableGrades.length === 0) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行开设年级：无法识别「${gradesCell}」，已跳过该行`
+              : `Sheet "${sheetName}" row ${ri + 1}: grades "${gradesCell}" not recognized, row skipped`,
+          );
+          continue;
+        }
+        if (colGrades >= 0 && applicableGrades.length === 0) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行：未填写开设年级，已跳过`
+              : `Sheet "${sheetName}" row ${ri + 1}: missing grades, skipped`,
+          );
+          continue;
+        }
+        const durationPeriods = parseElectiveDurationPeriods(colDuration >= 0 ? row[colDuration] : 1);
+        const t1Name = colTeacher >= 0 ? parseTeacherNameFromRosterCellSegment(String(row[colTeacher] ?? '').trim()) : '';
+        const t2Name =
+          colTeacher2 >= 0 ? parseTeacherNameFromRosterCellSegment(String(row[colTeacher2] ?? '').trim()) : '';
+        const teacherId = t1Name ? resolveStaffingTeacherId(t1Name, input.teachers, input.isZh) : null;
+        const teacher2Id = t2Name ? resolveStaffingTeacherId(t2Name, input.teachers, input.isZh) : null;
+        if (t1Name && !teacherId) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行教师1：未登记「${t1Name}」，已留空`
+              : `Sheet "${sheetName}" row ${ri + 1}: teacher 1 "${t1Name}" not registered, left blank`,
+          );
+        }
+        if (t2Name && !teacher2Id) {
+          warnings.push(
+            input.isZh
+              ? `工作表「${sheetName}」第 ${ri + 1} 行教师2：未登记「${t2Name}」，已留空`
+              : `Sheet "${sheetName}" row ${ri + 1}: teacher 2 "${t2Name}" not registered, left blank`,
+          );
+        }
+        electiveCourseOps.push({
+          name,
+          applicableGrades,
+          durationPeriods,
+          teacherId,
+          teacher2Id,
+          capacity: colCapacity >= 0 ? Number(row[colCapacity] ?? 0) || 0 : 0,
+          location: colLocation >= 0 ? String(row[colLocation] ?? '').trim() : '',
+        });
+      }
     }
   }
 
@@ -846,9 +1474,61 @@ export function parseStaffingPackageWorkbook(
     operations,
     functionalRoleOps,
     teachingMemberOps,
+    newTeachingGroups,
+    selfStudySlotOps,
+    electiveCourseOps,
     errors,
     warnings,
     skippedUnknownCourses: [...skippedUnknownCoursesAll],
+  };
+}
+
+export function parseStaffingKeyRolesWorkbook(
+  arrayBuffer: ArrayBuffer,
+  input: Omit<Parameters<typeof parseStaffingPackageWorkbook>[1], 'scope' | 'courseSheets' | 'courses'>,
+): StaffingKeyRolesImportResult {
+  const result = parseStaffingPackageWorkbook(arrayBuffer, {
+    ...input,
+    courseSheets: [],
+    courses: [],
+    scope: 'key-roles',
+  });
+  return {
+    operations: result.operations,
+    functionalRoleOps: result.functionalRoleOps,
+    teachingMemberOps: result.teachingMemberOps,
+    newTeachingGroups: result.newTeachingGroups,
+    errors: result.errors,
+    warnings: result.warnings,
+  };
+}
+
+export function parseStaffingCourseJobsWorkbook(
+  arrayBuffer: ArrayBuffer,
+  input: {
+    academicYearId: string;
+    courseSheets: readonly StaffingRosterSegmentSheet[];
+    allClasses: readonly ClassItem[];
+    courses: readonly Course[];
+    teachers: readonly StaffingRosterTeacherRef[];
+    gradeConfig: GradeConfig;
+    isZh: boolean;
+    selfStudyModules: ReadonlyArray<{ id: string; name: string }>;
+  },
+): StaffingCourseJobsImportResult {
+  const result = parseStaffingPackageWorkbook(arrayBuffer, {
+    ...input,
+    gradeBlocks: [],
+    teachingGroups: [],
+    scope: 'course-jobs',
+  });
+  return {
+    operations: result.operations,
+    selfStudySlotOps: result.selfStudySlotOps,
+    electiveCourseOps: result.electiveCourseOps,
+    errors: result.errors,
+    warnings: result.warnings,
+    skippedUnknownCourses: result.skippedUnknownCourses,
   };
 }
 
@@ -884,19 +1564,25 @@ export function downloadWeeklyLoadExport(input: {
   rows: ReadonlyArray<{
     teacherName: string;
     primarySubjectLabel: string;
-    detail: string;
+    courseDetail: string;
+    electiveDetail: string;
+    selfStudyDetail: string;
     total: number;
   }>;
 }): void {
   const staffCol = input.isZh ? '教职工' : 'Staff';
   const primaryCol = input.isZh ? '主学科' : 'Primary subject';
-  const detailCol = input.isZh ? '课时构成' : 'Breakdown';
+  const courseCol = input.isZh ? '课程岗位' : 'Course staffing';
+  const electiveCol = input.isZh ? '选修' : 'Elective';
+  const selfStudyCol = input.isZh ? '自习' : 'Self-study';
   const totalCol = input.isZh ? '周课时（节/周）' : 'Periods / week';
-  const header = [staffCol, primaryCol, detailCol, totalCol];
+  const header = [staffCol, primaryCol, courseCol, electiveCol, selfStudyCol, totalCol];
   const body = input.rows.map((r) => [
     r.teacherName,
     r.primarySubjectLabel,
-    r.detail,
+    r.courseDetail,
+    r.electiveDetail,
+    r.selfStudyDetail,
     String(r.total),
   ]);
   const ws = XLSX.utils.aoa_to_sheet([header, ...body]);

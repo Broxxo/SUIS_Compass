@@ -16,6 +16,8 @@ interface GradePeriodsFieldsProps {
   weeklyPeriodsByGrade: Record<string, number>;
   gradeItems: GradeConfigItem[];
   onChange: (next: { applicableGrades: string[]; weeklyPeriodsByGrade: Record<string, number> }) => void;
+  /** 仅选择开设年级，不展示各年级周课时 */
+  gradesOnly?: boolean;
 }
 
 export default function GradePeriodsFields({
@@ -23,6 +25,7 @@ export default function GradePeriodsFields({
   weeklyPeriodsByGrade,
   gradeItems,
   onChange,
+  gradesOnly = false,
 }: GradePeriodsFieldsProps) {
   const { language } = useLanguage();
   const latest = useRef({ applicableGrades, weeklyPeriodsByGrade, onChange });
@@ -111,7 +114,19 @@ export default function GradePeriodsFields({
           );
         })}
       </div>
-      {applicableGrades.length > 0 ? (
+      {gradesOnly ? (
+        applicableGrades.length === 0 ? (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+            {language === 'zh' ? '请至少选择一个年级。' : 'Select at least one grade.'}
+          </p>
+        ) : (
+          <p className="text-xs text-slate-500">
+            {language === 'zh'
+              ? '可单击选择/取消，或按住拖拽连续选择多个年级。'
+              : 'Click to toggle, or drag across grades to select a range.'}
+          </p>
+        )
+      ) : applicableGrades.length > 0 ? (
         <div className="rounded-md border border-slate-200 bg-slate-50/90 px-2 py-1.5">
           <p className="text-[11px] font-medium text-slate-600 mb-1">
             {language === 'zh' ? '各年级周课时（节/周）' : 'Weekly periods per grade'}

@@ -3,6 +3,12 @@
  */
 import type pg from 'pg';
 import {
+  createJwtAuthProvider,
+  createLegacyAuthProvider,
+  resolveLoadTestPassword,
+  shouldUseJwtAuth,
+} from './loadTestAuth.js';
+import {
   buildReportLoadSuite,
   printReportSubjectSettings,
   type HomeroomFillTask,
@@ -87,6 +93,8 @@ export type RoundVerification = {
 
 export type LoadTestConfig = {
   apiBase: string;
+  /** HTTP 请求头（JWT 或开发环境 X-User-Id） */
+  authHeaders: (teacherId: string) => Promise<Record<string, string>>;
   /** 多学段学业报告（先锋小学 G1–6 + 先锋初中 G7–9） */
   reportSpecs: ReportTemplateSpec[];
   /** 学期：默认下学期 Semester 2 */
@@ -282,17 +290,19 @@ export function buildPortraitKissPayload(task: PortraitKissTask, round: number) 
 async function putJson(
   apiBase: string,
   url: string,
-  userId: string,
+  teacherId: string,
   body: unknown,
   timeoutMs: number,
+  authHeaders: (teacherId: string) => Promise<Record<string, string>>,
 ): Promise<{ ok: boolean; status: number; ms: number; body: string }> {
   const ac = new AbortController();
   const t0 = Date.now();
   const timeout = setTimeout(() => ac.abort(), timeoutMs);
   try {
+    const headers = await authHeaders(teacherId);
     const res = await fetch(url, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+      headers,
       body: JSON.stringify(body),
       signal: ac.signal,
     });
@@ -310,13 +320,14 @@ export async function putSubjectReport(
   task: SubjectFillTask,
   round: number,
   timeoutMs: number,
+  authHeaders: (teacherId: string) => Promise<Record<string, string>>,
 ): Promise<{ ok: boolean; status: number; ms: number; body: string }> {
   const base = apiBase.replace(/\/$/, '');
   const url =
     `${base}/api/classes/reports/students/${encodeURIComponent(task.studentId)}` +
     `/terms/${encodeURIComponent(task.academicYearId)}/${encodeURIComponent(task.term)}` +
     `/templates/${encodeURIComponent(task.templateId)}/subjects/${encodeURIComponent(task.subjectKey)}`;
-  return putJson(apiBase, url, task.teacherId, buildSubjectPayload(task, round), timeoutMs);
+  return putJson(apiBase, url, task.teacherId, buildSubjectPayload(task, round), timeoutMs, authHeaders);
 }
 
 export async function putClassInsights(
@@ -324,12 +335,13 @@ export async function putClassInsights(
   task: ClassInsightTask,
   round: number,
   timeoutMs: number,
+  authHeaders: (teacherId: string) => Promise<Record<string, string>>,
 ): Promise<{ ok: boolean; status: number; ms: number; body: string }> {
   const base = apiBase.replace(/\/$/, '');
   const url =
     `${base}/api/classes/reports/templates/${encodeURIComponent(task.templateId)}` +
     `/classes/${encodeURIComponent(task.classId)}/subjects/${encodeURIComponent(task.subjectKey)}/class-insights`;
-  return putJson(apiBase, url, task.teacherId, buildInsightPayload(task, round), timeoutMs);
+  return putJson(apiBase, url, task.teacherId, buildInsightPayload(task, round), timeoutMs, authHeaders);
 }
 
 export async function putHomeroomComment(
@@ -337,13 +349,14 @@ export async function putHomeroomComment(
   task: HomeroomFillTask,
   round: number,
   timeoutMs: number,
+  authHeaders: (teacherId: string) => Promise<Record<string, string>>,
 ): Promise<{ ok: boolean; status: number; ms: number; body: string }> {
   const base = apiBase.replace(/\/$/, '');
   const url =
     `${base}/api/classes/reports/students/${encodeURIComponent(task.studentId)}` +
     `/terms/${encodeURIComponent(task.academicYearId)}/${encodeURIComponent(task.term)}` +
     `/templates/${encodeURIComponent(task.templateId)}/homeroom-comment`;
-  return putJson(apiBase, url, task.teacherId, { comment: buildHomeroomComment(task, round) }, timeoutMs);
+  return putJson(apiBase, url, task.teacherId, { comment: buildHomeroomComment(task, round) }, timeoutMs, authHeaders);
 }
 
 export async function putPortraitKiss(
@@ -351,10 +364,11 @@ export async function putPortraitKiss(
   task: PortraitKissTask,
   round: number,
   timeoutMs: number,
+  authHeaders: (teacherId: string) => Promise<Record<string, string>>,
 ): Promise<{ ok: boolean; status: number; ms: number; body: string }> {
   const base = apiBase.replace(/\/$/, '');
   const url = `${base}/api/classes/teacher-portrait/collections/${encodeURIComponent(task.templateId)}`;
-  return putJson(apiBase, url, task.teacherId, buildPortraitKissPayload(task, round), timeoutMs);
+  return putJson(apiBase, url, task.teacherId, buildPortraitKissPayload(task, round), timeoutMs, authHeaders);
 }
 
 export async function runPool<T>(
@@ -447,7 +461,7 @@ export async function runLoadRound(
     config.concurrency,
     async (task) => {
       const last = await withRetries(
-        () => putSubjectReport(config.apiBase, task, round, config.requestTimeoutMs),
+        () => putSubjectReport(config.apiBase, task, round, config.requestTimeoutMs, config.authHeaders),
         config.retries,
       );
       subjectLatencies.push(last.ms);
@@ -475,7 +489,7 @@ export async function runLoadRound(
           config.concurrency,
           async (task) => {
             const last = await withRetries(
-              () => putHomeroomComment(config.apiBase, task, round, config.requestTimeoutMs),
+              () => putHomeroomComment(config.apiBase, task, round, config.requestTimeoutMs, config.authHeaders),
               config.retries,
             );
             homeroomLatencies.push(last.ms);
@@ -501,7 +515,7 @@ export async function runLoadRound(
           Math.min(40, config.concurrency),
           async (task) => {
             const last = await withRetries(
-              () => putPortraitKiss(config.apiBase, task, round, config.requestTimeoutMs),
+              () => putPortraitKiss(config.apiBase, task, round, config.requestTimeoutMs, config.authHeaders),
               config.retries,
             );
             if (last.ok) portraitOk += 1;
@@ -524,7 +538,7 @@ export async function runLoadRound(
     config.insightConcurrency,
     async (task) => {
       const last = await withRetries(
-        () => putClassInsights(config.apiBase, task, round, config.requestTimeoutMs),
+        () => putClassInsights(config.apiBase, task, round, config.requestTimeoutMs, config.authHeaders),
         config.retries,
       );
       if (last.ok) insightOk += 1;
@@ -1056,7 +1070,7 @@ function parsePortraitTitles(argv: string[], reportsOnly: boolean): string[] {
   return DEFAULT_PORTRAIT_TITLES;
 }
 
-export function parseLoadTestCliArgs(argv: string[]): LoadTestConfig {
+export function parseLoadTestCliArgs(argv: string[]): Omit<LoadTestConfig, 'authHeaders'> {
   const parseArg = (name: string): string | null => {
     const p = `--${name}=`;
     const hit = argv.find((a) => a.startsWith(p));
@@ -1065,7 +1079,7 @@ export function parseLoadTestCliArgs(argv: string[]): LoadTestConfig {
   const fast = argv.includes('--fast');
   const reportsOnly = argv.includes('--reports-only') || (!argv.includes('--with-portraits') && !fast);
   const term = parseTerm(argv);
-  const base: LoadTestConfig = {
+  const base: Omit<LoadTestConfig, 'authHeaders'> = {
     ...DEFAULT_CONFIG,
     apiBase: process.env.API_BASE_URL?.trim() || 'http://127.0.0.1:8080',
     term,
@@ -1085,4 +1099,33 @@ export function parseLoadTestCliArgs(argv: string[]): LoadTestConfig {
     skipSubjectSettingsLog: fast || argv.includes('--skip-subject-settings-log'),
   };
   return base;
+}
+
+export async function finalizeLoadTestConfig(
+  partial: Omit<LoadTestConfig, 'authHeaders'>,
+  pool: pg.Pool,
+  argv: string[],
+): Promise<LoadTestConfig> {
+  const useJwt = shouldUseJwtAuth(argv);
+  const creds = loadTestCredentialsFile();
+  const passwordMap = passwordMapFromCredentials(creds);
+  let defaultPassword = '';
+  try {
+    defaultPassword = resolveLoadTestPassword(argv);
+  } catch {
+    if (!passwordMap?.size) throw new Error(resolveLoadTestPasswordErrorHint());
+  }
+  const authHeaders = useJwt
+    ? createJwtAuthProvider(partial.apiBase, pool, defaultPassword, passwordMap)
+    : createLegacyAuthProvider();
+  if (creds) {
+    console.log(`认证: ${useJwt ? 'JWT 登录' : 'X-User-Id'} · 凭据文件 ${creds.users.length} 个账号`);
+  } else {
+    console.log(`认证: ${useJwt ? 'JWT 登录' : 'X-User-Id（仅开发 API）'}`);
+  }
+  return { ...partial, authHeaders };
+}
+
+function resolveLoadTestPasswordErrorHint(): string {
+  return '请运行 npm run export:load-credentials，或设置 LOAD_TEST_PASSWORD / --password=';
 }

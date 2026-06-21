@@ -1,4 +1,5 @@
 import pool from '../config/database.js';
+import type { Pool, PoolClient } from 'pg';
 
 export type GradeConfigItem = { id: string; label: string; level: number };
 export type GradeConfigSegment = { id: string; label: string; gradeIds: string[] };
@@ -124,9 +125,9 @@ async function persistGradeStructure(config: GradeConfig, updatedBy: string | nu
 }
 
 /** 读取全校学段与年级结构：优先 school_settings，否则从 user_settings.grade_config 迁移 */
-export async function loadSchoolGradeStructure(): Promise<GradeConfig> {
+export async function loadSchoolGradeStructure(db: Pool | PoolClient = pool): Promise<GradeConfig> {
   await ensureSchoolSettingsTable();
-  const row = await pool.query(
+  const row = await db.query(
     `SELECT grade_structure FROM school_settings WHERE id = 'default' LIMIT 1`,
   );
   const raw = (row.rows[0] as { grade_structure?: unknown } | undefined)?.grade_structure;

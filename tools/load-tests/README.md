@@ -46,6 +46,69 @@ npm run load:report -- --rounds=2 --templates=小学期末学业报告 --templat
 
 环境：`apps/api/.env` 中 `DATABASE_URL`；API 默认 `http://127.0.0.1:8080`。
 
+### 账号密码（本地压测）
+
+从**本地库** `users.password` 明文列导出（仅开发数据；云上库通常只有 `password_hash`，无法导出）：
+
+```bash
+npm run export:load-credentials
+```
+
+生成 `tools/load-tests/credentials.local.json`（**已 gitignore，勿提交 Git**）。压测脚本会按 `username` 自动取密码，无需每次 `--password=`。
+
+示例结构见 `tools/load-tests/credentials.local.example.json`。
+
+**线上压测（JWT）**：设置 `API_BASE_URL=https://你的域名` 即可；**单教师脚本默认纯 API，不需要 `DATABASE_URL`**。密码优先 `credentials.local.json`（若与线上账号一致），否则 `LOAD_TEST_PASSWORD` 或 `--password=`。
+
+### 单教师链路（推荐第一步）
+
+模拟真实登录，先测一位教师完整填写链路，再逐步扩到年级组/全校：
+
+```bash
+API_BASE_URL=https://suiscompass.preview.aliyun-zeabur.cn \
+LOAD_TEST_PASSWORD='你的教师密码' \
+npm run load:report:teacher -- \
+  --teacher-name=胡恒星 \
+  --template=小学期末学业报告 \
+  --grades=1-6 \
+  --concurrency=8
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--teacher-name` | — | 教师中文名 / 显示名（与 `--username` 二选一） |
+| `--username` | — | 直接指定登录用户名 |
+| `--template` | 小学期末学业报告 | 报告模板标题 |
+| `--grades` | 1-6 | 年级范围 |
+| `--concurrency` | 8 | 同学科并发（单教师建议 4–12） |
+| `--insight-concurrency` | 4 | 班科分析并发 |
+| `--password` | — | 或环境变量 `LOAD_TEST_PASSWORD` |
+
+流程：登录 → `my-progress` → 学科/班主任/班科写入 → 再查进度 → DB 校验 → 抽样读学生报告。
+
+### 年级组压测（如四年级全校）
+
+多教师合并执行，自动使用 `credentials.local.json`：
+
+```bash
+API_BASE_URL=https://suiscompass.preview.aliyun-zeabur.cn \
+npm run load:report:grade -- \
+  --grade=4 \
+  --template=小学期末学业报告 \
+  --concurrency=16 \
+  --insight-concurrency=8
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--grade` | — | 单年级，如 `4` |
+| `--grades` | — | 或范围 `4-4` / `1-6` |
+| `--template` | 小学期末学业报告 | 报告模板标题 |
+| `--concurrency` | 16 | 学科/班主任并发 |
+| `--insight-concurrency` | 8 | 班科分析并发 |
+
+需凭据文件中含 **admin/system-admin**（拉取全校班级）及全部 **teacher** 账号。
+
 ## 每轮写入内容
 
 1. **学科报告**：考试科按各学科配置的**满分**生成得分（得分率覆盖 6 段）；非考试科仅维度等第

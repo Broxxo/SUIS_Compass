@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS courses (
   applicable_grades JSONB NOT NULL DEFAULT '[]'::jsonb,
   weekly_periods_by_grade JSONB NOT NULL DEFAULT '{}'::jsonb,
   co_teaching BOOLEAN NOT NULL DEFAULT FALSE,
+  exclude_from_staffing BOOLEAN NOT NULL DEFAULT FALSE,
   textbook_version VARCHAR(100),
   color VARCHAR(20) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -71,6 +72,7 @@ BEGIN
 END $$;
 
 ALTER TABLE courses ADD COLUMN IF NOT EXISTS co_teaching BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS exclude_from_staffing BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- 学期数据表（全校共享；每课程-年级-学期唯一）
 CREATE TABLE IF NOT EXISTS semester_data (
@@ -130,6 +132,19 @@ CREATE TABLE IF NOT EXISTS academic_years (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_academic_years_current ON academic_years(is_current) WHERE is_current = TRUE;
+
+-- 升学年操作日志（供测试环境「撤回升年」；每次 promote-to-next 写入一条）
+CREATE TABLE IF NOT EXISTS academic_year_promotion_log (
+  id VARCHAR(80) PRIMARY KEY,
+  source_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  target_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  promoted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+  undone_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ay_promotion_log_target
+  ON academic_year_promotion_log(target_year_id, promoted_at DESC);
 
 -- 全校基础设置：学段与年级结构（自 user_settings.grade_config 迁移）
 CREATE TABLE IF NOT EXISTS school_settings (
@@ -682,6 +697,7 @@ CREATE TABLE IF NOT EXISTS teacher_portrait_collection_templates (
   collection_type VARCHAR(60) NOT NULL DEFAULT 'teaching-diagnosis-kiss',
   status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'closed')),
   published_at TIMESTAMP,
+  target_departments JSONB,
   created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -703,3 +719,65 @@ CREATE TABLE IF NOT EXISTS teacher_portrait_collection_submissions (
 );
 CREATE INDEX IF NOT EXISTS idx_teacher_portrait_collection_submissions_template
   ON teacher_portrait_collection_submissions(template_id);
+
+-- 自习岗位（按学年+学期；模块如课内自习、晚自习）
+CREATE TABLE IF NOT EXISTS self_study_modules (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL DEFAULT 'Semester 1' CHECK (term IN ('Semester 1', 'Semester 2')),
+  name VARCHAR(200) NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_self_study_modules_year_term ON self_study_modules(academic_year_id, term);
+
+CREATE TABLE IF NOT EXISTS self_study_grade_configs (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL DEFAULT 'Semester 1' CHECK (term IN ('Semester 1', 'Semester 2')),
+  module_id VARCHAR(50) NOT NULL REFERENCES self_study_modules(id) ON DELETE CASCADE,
+  grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 20),
+  sessions_per_week SMALLINT NOT NULL DEFAULT 1 CHECK (sessions_per_week >= 1 AND sessions_per_week <= 14),
+  UNIQUE(module_id, grade)
+);
+
+CREATE TABLE IF NOT EXISTS self_study_slots (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL DEFAULT 'Semester 1' CHECK (term IN ('Semester 1', 'Semester 2')),
+  module_id VARCHAR(50) NOT NULL REFERENCES self_study_modules(id) ON DELETE CASCADE,
+  class_id VARCHAR(50) REFERENCES classes(id) ON DELETE CASCADE,
+  grade INTEGER NOT NULL CHECK (grade >= 1 AND grade <= 20),
+  weekday SMALLINT NOT NULL CHECK (weekday BETWEEN 1 AND 7),
+  teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(module_id, class_id, weekday)
+);
+CREATE INDEX IF NOT EXISTS idx_self_study_slots_year_term ON self_study_slots(academic_year_id, term, module_id);
+
+-- 选修课岗位（按学年+学期）
+CREATE TABLE IF NOT EXISTS elective_schedule_config (
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL DEFAULT 'Semester 1' CHECK (term IN ('Semester 1', 'Semester 2')),
+  periods_per_week INTEGER NOT NULL DEFAULT 2 CHECK (periods_per_week > 0),
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (academic_year_id, term)
+);
+
+CREATE TABLE IF NOT EXISTS elective_courses (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL DEFAULT 'Semester 1' CHECK (term IN ('Semester 1', 'Semester 2')),
+  name VARCHAR(200) NOT NULL,
+  duration_periods SMALLINT NOT NULL DEFAULT 1 CHECK (duration_periods IN (1, 2)),
+  teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  teacher2_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  capacity INTEGER NOT NULL DEFAULT 30 CHECK (capacity >= 0),
+  location VARCHAR(200) NOT NULL DEFAULT '',
+  applicable_grades JSONB NOT NULL DEFAULT '[]',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_elective_courses_year_term ON elective_courses(academic_year_id, term);

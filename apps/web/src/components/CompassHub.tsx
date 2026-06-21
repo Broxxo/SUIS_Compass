@@ -283,10 +283,10 @@ function SortableTile({
           ...dndStyle,
           aspectRatio: '1',
         }}
-        {...attributes}
+        {...(editing ? attributes : {})}
         {...(editing ? listeners : undefined)}
         {...(!editing ? longPress : undefined)}
-        aria-hidden
+        aria-hidden={!editing}
       />
     );
   }
@@ -551,6 +551,11 @@ export default function CompassHub({
   );
 
   const onDragStart = (e: DragStartEvent) => {
+    // dnd-kit marks the source node aria-hidden while dragging; blur avoids the
+    // browser warning when focus stays on that node.
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
     if (!editing) setEditing(true);
     setActiveId(e.active.id as HubTileId);
   };

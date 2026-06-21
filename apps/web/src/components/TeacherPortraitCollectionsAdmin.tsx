@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   TEACHER_PORTRAIT_COLLECTION_TYPES,
   teacherPortraitCollectionTypeLabel,
@@ -36,20 +36,43 @@ function collectionTypeFromRaw(raw: string): TeacherPortraitCollectionType {
   return 'teaching-diagnosis-kiss';
 }
 
+function targetDepartmentsLabel(
+  targetDepartments: string[] | null | undefined,
+  isZh: boolean,
+): string {
+  if (!targetDepartments || targetDepartments.length === 0) {
+    return isZh ? '全部部门' : 'All departments';
+  }
+  return targetDepartments.join(isZh ? '、' : ', ');
+}
+
+function normalizeTargetDepartmentsPayload(
+  selected: Set<string>,
+  departmentOptions: string[],
+): string[] | null {
+  if (departmentOptions.length === 0) return null;
+  const picked = departmentOptions.filter((d) => selected.has(d));
+  if (picked.length === 0 || picked.length === departmentOptions.length) return null;
+  return picked;
+}
+
 export default function TeacherPortraitCollectionsAdmin({
   isZh,
   yearId,
   term,
+  departmentOptions,
 }: {
   isZh: boolean;
   yearId: string;
   term: Term;
+  departmentOptions: string[];
 }) {
   const [list, setList] = useState<TeacherPortraitCollectionTemplateSummary[]>([]);
   const [progressById, setProgressById] = useState<Record<string, TeacherPortraitCollectionProgress>>({});
   const [newTitle, setNewTitle] = useState('');
   const [newCollectionType, setNewCollectionType] =
     useState<TeacherPortraitCollectionType>('teaching-diagnosis-kiss');
+  const [newTargetDepartments, setNewTargetDepartments] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
   const [progressListLoading, setProgressListLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +81,8 @@ export default function TeacherPortraitCollectionsAdmin({
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editTemplateId, setEditTemplateId] = useState('');
   const [editTitle, setEditTitle] = useState('');
+  const [editIsDraft, setEditIsDraft] = useState(false);
+  const [editTargetDepartments, setEditTargetDepartments] = useState<Set<string>>(() => new Set());
   const [progressDialogOpen, setProgressDialogOpen] = useState(false);
   const [progressDialogTitle, setProgressDialogTitle] = useState('');
   const [progressDialogData, setProgressDialogData] = useState<TeacherPortraitCollectionProgress | null>(null);
@@ -67,6 +92,77 @@ export default function TeacherPortraitCollectionsAdmin({
     () => teacherPortraitCollectionTypeLabel(newCollectionType, isZh),
     [newCollectionType, isZh],
   );
+
+  useEffect(() => {
+    setNewTargetDepartments(new Set(departmentOptions));
+  }, [departmentOptions]);
+
+  const toggleDepartmentSelection = (
+    dept: string,
+    setter: Dispatch<SetStateAction<Set<string>>>,
+  ) => {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(dept)) next.delete(dept);
+      else next.add(dept);
+      return next;
+    });
+  };
+
+  const selectAllDepartments = (setter: Dispatch<SetStateAction<Set<string>>>) => {
+    setter(new Set(departmentOptions));
+  };
+
+  const renderDepartmentCheckboxes = (
+    selected: Set<string>,
+    setter: Dispatch<SetStateAction<Set<string>>>,
+    idPrefix: string,
+  ) => {
+    if (departmentOptions.length === 0) {
+      return (
+        <p className="text-xs text-slate-500">
+          {isZh ? '暂无部门数据，将面向全体专任教师。' : 'No departments configured; all teachers included.'}
+        </p>
+      );
+    }
+    const allSelected = departmentOptions.every((d) => selected.has(d));
+    return (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="text-xs text-sky-700 hover:underline disabled:text-slate-400"
+            disabled={allSelected}
+            onClick={() => selectAllDepartments(setter)}
+          >
+            {isZh ? '全选' : 'Select all'}
+          </button>
+          <span className="text-[11px] text-slate-400">
+            {isZh
+              ? allSelected
+                ? '当前为全部部门'
+                : `已选 ${selected.size}/${departmentOptions.length} 个部门`
+              : allSelected
+                ? 'All departments'
+                : `${selected.size}/${departmentOptions.length} selected`}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-2">
+          {departmentOptions.map((dept) => (
+            <label key={`${idPrefix}-${dept}`} className="inline-flex items-center gap-1.5 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="rounded border-slate-300"
+                checked={selected.has(dept)}
+                onChange={() => toggleDepartmentSelection(dept, setter)}
+              />
+              <span>{dept}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const loadList = useCallback(async () => {
     if (!USE_CLOUD_STORAGE || !yearId) {
@@ -140,13 +236,21 @@ export default function TeacherPortraitCollectionsAdmin({
   const handleConfirmCreate = () =>
     runAction(async () => {
       if (!yearId) throw new Error(isZh ? '请先选择学年' : 'Select academic year');
+      if (
+        departmentOptions.length > 0 &&
+        departmentOptions.every((d) => !newTargetDepartments.has(d))
+      ) {
+        throw new Error(isZh ? '请至少选择一个部门' : 'Select at least one department');
+      }
       await api.createAdminTeacherPortraitTemplate({
         academicYearId: yearId,
         term,
         title: newTitle.trim() || newTypeDefaultTitle,
         collectionType: newCollectionType,
+        targetDepartments: normalizeTargetDepartmentsPayload(newTargetDepartments, departmentOptions),
       });
       setNewTitle('');
+      setNewTargetDepartments(new Set(departmentOptions));
       setCreateDialogOpen(false);
     });
 
@@ -154,18 +258,40 @@ export default function TeacherPortraitCollectionsAdmin({
     const type = collectionTypeFromRaw(tpl.collectionType);
     setEditTemplateId(tpl.id);
     setEditTitle(tpl.title || teacherPortraitCollectionTypeLabel(type, isZh));
+    setEditIsDraft(tpl.status === 'draft');
+    if (tpl.targetDepartments && tpl.targetDepartments.length > 0) {
+      setEditTargetDepartments(new Set(tpl.targetDepartments));
+    } else {
+      setEditTargetDepartments(new Set(departmentOptions));
+    }
     setEditDialogOpen(true);
   };
 
   const handleSaveEdit = () =>
     runAction(async () => {
       if (!editTemplateId) return;
+      if (
+        editIsDraft &&
+        departmentOptions.length > 0 &&
+        departmentOptions.every((d) => !editTargetDepartments.has(d))
+      ) {
+        throw new Error(isZh ? '请至少选择一个部门' : 'Select at least one department');
+      }
       await api.putAdminTeacherPortraitTemplate(editTemplateId, {
         title: editTitle.trim() || null,
+        ...(editIsDraft
+          ? {
+              targetDepartments: normalizeTargetDepartmentsPayload(
+                editTargetDepartments,
+                departmentOptions,
+              ),
+            }
+          : {}),
       });
       setEditDialogOpen(false);
       setEditTemplateId('');
       setEditTitle('');
+      setEditIsDraft(false);
     });
 
   const openProgressDialog = async (tpl: TeacherPortraitCollectionTemplateSummary) => {
@@ -211,7 +337,7 @@ export default function TeacherPortraitCollectionsAdmin({
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4 space-y-3">
         <div className="text-sm font-semibold text-slate-800">{isZh ? '新建采集' : 'New collection'}</div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="space-y-3">
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '模版' : 'Template'}</label>
             <select
@@ -226,6 +352,12 @@ export default function TeacherPortraitCollectionsAdmin({
               ))}
             </select>
           </div>
+
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">{isZh ? '部门筛选' : 'Departments'}</label>
+            {renderDepartmentCheckboxes(newTargetDepartments, setNewTargetDepartments, 'new-dept')}
+          </div>
+
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '标题（可选）' : 'Title (optional)'}</label>
             <input
@@ -276,14 +408,25 @@ export default function TeacherPortraitCollectionsAdmin({
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{isZh ? '编辑模版名称' : 'Edit template name'}</DialogTitle>
+            <DialogTitle>{isZh ? '编辑模版' : 'Edit template'}</DialogTitle>
           </DialogHeader>
-          <input
-            value={editTitle}
-            onChange={(e) => setEditTitle(e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-            placeholder={isZh ? '模版名称' : 'Template name'}
-          />
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">{isZh ? '模版名称' : 'Template name'}</label>
+              <input
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                placeholder={isZh ? '模版名称' : 'Template name'}
+              />
+            </div>
+            {editIsDraft && (
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '部门筛选' : 'Departments'}</label>
+                {renderDepartmentCheckboxes(editTargetDepartments, setEditTargetDepartments, 'edit-dept')}
+              </div>
+            )}
+          </div>
           <DialogFooter className="sm:justify-end">
             <Button type="button" variant="outline" onClick={() => setEditDialogOpen(false)} disabled={busy}>
               {isZh ? '取消' : 'Cancel'}
@@ -396,6 +539,9 @@ export default function TeacherPortraitCollectionsAdmin({
                       <div className="text-sm font-medium text-slate-800 truncate">{displayTitle}</div>
                       <div className="text-[11px] text-slate-500 mt-0.5">
                         {typeLabel} · {statusLabel(tpl.status, isZh)}
+                        {' · '}
+                        {isZh ? '范围：' : 'Scope: '}
+                        {targetDepartmentsLabel(tpl.targetDepartments, isZh)}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-1 shrink-0 justify-end">

@@ -7,7 +7,7 @@ import type {
   TeacherPortraitCollectionTemplateSummary,
   Term,
 } from '../types/classManagement';
-import { AcademicYearTermFields } from './academicPeriodSelectors';
+import { AcademicYearSelectField, FilterField, FilterSelect, FilterToolbar, TermSelectField } from './academicPeriodSelectors';
 import TeachingDiagnosisKissForm from './TeachingDiagnosisKissForm';
 import { Button } from './ui/button';
 
@@ -158,21 +158,53 @@ export default function TeacherPortraitCollectionFill({
 
   return (
     <div className="space-y-4">
-      <AcademicYearTermFields
-        isZh={isZh}
-        years={years}
-        yearId={yearId}
-        term={term}
-        onYearIdChange={(id) => {
-          manualTemplatePickRef.current = false;
-          onYearIdChange(id);
-        }}
-        onTermChange={(t) => {
-          manualTemplatePickRef.current = false;
-          onTermChange(t);
-        }}
-        allowEmptyYear
-      />
+      <FilterToolbar>
+        <AcademicYearSelectField
+          isZh={isZh}
+          years={years}
+          value={yearId}
+          onChange={(id) => {
+            manualTemplatePickRef.current = false;
+            onYearIdChange(id);
+          }}
+          allowEmpty
+        />
+        <TermSelectField
+          isZh={isZh}
+          value={term}
+          onChange={(t) => {
+            manualTemplatePickRef.current = false;
+            onTermChange(t);
+          }}
+        />
+        <FilterField label={isZh ? '教学诊断' : 'Teaching diagnosis'}>
+          <FilterSelect
+            width="report"
+            value={selectedId}
+            disabled={loading || list.length === 0}
+            onChange={(e) => {
+              manualTemplatePickRef.current = true;
+              setSelectedId(e.target.value);
+            }}
+          >
+            <option value="">
+              {list.length === 0
+                ? isZh
+                  ? '当前学期暂无已发布任务'
+                  : 'No published tasks this term'
+                : isZh
+                  ? '选择教学诊断'
+                  : 'Select diagnosis'}
+            </option>
+            {list.map((tpl) => (
+              <option key={tpl.id} value={tpl.id}>
+                {tpl.title || teacherPortraitCollectionTypeLabel('teaching-diagnosis-kiss', isZh)}
+                {tpl.mySubmission?.hasContent ? (isZh ? ' · 已填' : ' · Done') : ''}
+              </option>
+            ))}
+          </FilterSelect>
+        </FilterField>
+      </FilterToolbar>
 
       {error && (
         <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
@@ -185,52 +217,29 @@ export default function TeacherPortraitCollectionFill({
         </p>
       )}
 
-      {list.length > 0 && (
-        <>
-          <div className="flex flex-wrap gap-2">
-            {list.map((tpl) => (
-              <Button
-                key={tpl.id}
-                size="sm"
-                variant={tpl.id === selectedId ? 'default' : 'outline'}
-                onClick={() => {
-                  manualTemplatePickRef.current = true;
-                  setSelectedId(tpl.id);
-                }}
-              >
-                {tpl.title || teacherPortraitCollectionTypeLabel('teaching-diagnosis-kiss', isZh)}
-                {tpl.mySubmission?.hasContent ? (isZh ? ' · 已填' : ' · Done') : ''}
-              </Button>
-            ))}
+      {list.length > 0 && selected && (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-6 space-y-4">
+          <div>
+            <h3 className="text-base font-semibold text-slate-900">
+              {selected.title || teacherPortraitCollectionTypeLabel('teaching-diagnosis-kiss', isZh)}
+            </h3>
+            {status === 'closed' ? (
+              <p className="text-xs text-slate-500 mt-1">{isZh ? '已截止（只读）' : 'Closed (read-only)'}</p>
+            ) : null}
           </div>
-
-          {selected && (
-            <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-6 space-y-4">
-              <div>
-                <h3 className="text-base font-semibold text-slate-900">
-                  {selected.title || teacherPortraitCollectionTypeLabel('teaching-diagnosis-kiss', isZh)}
-                </h3>
-                {status === 'closed' ? (
-                  <p className="text-xs text-slate-500 mt-1">
-                    {isZh ? '已截止（只读）' : 'Closed (read-only)'}
-                  </p>
-                ) : null}
-              </div>
-              <TeachingDiagnosisKissForm
-                value={diagnosis}
-                onChange={setDiagnosis}
-                disabled={!canEdit}
-                isZh={isZh}
-              />
-              <div className="flex items-center gap-3">
-                <Button type="button" disabled={!canEdit || saving} onClick={() => void handleSave()}>
-                  {saving ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存' : 'Save'}
-                </Button>
-                {savedHint && <span className="text-sm text-emerald-600">{savedHint}</span>}
-              </div>
-            </div>
-          )}
-        </>
+          <TeachingDiagnosisKissForm
+            value={diagnosis}
+            onChange={setDiagnosis}
+            disabled={!canEdit}
+            isZh={isZh}
+          />
+          <div className="flex items-center gap-3">
+            <Button type="button" disabled={!canEdit || saving} onClick={() => void handleSave()}>
+              {saving ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存' : 'Save'}
+            </Button>
+            {savedHint && <span className="text-sm text-emerald-600">{savedHint}</span>}
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import pool from '../config/database.js';
-import { buildAcademicYearPromotionPreview, promoteAcademicYearToNext } from '../lib/academicYearPromotion.js';
-import { resolveConfigAcademicYearId } from '../lib/canonicalAcademicConfig.js';
+import { buildAcademicYearPromotionPreview, promoteAcademicYearToNext, buildAcademicYearUndoPreview, undoAcademicYearPromotion, prepareAcademicYearPromotionDependencies } from '../lib/academicYearPromotion.js';
+import { setCanonicalConfigAcademicYearId, resolveConfigAcademicYearId } from '../lib/canonicalAcademicConfig.js';
 import { ensureClassArchiveColumns } from '../lib/classArchiveColumns.js';
 import { ensureClassTeacherAssignmentsTable } from '../lib/ensureClassTeacherAssignmentsTable.js';
 import { ensureStaffingTables } from '../lib/ensureStaffingTables.js';
@@ -48,8 +48,11 @@ import { ensureGradeLevelConstraints } from '../lib/ensureGradeLevelConstraints.
 import {
   ensureTeacherPortraitCollectionTables,
   emptyTeachingDiagnosis as portraitEmptyDiagnosis,
+  getTeacherDepartment,
   getTeacherPortraitTemplateById,
+  parseTargetDepartments,
   parseTeachingDiagnosis as parsePortraitDiagnosis,
+  teacherMatchesTargetDepartments,
   teachingDiagnosisHasContent as portraitDiagnosisHasContent,
   type TeachingDiagnosisPayload as PortraitDiagnosisPayload,
 } from '../lib/teacherPortraitCollections.js';
@@ -3970,6 +3973,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
 // ---------- 升入新学年（系统管理员：创建下一学年 + 升班/毕业归档 + 切换默认学年） ----------
 router.get('/academic-years/promote-preview', requireSystemAdmin(async (req: ReqWithUserId, res: Response) => {
   try {
+    await prepareAcademicYearPromotionDependencies();
     let sourceYearId = typeof req.query.sourceYearId === 'string' ? req.query.sourceYearId.trim() : '';
     if (!sourceYearId) {
       const cur = (await pool.query(
@@ -3990,12 +3994,12 @@ router.get('/academic-years/promote-preview', requireSystemAdmin(async (req: Req
 }));
 
 router.post('/academic-years/promote-to-next', requireSystemAdmin(async (req: ReqWithUserId, res: Response) => {
-  const client = await pool.connect();
   try {
+    await prepareAcademicYearPromotionDependencies();
     const { sourceYearId: bodySourceYearId } = req.body || {};
     let sourceYearId = typeof bodySourceYearId === 'string' ? bodySourceYearId.trim() : '';
     if (!sourceYearId) {
-      const cur = (await client.query(
+      const cur = (await pool.query(
         `SELECT id FROM academic_years WHERE is_current = TRUE ORDER BY updated_at DESC LIMIT 1`,
       )).rows[0] as { id: string } | undefined;
       sourceYearId = cur?.id ?? '';
@@ -4004,12 +4008,20 @@ router.post('/academic-years/promote-to-next', requireSystemAdmin(async (req: Re
       res.status(400).json({ error: 'No source academic year; set current year first' });
       return;
     }
-    await client.query('BEGIN');
-    const result = await promoteAcademicYearToNext(client, sourceYearId);
-    await client.query('COMMIT');
-    res.json(result);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await promoteAcademicYearToNext(client, sourceYearId, req.userId ?? null);
+      await client.query('COMMIT');
+      await setCanonicalConfigAcademicYearId(sourceYearId);
+      res.json(result);
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   } catch (e) {
-    await client.query('ROLLBACK');
     const msg = e instanceof Error ? e.message : '';
     if (msg === 'SOURCE_YEAR_NOT_FOUND') {
       res.status(404).json({ error: 'Source academic year not found' });
@@ -4020,6 +4032,40 @@ router.post('/academic-years/promote-to-next', requireSystemAdmin(async (req: Re
       return;
     }
     console.error('promote-to-next academic year', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+router.get('/academic-years/undo-promotion-preview', requireSystemAdmin(async (_req: ReqWithUserId, res: Response) => {
+  try {
+    const preview = await buildAcademicYearUndoPreview();
+    res.json({ preview });
+  } catch (e) {
+    console.error('undo-promotion-preview academic year', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+router.post('/academic-years/undo-promotion', requireSystemAdmin(async (req: ReqWithUserId, res: Response) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await undoAcademicYearPromotion(client);
+    await client.query('COMMIT');
+    await setCanonicalConfigAcademicYearId(result.sourceYearId);
+    res.json(result);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    const msg = e instanceof Error ? e.message : '';
+    if (msg === 'NO_UNDOABLE_PROMOTION') {
+      res.status(404).json({ error: 'No promotion available to undo' });
+      return;
+    }
+    if (msg === 'TARGET_NOT_CURRENT' || msg === 'YEAR_NAME_MISMATCH' || msg === 'SOURCE_OR_TARGET_MISSING' || msg === 'CANNOT_UNDO') {
+      res.status(409).json({ error: msg });
+      return;
+    }
+    console.error('undo-promotion academic year', e);
     res.status(500).json({ error: 'Internal server error' });
   } finally {
     client.release();
@@ -4158,7 +4204,7 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = (await pool.query(
       `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
-              t.published_at, t.updated_at, ay.name AS academic_year_name
+              t.published_at, t.updated_at, t.target_departments, ay.name AS academic_year_name
        FROM teacher_portrait_collection_templates t
        JOIN academic_years ay ON ay.id = t.academic_year_id
        ${whereSql}
@@ -4166,6 +4212,10 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
       values,
     )).rows;
     const userId = req.userId;
+    let teacherDepartment: string | null = null;
+    if (userId && role === 'teacher') {
+      teacherDepartment = await getTeacherDepartment(userId);
+    }
     let mySubmissions: Array<{ templateId: string; hasContent: boolean; updatedAt: string | null }> = [];
     if (userId && role === 'teacher') {
       const subs = (await pool.query(
@@ -4184,24 +4234,31 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
       });
     }
     const submissionByTemplate = new Map(mySubmissions.map((s) => [s.templateId, s]));
-    const templates = rows.map((r) => {
-      const id = r.id as string;
-      const mine = submissionByTemplate.get(id);
-      return {
-        id,
-        academicYearId: r.academic_year_id as string,
-        academicYearName: r.academic_year_name as string,
-        term: r.term as string,
-        title: (r.title as string | null) ?? null,
-        collectionType: r.collection_type as string,
-        status: r.status as string,
-        publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
-        updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
-        mySubmission: mine
-          ? { hasContent: mine.hasContent, updatedAt: mine.updatedAt }
-          : { hasContent: false, updatedAt: null },
-      };
-    });
+    const templates = rows
+      .map((r) => {
+        const id = r.id as string;
+        const targetDepartments = parseTargetDepartments(r.target_departments);
+        const mine = submissionByTemplate.get(id);
+        return {
+          id,
+          academicYearId: r.academic_year_id as string,
+          academicYearName: r.academic_year_name as string,
+          term: r.term as string,
+          title: (r.title as string | null) ?? null,
+          collectionType: r.collection_type as string,
+          status: r.status as string,
+          targetDepartments,
+          publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
+          updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
+          mySubmission: mine
+            ? { hasContent: mine.hasContent, updatedAt: mine.updatedAt }
+            : { hasContent: false, updatedAt: null },
+        };
+      })
+      .filter((tpl) => {
+        if (role !== 'teacher') return true;
+        return teacherMatchesTargetDepartments(teacherDepartment, tpl.targetDepartments);
+      });
     res.json({ templates });
   } catch (error) {
     console.error('List teacher portrait collections error:', error);
@@ -4223,6 +4280,12 @@ router.get('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
     const isAdmin = role === 'system-admin' || role === 'admin';
     if (!isAdmin && template.status === 'draft') {
       return res.status(404).json({ error: 'Template not found' });
+    }
+    if (role === 'teacher') {
+      const teacherDepartment = await getTeacherDepartment(userId);
+      if (!teacherMatchesTargetDepartments(teacherDepartment, template.targetDepartments)) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
     }
     let diagnosis = portraitEmptyDiagnosis();
     let updatedAt: string | null = null;
@@ -4270,6 +4333,10 @@ router.put('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
     if (!template) return res.status(404).json({ error: 'Template not found' });
     if (template.status !== 'published') {
       return res.status(409).json({ error: 'Collection is not open for submission' });
+    }
+    const teacherDepartment = await getTeacherDepartment(userId);
+    if (!teacherMatchesTargetDepartments(teacherDepartment, template.targetDepartments)) {
+      return res.status(403).json({ error: 'You are not in the target audience for this collection' });
     }
     if (template.collectionType !== 'teaching-diagnosis-kiss') {
       return res.status(400).json({ error: 'Unsupported collection type' });

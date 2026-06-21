@@ -31,7 +31,7 @@ export function formatTeachingGroupSegmentLabels(
 
 export function formatTeachingGroupSubjectLabels(
   subjectKeys: string[],
-  subjectOptions: SubjectOption[],
+  subjectOptions: readonly SubjectOption[],
   isZh: boolean,
 ): string | null {
   const labels = subjectKeys

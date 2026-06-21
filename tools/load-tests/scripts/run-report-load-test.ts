@@ -15,15 +15,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import pg from 'pg';
-import { parseLoadTestCliArgs, runFullLoadTest } from './reportLoadRunner.js';
+import { parseLoadTestCliArgs, runFullLoadTest, finalizeLoadTestConfig } from './reportLoadRunner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../apps/api/.env') });
 
 async function main() {
-  const config = parseLoadTestCliArgs(process.argv);
+  const partial = parseLoadTestCliArgs(process.argv);
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 15_000 });
   try {
+    const config = await finalizeLoadTestConfig(partial, pool, process.argv);
     const report = await runFullLoadTest(pool, config);
     const outDir = path.resolve(__dirname, '../artifacts');
     fs.mkdirSync(outDir, { recursive: true });

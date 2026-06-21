@@ -72,6 +72,24 @@ export interface AcademicYearPromotionPreview {
   warnings: string[];
 }
 
+/** 撤回升年预览（仅可撤销最近一次升学） */
+export interface AcademicYearUndoPreview {
+  logId: string;
+  sourceYearId: string;
+  sourceYearName: string;
+  targetYearId: string;
+  targetYearName: string;
+  promotedAt: string;
+  canUndo: boolean;
+  blockReason: string | null;
+  summary: {
+    targetClassCount: number;
+    targetEnrollmentCount: number;
+    graduatedClassesToRestore: number;
+  };
+  warnings: string[];
+}
+
 /** 全校组织架构部门（树形；parentId 为空表示根部门） */
 export interface OrgDepartment {
   id: string;
@@ -296,6 +314,7 @@ export interface TeacherPortraitCollectionTemplateSummary {
   title: string | null;
   collectionType: string;
   status: TeacherPortraitCollectionTemplateStatus;
+  targetDepartments?: string[] | null;
   publishedAt: string | null;
   updatedAt: string | null;
   mySubmission?: { hasContent: boolean; updatedAt: string | null };

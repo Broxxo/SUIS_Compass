@@ -69,6 +69,7 @@ export function migrateCourseData(course: Course): Course {
     applicableGrades,
     weeklyPeriodsByGrade,
     coTeaching: Boolean(course.coTeaching),
+    excludeFromStaffing: Boolean(course.excludeFromStaffing),
     textbookVersion: course.textbookVersion || '人教版',
     color: courseColorOrDefault(course.color),
   };

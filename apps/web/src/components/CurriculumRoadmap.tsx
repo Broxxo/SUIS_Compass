@@ -534,6 +534,7 @@ export default function CurriculumRoadmap({
     textbookVersion: string,
     color: Course['color'],
     coTeaching: boolean,
+    excludeFromStaffing: boolean,
     domainId: string | null,
   ) => {
     const newCourse: Course = {
@@ -544,7 +545,8 @@ export default function CurriculumRoadmap({
       weeklyPeriodsByGrade,
       textbookVersion: textbookVersion || '人教版',
       color: color,
-      coTeaching: Boolean(coTeaching),
+      coTeaching: excludeFromStaffing ? false : Boolean(coTeaching),
+      excludeFromStaffing: Boolean(excludeFromStaffing),
     };
     setCourses([...courses, newCourse]);
     if (domainId) {
@@ -565,6 +567,7 @@ export default function CurriculumRoadmap({
       textbookVersion?: string;
       color?: CourseColor;
       coTeaching?: boolean;
+      excludeFromStaffing?: boolean;
     },
   ) => {
     setCourses(courses.map(course =>
@@ -619,6 +622,7 @@ export default function CurriculumRoadmap({
       textbookVersion?: string;
       color: CourseColor;
       coTeaching: boolean;
+      excludeFromStaffing: boolean;
       domainId: string | null;
     },
   ) => {

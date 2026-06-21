@@ -25,6 +25,10 @@
     "seed:report:midterm-primary-test": "cd apps/api && npx tsx ../../tools/load-tests/scripts/seed-midterm-primary-test-report.ts",
     "seed:report:import-dimensions": "cd apps/api && npx tsx ../../tools/load-tests/scripts/import-report-dimensions-to-preset.ts",
     "load:report": "cd apps/api && npx tsx ../../tools/load-tests/scripts/run-report-load-test.ts",
+    "load:report:teacher": "cd apps/api && npx tsx ../../tools/load-tests/scripts/run-teacher-report-smoke.ts",
+    "export:load-credentials": "cd apps/api && npx tsx ../../tools/load-tests/scripts/export-load-test-credentials.ts",
+    "load:report:grade": "cd apps/api && npx tsx ../../tools/load-tests/scripts/run-grade-report-load-test.ts",
+    "load:report:school": "cd apps/api && npx tsx ../../tools/load-tests/scripts/run-grade-report-load-test.ts -- --school",
     "audit:report-templates": "cd apps/api && npx tsx ../../tools/load-tests/scripts/audit-report-templates.ts"
   },
   "workspaces": [

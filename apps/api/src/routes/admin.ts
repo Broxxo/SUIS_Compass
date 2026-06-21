@@ -14,6 +14,7 @@ import {
   resolveTemplateDimensionsForGrade,
   REPORT_SCORE_LETTER_GRADES,
   STAFFING_HOMEROOM_SUBJECT_KEY,
+  parseStaffingSemesterTerm,
   extractEvaluationGradeInclusion,
   extractExamGradeInclusion,
   type ReportGradeDimensionSnapshot,
@@ -47,6 +48,19 @@ import {
   listTeachingSubjectGroupMembers,
   replaceTeachingSubjectGroupMembers,
 } from '../lib/teachingSubjectGroupMembers.js';
+import {
+  createSelfStudyModule,
+  deleteSelfStudyModule,
+  deleteSelfStudySlot,
+  listSelfStudyBundle,
+  updateSelfStudyModule,
+  upsertSelfStudySlot,
+} from '../lib/selfStudyStaffing.js';
+import {
+  deleteElectiveCourse,
+  getElectiveBundle,
+  upsertElectiveCourse,
+} from '../lib/electiveStaffing.js';
 import { createRunOnce } from '../lib/runOnce.js';
 import {
   ensureTeacherPortraitCollectionTables,
@@ -55,6 +69,7 @@ import {
   getTeacherPortraitTemplateProgress,
   listTeacherPortraitSubmissions,
   listTeacherPortraitTemplates,
+  parseTargetDepartments,
   type TeacherPortraitCollectionType,
 } from '../lib/teacherPortraitCollections.js';
 
@@ -3012,6 +3027,7 @@ router.post('/teacher-portrait/templates', async (req: AuthedRequest, res: Respo
       term?: Term;
       title?: string | null;
       collectionType?: string;
+      targetDepartments?: unknown;
     };
     const academicYearId = String(body.academicYearId ?? '').trim();
     const term = body.term === 'Semester 1' || body.term === 'Semester 2' ? body.term : null;
@@ -3024,12 +3040,21 @@ router.post('/teacher-portrait/templates', async (req: AuthedRequest, res: Respo
       return res.status(400).json({ error: 'Invalid collectionType' });
     }
     const title = body.title != null ? String(body.title).trim() || null : null;
+    const targetDepartments = parseTargetDepartments(body.targetDepartments);
     const id = createTeacherPortraitTemplateId();
     await pool.query(
       `INSERT INTO teacher_portrait_collection_templates
-         (id, academic_year_id, term, title, collection_type, status, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, 'draft', $6, $6)`,
-      [id, academicYearId, term, title, collectionType, req.userId ?? null],
+         (id, academic_year_id, term, title, collection_type, target_departments, status, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'draft', $7, $7)`,
+      [
+        id,
+        academicYearId,
+        term,
+        title,
+        collectionType,
+        targetDepartments ? JSON.stringify(targetDepartments) : null,
+        req.userId ?? null,
+      ],
     );
     const template = await getTeacherPortraitTemplateById(id);
     res.status(201).json({ template });
@@ -3043,15 +3068,33 @@ router.put('/teacher-portrait/templates/:templateId', async (req: AuthedRequest,
   try {
     await ensureTeacherPortraitCollectionTables();
     const templateId = String(req.params.templateId ?? '').trim();
-    const title = req.body?.title != null ? String(req.body.title).trim() || null : null;
+    const body = req.body as { title?: string | null; targetDepartments?: unknown };
+    const hasTitle = Object.prototype.hasOwnProperty.call(body, 'title');
+    const hasTargetDepartments = Object.prototype.hasOwnProperty.call(body, 'targetDepartments');
     if (!templateId) return res.status(400).json({ error: 'templateId required' });
+    if (!hasTitle && !hasTargetDepartments) {
+      return res.status(400).json({ error: 'title or targetDepartments required' });
+    }
     const current = await getTeacherPortraitTemplateById(templateId);
     if (!current) return res.status(404).json({ error: 'Template not found' });
+    const sets: string[] = ['updated_by = $1', 'updated_at = CURRENT_TIMESTAMP'];
+    const values: unknown[] = [req.userId ?? null];
+    if (hasTitle) {
+      values.push(body.title != null ? String(body.title).trim() || null : null);
+      sets.push(`title = $${values.length}`);
+    }
+    if (hasTargetDepartments) {
+      if (current.status !== 'draft') {
+        return res.status(409).json({ error: 'targetDepartments can only be changed while draft' });
+      }
+      const targetDepartments = parseTargetDepartments(body.targetDepartments);
+      values.push(targetDepartments ? JSON.stringify(targetDepartments) : null);
+      sets.push(`target_departments = $${values.length}::jsonb`);
+    }
+    values.push(templateId);
     await pool.query(
-      `UPDATE teacher_portrait_collection_templates
-       SET title = $1, updated_by = $2, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3`,
-      [title, req.userId ?? null, templateId],
+      `UPDATE teacher_portrait_collection_templates SET ${sets.join(', ')} WHERE id = $${values.length}`,
+      values,
     );
     const template = await getTeacherPortraitTemplateById(templateId);
     res.json({ template });
@@ -3175,6 +3218,195 @@ router.delete('/teacher-portrait/templates/:templateId', async (req: AuthedReque
   } catch (error) {
     console.error('Delete teacher portrait template error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/self-study', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const bundle = await listSelfStudyBundle(academicYearId);
+    return res.json(bundle);
+  } catch (error) {
+    console.error('List self-study bundle error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/self-study/modules', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const name = String(req.body?.name ?? '').trim();
+    const gradeConfigs = Array.isArray(req.body?.gradeConfigs) ? req.body.gradeConfigs : [];
+    if (!academicYearId || !name) {
+      return res.status(400).json({ error: 'academicYearId and name are required' });
+    }
+    type GradeCfg = { grade: number; sessionsPerWeek: number };
+    const parsedConfigs: GradeCfg[] = [];
+    for (const row of gradeConfigs as unknown[]) {
+      if (!row || typeof row !== 'object') continue;
+      const grade = Number((row as { grade?: unknown }).grade);
+      const sessionsPerWeek = Number((row as { sessionsPerWeek?: unknown }).sessionsPerWeek);
+      if (!Number.isFinite(grade) || !Number.isFinite(sessionsPerWeek)) continue;
+      parsedConfigs.push({ grade, sessionsPerWeek });
+    }
+    const result = await createSelfStudyModule({
+      academicYearId,
+      name,
+      gradeConfigs: parsedConfigs,
+    });
+    return res.status(201).json(result);
+  } catch (error) {
+    console.error('Create self-study module error:', error);
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    return res.status(message.includes('required') ? 400 : 500).json({ error: message });
+  }
+});
+
+router.put('/self-study/modules/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    const name = String(req.body?.name ?? '').trim();
+    if (!id || !name) return res.status(400).json({ error: 'id and name are required' });
+    const module = await updateSelfStudyModule({ id, name });
+    if (!module) return res.status(404).json({ error: 'Module not found' });
+    return res.json({ module });
+  } catch (error) {
+    console.error('Update self-study module error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/self-study/modules/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const ok = await deleteSelfStudyModule(id);
+    if (!ok) return res.status(404).json({ error: 'Module not found' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete self-study module error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/self-study/slots', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const moduleId = String(req.body?.moduleId ?? '').trim();
+    const classId = String(req.body?.classId ?? '').trim();
+    const weekday = Number(req.body?.weekday);
+    const teacherIdRaw = req.body?.teacherId;
+    const teacherId =
+      teacherIdRaw == null || String(teacherIdRaw).trim() === '' ? null : String(teacherIdRaw).trim();
+    const id = typeof req.body?.id === 'string' ? req.body.id.trim() : undefined;
+    if (!academicYearId || !moduleId || !classId || !Number.isFinite(weekday)) {
+      return res.status(400).json({ error: 'academicYearId, moduleId, classId, weekday are required' });
+    }
+    if (teacherId) {
+      const okTeacher = await assertTeacherUser(teacherId);
+      if (!okTeacher) return res.status(400).json({ error: 'Invalid teacherId' });
+    }
+    const slot = await upsertSelfStudySlot({
+      id,
+      academicYearId,
+      moduleId,
+      classId,
+      weekday: Math.min(7, Math.max(1, Math.round(weekday))) as 1 | 2 | 3 | 4 | 5 | 6 | 7,
+      teacherId,
+    });
+    return res.json({ slot });
+  } catch (error) {
+    console.error('Upsert self-study slot error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/self-study/slots/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const ok = await deleteSelfStudySlot(id);
+    if (!ok) return res.status(404).json({ error: 'Slot not found' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete self-study slot error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/elective', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const bundle = await getElectiveBundle(academicYearId);
+    return res.json(bundle);
+  } catch (error) {
+    console.error('Get elective bundle error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/elective/courses', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const name = String(req.body?.name ?? '').trim();
+    const durationPeriods = Number(req.body?.durationPeriods) === 2 ? 2 : 1;
+    const teacherIdRaw = req.body?.teacherId;
+    const teacher2IdRaw = req.body?.teacher2Id;
+    const teacherId =
+      teacherIdRaw == null || String(teacherIdRaw).trim() === '' ? null : String(teacherIdRaw).trim();
+    const teacher2Id =
+      teacher2IdRaw == null || String(teacher2IdRaw).trim() === '' ? null : String(teacher2IdRaw).trim();
+    const capacity = Number(req.body?.capacity ?? 0);
+    const location = String(req.body?.location ?? '');
+    const applicableGrades = Array.isArray(req.body?.applicableGrades)
+      ? req.body.applicableGrades.map((id: unknown) => String(id ?? '').trim()).filter(Boolean)
+      : [];
+    const id = typeof req.body?.id === 'string' ? req.body.id.trim() : undefined;
+    if (!academicYearId || !name) {
+      return res.status(400).json({ error: 'academicYearId and name are required' });
+    }
+    if (applicableGrades.length === 0) {
+      return res.status(400).json({ error: 'applicableGrades is required' });
+    }
+    for (const tid of [teacherId, teacher2Id]) {
+      if (!tid) continue;
+      const okTeacher = await assertTeacherUser(tid);
+      if (!okTeacher) return res.status(400).json({ error: 'Invalid teacherId' });
+    }
+    const course = await upsertElectiveCourse({
+      id,
+      academicYearId,
+      name,
+      applicableGrades,
+      durationPeriods,
+      teacherId,
+      teacher2Id,
+      capacity,
+      location,
+    });
+    return res.json({ course });
+  } catch (error) {
+    console.error('Upsert elective course error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/elective/courses/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const ok = await deleteElectiveCourse(id);
+    if (!ok) return res.status(404).json({ error: 'Course not found' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete elective course error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

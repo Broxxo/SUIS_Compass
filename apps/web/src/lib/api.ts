@@ -1,9 +1,10 @@
-import type { CourseDomainsConfig, TeachingResearchGroup, TeachingSubjectGroup } from '@repo/shared';
+import type { CourseDomainsConfig, TeachingResearchGroup, TeachingSubjectGroup, SelfStudyModule, SelfStudySlot, SelfStudyGradeConfig, ElectiveScheduleConfig, ElectiveCourse } from '@repo/shared';
 import { normalizeCourseDomainsConfig } from '@repo/shared';
 import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
   AcademicYear,
   AcademicYearPromotionPreview,
+  AcademicYearUndoPreview,
   ClassItem,
   Student,
   Enrollment,
@@ -78,6 +79,25 @@ async function readJsonOrThrow(response: Response, fallbackError: string) {
     throw new Error(`${fallbackError}: expected JSON but got non-JSON response${preview ? ` (${preview})` : ''}`);
   }
   return response.json();
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit & { timeoutMs?: number } = {},
+): Promise<Response> {
+  const { timeoutMs = 120_000, ...fetchInit } = init;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...fetchInit, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Request timed out. Check that the API is running and retry.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function readErrorMessage(response: Response, fallbackError: string): Promise<string> {
@@ -786,9 +806,10 @@ export const api = {
 
   async getAcademicYearPromotePreview(sourceYearId?: string): Promise<AcademicYearPromotionPreview> {
     const qs = sourceYearId ? `?sourceYearId=${encodeURIComponent(sourceYearId)}` : '';
-    const response = await fetch(apiUrl(`/api/classes/academic-years/promote-preview${qs}`), {
-      headers: getHeaders(),
-    });
+    const response = await fetchWithTimeout(
+      apiUrl(`/api/classes/academic-years/promote-preview${qs}`),
+      { headers: getHeaders(), timeoutMs: 120_000 },
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error((err as { error?: string }).error || 'Failed to load promotion preview');
@@ -808,14 +829,48 @@ export const api = {
     studentsGraduated: number;
     targetSetCurrent: boolean;
   }> {
-    const response = await fetch(apiUrl('/api/classes/academic-years/promote-to-next'), {
+    const response = await fetchWithTimeout(apiUrl('/api/classes/academic-years/promote-to-next'), {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(sourceYearId ? { sourceYearId } : {}),
+      timeoutMs: 300_000,
     });
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error((err as { error?: string }).error || 'Failed to promote academic year');
+    }
+    return response.json();
+  },
+
+  async getAcademicYearUndoPromotionPreview(): Promise<AcademicYearUndoPreview | null> {
+    const response = await fetch(apiUrl('/api/classes/academic-years/undo-promotion-preview'), {
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to load undo preview');
+    }
+    const data = await response.json();
+    return (data.preview ?? null) as AcademicYearUndoPreview | null;
+  },
+
+  async undoAcademicYearPromotion(): Promise<{
+    success: boolean;
+    sourceYearId: string;
+    sourceYearName: string;
+    targetYearId: string;
+    targetYearName: string;
+    studentsRestored: number;
+    classesUnarchived: number;
+    sourceSetCurrent: boolean;
+  }> {
+    const response = await fetch(apiUrl('/api/classes/academic-years/undo-promotion'), {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to undo academic year promotion');
     }
     return response.json();
   },
@@ -1686,6 +1741,153 @@ export const api = {
     }
   },
 
+  async getAdminSelfStudyBundle(
+    academicYearId: string,
+  ): Promise<{ modules: SelfStudyModule[]; gradeConfigs: SelfStudyGradeConfig[]; slots: SelfStudySlot[] }> {
+    const response = await fetch(
+      apiUrl(`/api/admin/self-study?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch self-study data');
+    }
+    return readJsonOrThrow(response, 'Failed to fetch self-study data') as Promise<{
+      modules: SelfStudyModule[];
+      gradeConfigs: SelfStudyGradeConfig[];
+      slots: SelfStudySlot[];
+    }>;
+  },
+
+  async createAdminSelfStudyModule(input: {
+    academicYearId: string;
+    name: string;
+    gradeConfigs: Array<{ grade: number; sessionsPerWeek: number }>;
+  }): Promise<{ module: SelfStudyModule; gradeConfigs: SelfStudyGradeConfig[] }> {
+    const response = await fetch(apiUrl('/api/admin/self-study/modules'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to create self-study module');
+    }
+    return readJsonOrThrow(response, 'Failed to create self-study module') as Promise<{
+      module: SelfStudyModule;
+      gradeConfigs: SelfStudyGradeConfig[];
+    }>;
+  },
+
+  async updateAdminSelfStudyModule(input: { id: string; name: string }): Promise<SelfStudyModule> {
+    const response = await fetch(apiUrl(`/api/admin/self-study/modules/${encodeURIComponent(input.id)}`), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ name: input.name }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to update self-study module');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to update self-study module');
+    return (data as { module: SelfStudyModule }).module;
+  },
+
+  async deleteAdminSelfStudyModule(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/self-study/modules/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete self-study module');
+    }
+  },
+
+  async upsertAdminSelfStudySlot(input: {
+    id?: string;
+    academicYearId: string;
+    moduleId: string;
+    classId: string;
+    weekday: number;
+    teacherId: string | null;
+  }): Promise<SelfStudySlot> {
+    const response = await fetch(apiUrl('/api/admin/self-study/slots'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save self-study slot');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to save self-study slot');
+    return (data as { slot: SelfStudySlot }).slot;
+  },
+
+  async deleteAdminSelfStudySlot(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/self-study/slots/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete self-study slot');
+    }
+  },
+
+  async getAdminElectiveBundle(
+    academicYearId: string,
+  ): Promise<{ config: ElectiveScheduleConfig; courses: ElectiveCourse[] }> {
+    const response = await fetch(
+      apiUrl(`/api/admin/elective?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch elective data');
+    }
+    return readJsonOrThrow(response, 'Failed to fetch elective data') as Promise<{
+      config: ElectiveScheduleConfig;
+      courses: ElectiveCourse[];
+    }>;
+  },
+
+  async upsertAdminElectiveCourse(input: {
+    id?: string;
+    academicYearId: string;
+    name: string;
+    applicableGrades: string[];
+    durationPeriods: 1 | 2;
+    teacherId: string | null;
+    teacher2Id?: string | null;
+    capacity: number;
+    location: string;
+  }): Promise<ElectiveCourse> {
+    const response = await fetch(apiUrl('/api/admin/elective/courses'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save elective course');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to save elective course');
+    return (data as { course: ElectiveCourse }).course;
+  },
+
+  async deleteAdminElectiveCourse(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/elective/courses/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete elective course');
+    }
+  },
+
   async getAdminFunctionalRoles(academicYearId: string): Promise<FunctionalRoleAssignment[]> {
     const response = await fetch(
       apiUrl(`/api/admin/functional-roles?academicYearId=${encodeURIComponent(academicYearId)}`),
@@ -1891,6 +2093,7 @@ export const api = {
     term: Term;
     title?: string | null;
     collectionType?: string;
+    targetDepartments?: string[] | null;
   }): Promise<TeacherPortraitCollectionTemplateSummary> {
     const response = await fetch(apiUrl('/api/admin/teacher-portrait/templates'), {
       method: 'POST',
@@ -1907,7 +2110,7 @@ export const api = {
 
   async putAdminTeacherPortraitTemplate(
     templateId: string,
-    input: { title?: string | null },
+    input: { title?: string | null; targetDepartments?: string[] | null },
   ): Promise<TeacherPortraitCollectionTemplateSummary> {
     const response = await fetch(
       apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}`),

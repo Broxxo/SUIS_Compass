@@ -1,25 +1,32 @@
-# 本地项目上传到 Zeabur 时，以下路径/文件不必打包（平台会 npm install 并重新 build）
+# 本地项目上传到 Zeabur 时排除下列路径（平台会 npm install 并重新 build）
+# 目标：只上传源码与 lockfile，不上传依赖、构建产物、压测数据
+
+# 依赖（根目录与各 workspace；Zeabur 会自行 npm install）
 node_modules
+**/node_modules
+
+# Git / IDE
 .git
 .cursor
 **/.DS_Store
 *.log
 
-# 本地密钥与配置（绝不上传）
+# 本地密钥（绝不上传）
 .env
 .env.*
 apps/api/.env
 apps/web/.env
 
-# 本地构建产物（平台会重新 npm run build）
+# 构建产物（Zeabur 会 npm run build）
 dist
 **/dist
 apps/api/public
 apps/api/dist
 
-# 本地 Docker 与开发工具
+# 开发与压测（约 150MB+，运行时不需要）
+tools/
+docs/
+
+# 本地 Docker 与脚本
 docker-compose.yml
 start-local-test.command
-
-# 可选：减小上传体积
-tools/load-tests/.env.local

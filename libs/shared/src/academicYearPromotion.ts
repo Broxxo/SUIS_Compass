@@ -18,6 +18,13 @@ export function suggestNextAcademicYearName(currentName: string): string {
   return `${year}-${year + 1}`;
 }
 
+/** 由当前学年名称推导上一学年名称，如 2026-2027 → 2025-2026 */
+export function suggestPreviousAcademicYearName(currentName: string): string | null {
+  const span = parseAcademicYearSpan(currentName);
+  if (!span) return null;
+  return `${span.start - 1}-${span.end - 1}`;
+}
+
 export function bumpIsoDateByYears(iso: string | null | undefined, years = 1): string | undefined {
   if (!iso) return undefined;
   const d = new Date(iso);

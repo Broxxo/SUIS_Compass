@@ -2,3 +2,4 @@ artifacts/
 output/
 *.log
 .env.local
+credentials.local.json

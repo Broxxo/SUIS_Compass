@@ -32,4 +32,4 @@ dist-ssr
 start-local-test.command
 
 # API static frontend build output (copied from apps/web/dist by npm run build)
-apps/api/public/assets/
+apps/api/public/

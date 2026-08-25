@@ -480,9 +480,9 @@ export default function UnitView({
                                   </div>
                                   
                                   {/* Key Concepts - Following title closely */}
-                                  {unit.keyConcepts.length > 0 && (
+                                  {(unit.keyConcepts ?? []).length > 0 && (
                                     <div className="flex flex-wrap gap-0.5 justify-center mt-1 overflow-hidden">
-                                      {unit.keyConcepts.slice(0, duration > 1 ? 3 : 2).map((concept) => {
+                                      {(unit.keyConcepts ?? []).slice(0, duration > 1 ? 3 : 2).map((concept) => {
                                         const englishPart = concept.includes(' ') ? concept.split(' ').slice(1).join(' ') : concept;
                                         return (
                                           <span
@@ -493,8 +493,8 @@ export default function UnitView({
                                           </span>
                                         );
                                       })}
-                                      {unit.keyConcepts.length > (duration > 1 ? 3 : 2) && (
-                                        <span className="text-[8.5px] text-gray-400 font-medium">+{unit.keyConcepts.length - (duration > 1 ? 3 : 2)}</span>
+                                      {(unit.keyConcepts ?? []).length > (duration > 1 ? 3 : 2) && (
+                                        <span className="text-[8.5px] text-gray-400 font-medium">+{(unit.keyConcepts ?? []).length - (duration > 1 ? 3 : 2)}</span>
                                       )}
                                     </div>
                                   )}
@@ -511,9 +511,9 @@ export default function UnitView({
                                     <div className="text-[11px] leading-relaxed text-white mb-3 bg-white/5 p-2 rounded-lg border border-white/10">
                                       {unit.focus}
                                     </div>
-                                    {unit.keyConcepts.length > 0 && (
+                                    {(unit.keyConcepts ?? []).length > 0 && (
                                       <div className="flex flex-wrap gap-1.5 mt-auto">
-                                        {unit.keyConcepts.map((concept) => {
+                                        {(unit.keyConcepts ?? []).map((concept) => {
                                           const englishPart = concept.includes(' ') ? concept.split(' ').slice(1).join(' ') : concept;
                                           return (
                                             <span key={concept} className="px-2 py-0.5 bg-white/20 text-white rounded text-[9px] border border-white/20">

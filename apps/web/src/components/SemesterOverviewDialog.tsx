@@ -19,6 +19,8 @@ interface SemesterOverviewDialogProps {
   semester: Semester;
   /** 课程河流只读 / 无单元编辑权限时为 true */
   readOnly?: boolean;
+  /** 学期数据写入本地缓存后回调，用于立刻刷新格子深浅色 */
+  onDataLoaded?: () => void;
 }
 
 export default function SemesterOverviewDialog({
@@ -27,6 +29,7 @@ export default function SemesterOverviewDialog({
   course,
   semester,
   readOnly = false,
+  onDataLoaded,
 }: SemesterOverviewDialogProps) {
   const { t, language } = useLanguage();
   const gradeConfig = loadGradeConfigSync();
@@ -38,33 +41,40 @@ export default function SemesterOverviewDialog({
   const [draggedUnitId, setDraggedUnitId] = useState<string | null>(null);
   // Load semester data from localStorage or cloud
   useEffect(() => {
-    if (open && course && semester) {
-      const loadData = async () => {
-        try {
-          const loaded = await loadSemesterData(course.id, semester.grade, semester.semester);
-          if (loaded) {
-            setSemesterData(loaded);
-          } else {
-            setSemesterData({
-              courseId: course.id,
-              grade: semester.grade,
-              semester: semester.semester,
-              units: [],
-            });
-          }
-        } catch (error) {
-          console.error('Failed to load semester data:', error);
-          setSemesterData({
+    if (!open || !course || !semester) {
+      setSemesterData(null);
+      return;
+    }
+    let cancelled = false;
+    const loadData = async () => {
+      try {
+        const loaded = await loadSemesterData(course.id, semester.grade, semester.semester);
+        if (cancelled) return;
+        setSemesterData(
+          loaded ?? {
             courseId: course.id,
             grade: semester.grade,
             semester: semester.semester,
             units: [],
-          });
-        }
-      };
-      loadData();
-    }
-  }, [open, course, semester]);
+          },
+        );
+        onDataLoaded?.();
+      } catch (error) {
+        console.error('Failed to load semester data:', error);
+        if (cancelled) return;
+        setSemesterData({
+          courseId: course.id,
+          grade: semester.grade,
+          semester: semester.semester,
+          units: [],
+        });
+      }
+    };
+    void loadData();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, course, semester, onDataLoaded]);
 
   // Save semester data to localStorage or cloud
   useEffect(() => {
@@ -244,7 +254,7 @@ export default function SemesterOverviewDialog({
 
   if (!semester || !course) return null;
 
-  const sortedUnits = semesterData?.units.sort((a, b) => a.order - b.order) || [];
+  const sortedUnits = [...(semesterData?.units ?? [])].sort((a, b) => a.order - b.order);
   
   const currentWeeklyPeriods = getWeeklyPeriodsForGrade(course, semester.grade, gradeConfig);
 
@@ -380,9 +390,9 @@ export default function SemesterOverviewDialog({
                         <span className="ml-2">{t('semester.periodsLabel')}: {unit.periods} {t('semester.periodsUnit')}</span>
                       </div>
                       {/* Key Concepts - 根据语言显示中文或英文 */}
-                      {unit.keyConcepts.length > 0 && (
+                      {(unit.keyConcepts ?? []).length > 0 && (
                         <div className="flex flex-wrap gap-0.5 justify-end w-full pr-1">
-                          {unit.keyConcepts.map((concept) => {
+                          {(unit.keyConcepts ?? []).map((concept) => {
                             // 根据语言显示中文或英文
                             let displayText: string;
                             if (concept.includes(' ')) {

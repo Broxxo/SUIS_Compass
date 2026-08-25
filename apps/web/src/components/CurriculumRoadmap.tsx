@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
   assignCourseToDomain,
@@ -33,14 +33,13 @@ import {
   saveCourses,
   hasSemesterUnits,
   deleteCourse,
-  loadSemesterDataSync,
-  loadSemesterData,
   loadCategoryOrder,
   loadCourseDomainsSync,
   saveCategoryOrder,
   saveCourseDomains,
   hydrateCourseDomainsFromCloud,
   hydrateCategoryOrderFromCloud,
+  hydrateSemesterCacheFromCloud,
   exportAllData,
   importAllData,
   loadGradeConfig,
@@ -250,7 +249,16 @@ export default function CurriculumRoadmap({
     const loadCoursesData = async () => {
       setIsLoadingCourses(true);
       try {
-        const [loadedCourses, loadedGradeConfig] = await Promise.all([loadCourses(), loadGradeConfig()]);
+        const [loadedCourses, loadedGradeConfig] = await Promise.all([
+          loadCourses(),
+          loadGradeConfig(),
+          USE_CLOUD_STORAGE
+            ? hydrateSemesterCacheFromCloud().catch((err) => {
+                logError('Failed to hydrate semester cache on first load', err);
+                return 0;
+              })
+            : Promise.resolve(0),
+        ]);
         setCourses(migrateCoursesData(loadedCourses));
         setGradeConfig(normalizeGradeConfig(loadedGradeConfig));
       } catch (error) {
@@ -335,6 +343,9 @@ export default function CurriculumRoadmap({
   const [semesterDataRefreshKey, setSemesterDataRefreshKey] = useState(0);
   // 刷新完成后递增，用于真正触发“基于缓存”的重新渲染（格子颜色更新）
   const [semesterCacheVersion, setSemesterCacheVersion] = useState(0);
+  const bumpSemesterCache = useCallback(() => {
+    setSemesterCacheVersion((v) => v + 1);
+  }, []);
   const isRefreshingSemesterCacheRef = useRef(false);
   const courseDataImportInputRef = useRef<HTMLInputElement>(null);
   const [isImportingCourseData, setIsImportingCourseData] = useState(false);
@@ -365,10 +376,10 @@ export default function CurriculumRoadmap({
   }, []);
 
   // 首次进入主界面/页面刷新后：课程加载完成即触发一次刷新（避免必须等30秒）
+  // 学期格子占用已在首次 load 中通过 hydrateSemesterCacheFromCloud 写入；此处仅兜底（例如登录后晚于首屏）
   useEffect(() => {
     if (!USE_CLOUD_STORAGE) return;
     if (isLoadingCourses) return;
-    // 即使课程为空，也触发一次（用于把格子颜色与云端缓存对齐）
     setSemesterDataRefreshKey((k) => k + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoadingCourses]);
@@ -428,20 +439,9 @@ export default function CurriculumRoadmap({
 
     const refreshSemesterData = async () => {
       try {
-        for (const course of courses) {
-          for (const grade of gradeLevels) {
-            for (const semester of SEMESTERS) {
-              // 仅刷新本地已有缓存的学期，避免对不存在的 (course, grade, semester) 发起请求导致大量 404
-              const cached = loadSemesterDataSync(course.id, grade, semester);
-              if (!cached) continue;
-              try {
-                await loadSemesterData(course.id, grade, semester);
-              } catch {
-                // 静默失败，不影响UI
-              }
-            }
-          }
-        }
+        await hydrateSemesterCacheFromCloud();
+      } catch {
+        // 静默失败，不影响UI
       } finally {
         isRefreshingSemesterCacheRef.current = false;
         // 缓存更新完成后，触发一次真正的重渲染（让 hasSemesterUnits 读到最新 localStorage）
@@ -450,7 +450,7 @@ export default function CurriculumRoadmap({
     };
     
     refreshSemesterData();
-  }, [semesterDataRefreshKey, courses, gradeLevels]);
+  }, [semesterDataRefreshKey]);
 
   // Save courses to localStorage or cloud whenever courses change
   // 注意：不要在课程加载期间或课程为空时保存，避免清空已有数据
@@ -1146,7 +1146,11 @@ export default function CurriculumRoadmap({
       {selectedCourse && selectedSemester && (
         <SemesterOverviewDialog
           open={isSemesterDialogOpen}
-          onOpenChange={setIsSemesterDialogOpen}
+          onOpenChange={(open) => {
+            setIsSemesterDialogOpen(open);
+            if (!open) bumpSemesterCache();
+          }}
+          onDataLoaded={bumpSemesterCache}
           course={selectedCourse}
           semester={selectedSemester}
           readOnly={!canEditUnits}
@@ -1321,23 +1325,31 @@ function CategoryColumn({
                       gradeConfig={gradeConfig}
                     />
                   );
-                } else {
-                  // 没有课程覆盖该年级，显示为灰色
+                }
+                if (!defaultCourse) {
                   return (
-                    <SemesterSegment
+                    <div
                       key={`${grade}-${semester}`}
-                      grade={grade}
-                      semester={semester}
-                      color={defaultCourse.color}
-                      hasUnits={false}
-                      isApplicable={false}
-                      onSemesterClick={() => {}}
-                      getSemesterLabel={() => ''}
-                      course={defaultCourse}
-                      gradeConfig={gradeConfig}
-                    />
+                      className="flex-1 relative transition-all duration-200 opacity-50"
+                    >
+                      <div className="absolute inset-0 bg-gray-100 border-r border-b border-gray-300/30" />
+                    </div>
                   );
                 }
+                return (
+                  <SemesterSegment
+                    key={`${grade}-${semester}`}
+                    grade={grade}
+                    semester={semester}
+                    color={defaultCourse.color}
+                    hasUnits={false}
+                    isApplicable={false}
+                    onSemesterClick={() => {}}
+                    getSemesterLabel={() => ''}
+                    course={defaultCourse}
+                    gradeConfig={gradeConfig}
+                  />
+                );
               })}
               {showCellPeriods && course && (
                 <div

@@ -1,6 +1,6 @@
 import type { CourseDomainsConfig } from '@repo/shared';
 import { normalizeCourseDomainsConfig } from '@repo/shared';
-import { Course, GradeConfig, SemesterData } from '../types';
+import { Course, GradeConfig, SemesterData, Unit } from '../types';
 import { STORAGE_KEYS } from './constants';
 import { api, USE_CLOUD_STORAGE } from './api';
 import { getCurrentUserId } from './authUtils';
@@ -19,6 +19,36 @@ export function getSemesterStorageKey(
 ): string {
   const baseKey = `${STORAGE_KEYS.SEMESTER_PREFIX}${courseId}-${grade}-${semester}`;
   return baseKey;
+}
+
+function normalizeUnit(raw: unknown): Unit | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const u = raw as Partial<Unit>;
+  const id = String(u.id ?? '').trim();
+  if (!id) return null;
+  return {
+    id,
+    title: String(u.title ?? ''),
+    focus: String(u.focus ?? ''),
+    keyConcepts: Array.isArray(u.keyConcepts) ? u.keyConcepts.map(String) : [],
+    week: String(u.week ?? ''),
+    periods: typeof u.periods === 'number' && Number.isFinite(u.periods) ? u.periods : 0,
+    order: typeof u.order === 'number' && Number.isFinite(u.order) ? u.order : 0,
+  };
+}
+
+/** 云端/旧缓存学期数据可能缺 units 或 keyConcepts，读时一律补齐，避免格子着色与弹窗白屏 */
+export function normalizeSemesterData(data: SemesterData | null | undefined): SemesterData | null {
+  if (!data) return null;
+  const units = Array.isArray(data.units)
+    ? data.units.map(normalizeUnit).filter((u): u is Unit => u !== null)
+    : [];
+  return {
+    courseId: data.courseId,
+    grade: data.grade,
+    semester: data.semester,
+    units,
+  };
 }
 
 /** 课程 id 因 409 被替换时的映射，供导入时更新学期数据的 courseId */
@@ -191,7 +221,7 @@ export async function loadSemesterData(
   // 如果使用云端存储，优先从云端加载（无 userId 时直接用本地）
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
-      const data = await api.getSemesterData(courseId, grade, semester);
+      const data = normalizeSemesterData(await api.getSemesterData(courseId, grade, semester));
       if (data) {
         // 同时保存到本地作为缓存
         try {
@@ -213,7 +243,7 @@ export async function loadSemesterData(
     const storageKey = getSemesterStorageKey(courseId, grade, semester);
     const stored = localStorage.getItem(storageKey);
     if (stored) {
-      return JSON.parse(stored);
+      return normalizeSemesterData(JSON.parse(stored) as SemesterData);
     }
   } catch (error) {
     logError('Failed to load semester data', error);
@@ -233,7 +263,7 @@ export function loadSemesterDataSync(
     const storageKey = getSemesterStorageKey(courseId, grade, semester);
     const stored = localStorage.getItem(storageKey);
     if (stored) {
-      return JSON.parse(stored);
+      return normalizeSemesterData(JSON.parse(stored) as SemesterData);
     }
   } catch (error) {
     logError('Failed to load semester data', error);
@@ -582,15 +612,30 @@ export function cacheCurriculumDataLocally(data: {
     }
     if (data.semesterData) {
       for (const [key, semesterData] of Object.entries(data.semesterData)) {
+        const normalized = normalizeSemesterData(semesterData);
+        if (!normalized) continue;
         const storageKey = key.startsWith(STORAGE_KEYS.SEMESTER_PREFIX)
           ? key
-          : getSemesterStorageKey(semesterData.courseId, semesterData.grade, semesterData.semester);
-        localStorage.setItem(storageKey, JSON.stringify(semesterData));
+          : getSemesterStorageKey(normalized.courseId, normalized.grade, normalized.semester);
+        localStorage.setItem(storageKey, JSON.stringify(normalized));
       }
     }
   } catch (error) {
     logError('Failed to cache curriculum data locally', error);
   }
+}
+
+/**
+ * 新设备 / 无本地学期缓存时：一次拉全校课程河流学期数据并写入 localStorage，供格子着色与单元视图使用。
+ */
+export async function hydrateSemesterCacheFromCloud(): Promise<number> {
+  if (!USE_CLOUD_STORAGE || !getCurrentUserId()) {
+    return 0;
+  }
+  const data = await api.exportCurriculumData();
+  const semesterData = data.semesterData ?? {};
+  cacheCurriculumDataLocally({ semesterData });
+  return Object.keys(semesterData).length;
 }
 
 /**

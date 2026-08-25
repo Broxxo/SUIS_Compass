@@ -84,7 +84,7 @@ export default function AIChatAssistant({ viewMode, courses, focusSemester }: AI
         if (data && data.units && data.units.length > 0) {
           context += `- 【${course.name}】：\n`;
           data.units.sort((a, b) => a.order - b.order).forEach(unit => {
-            context += `  * Unit ${unit.order + 1}: ${unit.title} (周次: ${unit.week}, 关键概念: ${unit.keyConcepts.join(', ')})\n`;
+            context += `  * Unit ${unit.order + 1}: ${unit.title} (周次: ${unit.week}, 关键概念: ${(unit.keyConcepts ?? []).join(', ')})\n`;
             context += `    核心内容: ${unit.focus}\n`;
           });
         }

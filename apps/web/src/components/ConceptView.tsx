@@ -267,7 +267,7 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
       const semesterData = loadSemesterDataSync(course.id, selectedSemester.grade, selectedSemester.semester);
       if (semesterData && semesterData.units && semesterData.units.length > 0) {
         semesterData.units.forEach((unit) => {
-          unit.keyConcepts.forEach((concept) => {
+          (unit.keyConcepts ?? []).forEach((concept) => {
             const normalized = normalizeConcept(concept);
             if (!conceptMap.has(normalized)) {
               conceptMap.set(normalized, {

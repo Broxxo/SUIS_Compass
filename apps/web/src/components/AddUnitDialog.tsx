@@ -45,7 +45,7 @@ export default function AddUnitDialog({ open, onOpenChange, onAddUnit, onDeleteU
     if (open && editingUnit) {
       setTitle(editingUnit.title);
       setFocus(editingUnit.focus);
-      setSelectedConcepts(editingUnit.keyConcepts);
+      setSelectedConcepts(Array.isArray(editingUnit.keyConcepts) ? editingUnit.keyConcepts : []);
       setWeek(editingUnit.week);
       setPeriods(editingUnit.periods.toString());
       setWeekError('');

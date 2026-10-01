@@ -12,6 +12,7 @@ import aiRoutes from './routes/ai.js';
 import adminRoutes from './routes/admin.js';
 import classesRoutes from './routes/classes.js';
 import classAssistantRoutes from './routes/classAssistant.js';
+import openLessonRoutes from './routes/openLessons.js';
 import { requireValidUser } from './middleware/requireUser.js';
 import { forbidStudentAccounts } from './middleware/forbidStudent.js';
 
@@ -35,6 +36,7 @@ app.use('/api/curriculum', requireValidUser, forbidStudentAccounts, curriculumRo
 app.use('/api/ai', requireValidUser, forbidStudentAccounts, aiRoutes);
 app.use('/api/admin', requireValidUser, forbidStudentAccounts, adminRoutes);
 app.use('/api/classes/assistant', requireValidUser, forbidStudentAccounts, classAssistantRoutes);
+app.use('/api/open-lessons', requireValidUser, forbidStudentAccounts, openLessonRoutes);
 app.use('/api/classes', requireValidUser, classesRoutes);
 
 app.get('/health', (_, res) => {

@@ -6,9 +6,9 @@ import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAIContext } from '../contexts/AIContext';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
+import { latestAcademicYear, useTermForYear } from '../lib/academicPeriodDefault';
 import {
   loadAcademicYears,
-  loadCurrentAcademicYearId,
   loadAllClasses,
   loadStudents,
   loadEnrollments,
@@ -36,7 +36,6 @@ import TeacherPortraitPersonalDashboard from './TeacherPortraitPersonalDashboard
 import TeacherPortraitAdminPersonalDashboard from './TeacherPortraitAdminPersonalDashboard';
 import TeacherPortraitSubjectGroupDashboard from './TeacherPortraitSubjectGroupDashboard';
 import { AcademicYearSelect } from './academicPeriodSelectors';
-import { pickPreferredPublishedTask } from '@repo/shared';
 import {
   buildTeacherPortraitAIPayload,
   type TeacherPortraitSubjectDashboardSlice,
@@ -131,10 +130,14 @@ export default function TeacherPortrait({
   const isAdmin = user?.role === 'system-admin' || user?.role === 'admin';
 
   const [tab, setTab] = useState<PortraitTab>(initialTab ?? (isAdmin ? 'school' : 'dashboard'));
-  const [fillTerm, setFillTerm] = useState<Term>(initialTerm ?? 'Semester 1');
-  const [collectionsVisitSeq, setCollectionsVisitSeq] = useState(0);
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [yearId, setYearId] = useState<string>('');
+  const { term: fillTerm, setTerm: setFillTerm } = useTermForYear(
+    yearId,
+    initialYearId,
+    initialTerm,
+  );
+  const [collectionsVisitSeq, setCollectionsVisitSeq] = useState(0);
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [studentCount, setStudentCount] = useState(0);
   const [teachers, setTeachers] = useState<Array<{ id: string; primarySubject?: string | null }>>([]);
@@ -159,15 +162,14 @@ export default function TeacherPortrait({
     setError(null);
     Promise.all([
       loadAcademicYears(),
-      loadCurrentAcademicYearId(),
       loadAllClasses(),
       loadStudents(),
       loadEnrollments(),
     ])
-      .then(async ([y, current, cls, , enrollments]) => {
+      .then(async ([y, cls, , enrollments]) => {
         if (cancelled) return;
         setYears(y);
-        const yid = initialYearId || current || y[0]?.id || '';
+        const yid = initialYearId || latestAcademicYear(y)?.id || '';
         setYearId(yid);
         setClasses(cls);
         const yearClassIds = new Set(cls.filter((c) => c.academicYearId === yid).map((c) => c.id));
@@ -236,38 +238,6 @@ export default function TeacherPortrait({
       setCollectionsVisitSeq((s) => s + 1);
     }
   }, [tab]);
-
-  useEffect(() => {
-    if (tab !== 'collections' || user?.role !== 'teacher' || !USE_CLOUD_STORAGE || !yearId) return;
-
-    let cancelled = false;
-    Promise.all([
-      api.getTeacherPortraitCollections({ academicYearId: yearId, term: 'Semester 1' }),
-      api.getTeacherPortraitCollections({ academicYearId: yearId, term: 'Semester 2' }),
-    ])
-      .then(([s1, s2]) => {
-        if (cancelled) return;
-        const open = [...s1, ...s2].filter((t) => t.status === 'published' || t.status === 'closed');
-        const picked = pickPreferredPublishedTask(
-          open.map((t) => ({
-            id: t.id,
-            publishedAt: t.publishedAt,
-            updatedAt: t.updatedAt,
-            isComplete: t.mySubmission?.hasContent === true,
-          })),
-        );
-        if (!picked) return;
-        const hit = open.find((t) => t.id === picked.id);
-        if (hit && (hit.term === 'Semester 1' || hit.term === 'Semester 2')) {
-          setFillTerm((prev) => (prev === hit.term ? prev : hit.term));
-        }
-      })
-      .catch(() => {});
-
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, yearId, user?.role, collectionsVisitSeq]);
 
   useEffect(() => {
     if (!isAdmin || !USE_CLOUD_STORAGE || !yearId) return;

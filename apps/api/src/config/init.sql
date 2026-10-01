@@ -781,3 +781,23 @@ CREATE TABLE IF NOT EXISTS elective_courses (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_elective_courses_year_term ON elective_courses(academic_year_id, term);
+
+-- 公开课登记（按学年+学期，全校共享；写权限由角色与学科组长岗位决定）
+CREATE TABLE IF NOT EXISTS open_lessons (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+  group_id VARCHAR(80) NOT NULL,
+  teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lesson_date DATE NOT NULL,
+  time_label VARCHAR(80) NOT NULL,
+  grade_unit_topic VARCHAR(300) NOT NULL,
+  location VARCHAR(200) NOT NULL,
+  remarks TEXT NOT NULL DEFAULT '',
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_open_lessons_year_term
+  ON open_lessons(academic_year_id, term, lesson_date, time_label);

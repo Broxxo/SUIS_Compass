@@ -20,7 +20,8 @@ import type {
   TargetLevel,
   Term,
 } from '../types/classManagement';
-import { loadAcademicYears, loadCurrentAcademicYearId, loadAllClasses, loadStudents, loadEnrollments } from '../lib/classStorage';
+import { loadAcademicYears, loadAllClasses, loadStudents, loadEnrollments } from '../lib/classStorage';
+import { latestAcademicYear, useTermForYear } from '../lib/academicPeriodDefault';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import { fullUnifiedLevelTextFromPreset } from '../lib/reportPresetUnifiedLevels';
 import {
@@ -1156,6 +1157,11 @@ export default function StudentPortrait({
   const [myStudentsLensTab, setMyStudentsLensTab] = useState<PortraitLensTab>('overview');
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [currentYearId, setCurrentYearId] = useState<string | null>(null);
+  const { term: reportTerm, setTerm: setReportTerm, ready: reportTermReady } = useTermForYear(
+    currentYearId ?? '',
+    initialReportYearId,
+    initialReportTerm,
+  );
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
@@ -1165,7 +1171,6 @@ export default function StudentPortrait({
   const [loading, setLoading] = useState(true);
   const [reportLoading, setReportLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [reportTerm, setReportTerm] = useState<Term>('Semester 1');
   const [reportTemplates, setReportTemplates] = useState<ReportTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [reportList, setReportList] = useState<Array<{
@@ -1267,16 +1272,15 @@ export default function StudentPortrait({
     setLoading(true);
     Promise.all([
       loadAcademicYears(),
-      loadCurrentAcademicYearId(),
       loadAllClasses(),
       loadStudents(),
       loadEnrollments(),
       loadGradeConfig(),
     ])
-      .then(([y, current, cls, stu, enr, gc]) => {
+      .then(([y, cls, stu, enr, gc]) => {
         if (cancelled) return;
         setYears(y);
-        setCurrentYearId(current || y[0]?.id || null);
+        setCurrentYearId(initialReportYearId || latestAcademicYear(y)?.id || null);
         setClasses(cls);
         setStudents(stu);
         setEnrollments(enr);
@@ -1292,7 +1296,7 @@ export default function StudentPortrait({
     return () => {
       cancelled = true;
     };
-  }, [isStudentSelf]);
+  }, [isStudentSelf, initialReportYearId]);
 
   useEffect(() => {
     if (!isStudentSelf) return;
@@ -1353,9 +1357,9 @@ export default function StudentPortrait({
     [classes, currentYearId]
   );
 
-  /** 「我的学生」班级列表：固定为校历当前学年（与所选学业报告学年解耦） */
+  /** 「我的学生」班级列表：固定为最新学年（与所选学业报告学年解耦） */
   const schoolCurrentYearIdForMyStudents = useMemo(
-    () => years.find((y) => y.isCurrent)?.id ?? years[0]?.id ?? null,
+    () => latestAcademicYear(years)?.id ?? null,
     [years],
   );
 
@@ -1931,7 +1935,7 @@ export default function StudentPortrait({
   useEffect(() => {
     if (tab !== 'academic-reports') return;
 
-    if (!canAccessAcademicReportsTab || !USE_CLOUD_STORAGE || !currentYearId) {
+    if (!canAccessAcademicReportsTab || !USE_CLOUD_STORAGE || !currentYearId || !reportTermReady) {
       setWorkbenchTemplates([]);
       setWorkbenchTemplateId('');
       setWorkbenchProgress(null);
@@ -1997,21 +2001,16 @@ export default function StudentPortrait({
       try {
         if (shouldAutoPickOnEnter) {
           lastWorkbenchAutoPickSeqRef.current = academicReportsVisitSeq;
-          const [s1, s2] = await Promise.all([
-            api.getReportTemplatesForTerm(currentYearId, 'Semester 1'),
-            api.getReportTemplatesForTerm(currentYearId, 'Semester 2'),
-          ]);
+          const list = await api.getReportTemplatesForTerm(currentYearId, reportTerm);
           if (cancelled) return;
 
           const picked = isTeacherSelfServe
-            ? await pickTeacherTemplateWithProgress([...s1, ...s2])
-            : pickNewestPublishedTemplate([...s1, ...s2]);
+            ? await pickTeacherTemplateWithProgress(list)
+            : pickNewestPublishedTemplate(list);
           if (cancelled) return;
 
           if (picked?.id) {
-            const termList = picked.term === 'Semester 2' ? s2 : s1;
-            setReportTerm(picked.term);
-            setWorkbenchTemplates(filterEligible(termList));
+            setWorkbenchTemplates(filterEligible(list));
             setWorkbenchTemplateId(picked.id);
             return;
           }
@@ -2064,6 +2063,7 @@ export default function StudentPortrait({
     canAccessAcademicReportsTab,
     currentYearId,
     reportTerm,
+    reportTermReady,
     tab,
     user?.role,
     workbenchAdminViewing,

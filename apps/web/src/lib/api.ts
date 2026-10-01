@@ -1,4 +1,5 @@
 import type { CourseDomainsConfig, TeachingResearchGroup, TeachingSubjectGroup, SelfStudyModule, SelfStudySlot, SelfStudyGradeConfig, ElectiveScheduleConfig, ElectiveCourse } from '@repo/shared';
+import type { OpenLesson, OpenLessonBoard, OpenLessonInput } from '../types/openLesson';
 import { normalizeCourseDomainsConfig } from '@repo/shared';
 import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
@@ -768,6 +769,13 @@ export const api = {
     if (!response.ok) throw new Error('Failed to fetch academic years');
     const data = await response.json();
     return (data.years ?? data) as AcademicYear[];
+  },
+
+  async getAcademicPeriodUsage(academicYearId: string): Promise<{ academicYearId: string; semester2InUse: boolean }> {
+    const q = new URLSearchParams({ academicYearId });
+    const response = await fetch(apiUrl(`/api/classes/academic-period-usage?${q}`), { headers: getHeaders() });
+    if (!response.ok) throw new Error('Failed to fetch academic period usage');
+    return response.json() as Promise<{ academicYearId: string; semester2InUse: boolean }>;
   },
 
   async getCurrentAcademicYear(): Promise<AcademicYear | null> {
@@ -2304,6 +2312,55 @@ export const api = {
     }
     const data = await readJsonOrThrow(response, 'Failed to fetch subject group dashboard');
     return (data as { dashboard: import('../types/classManagement').SubjectGroupPortraitDashboard }).dashboard;
+  },
+
+  async getOpenLessonBoard(academicYearId: string, term: Term): Promise<OpenLessonBoard> {
+    const q = new URLSearchParams({ academicYearId, term });
+    const response = await fetch(apiUrl(`/api/open-lessons?${q.toString()}`), { headers: getHeaders() });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
+    return readJsonOrThrow(response, 'internal') as Promise<OpenLessonBoard>;
+  },
+
+  async createOpenLesson(input: OpenLessonInput): Promise<OpenLesson> {
+    const response = await fetch(apiUrl('/api/open-lessons'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
+    const data = await readJsonOrThrow(response, 'internal');
+    return (data as { lesson: OpenLesson }).lesson;
+  },
+
+  async updateOpenLesson(id: string, input: OpenLessonInput): Promise<OpenLesson> {
+    const response = await fetch(apiUrl(`/api/open-lessons/${encodeURIComponent(id)}`), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
+    const data = await readJsonOrThrow(response, 'internal');
+    return (data as { lesson: OpenLesson }).lesson;
+  },
+
+  async deleteOpenLesson(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/open-lessons/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
   },
 };
 

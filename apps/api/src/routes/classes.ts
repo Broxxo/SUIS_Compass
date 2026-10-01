@@ -1,5 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import pool from '../config/database.js';
+import { isSemester2InUse } from '../lib/academicPeriodDefault.js';
 import { buildAcademicYearPromotionPreview, promoteAcademicYearToNext, buildAcademicYearUndoPreview, undoAcademicYearPromotion, prepareAcademicYearPromotionDependencies } from '../lib/academicYearPromotion.js';
 import { setCanonicalConfigAcademicYearId, resolveConfigAcademicYearId } from '../lib/canonicalAcademicConfig.js';
 import { ensureClassArchiveColumns } from '../lib/classArchiveColumns.js';
@@ -1127,6 +1128,7 @@ router.use(async (req: Request, res: Response, next: NextFunction) => {
   const path = req.path;
   if (
     path === '/students' ||
+    path === '/academic-period-usage' ||
     path === '/profile/modules' ||
     /^\/profile\/students\/[^/]+\/values$/.test(path) ||
     /^\/reports\/templates\/[^/]+\/[^/]+$/.test(path) ||
@@ -1156,6 +1158,21 @@ router.get('/academic-years', async (req: ReqWithUserId, res: Response) => {
     res.json({ years });
   } catch (e) {
     console.error('get academic-years', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/academic-period-usage', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const academicYearId = String(req.query.academicYearId || '').trim();
+    if (!academicYearId) {
+      res.status(400).json({ error: 'academicYearId required' });
+      return;
+    }
+    const semester2InUse = await isSemester2InUse(academicYearId);
+    res.json({ academicYearId, semester2InUse });
+  } catch (e) {
+    console.error('get academic-period-usage', e);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

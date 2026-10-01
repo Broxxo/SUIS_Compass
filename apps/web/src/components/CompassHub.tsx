@@ -36,7 +36,8 @@ type HubView =
   | 'student-portrait'
   | 'teacher-portrait'
   | 'academic-reports'
-  | 'class-assistant';
+  | 'class-assistant'
+  | 'open-lessons';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
 const tileBase =
@@ -52,6 +53,7 @@ type HubTileId =
   | 'student-portrait'
   | 'teacher-portrait'
   | 'academic-reports'
+  | 'open-lessons'
   | `placeholder-${number}`;
 
 type HubTile = {
@@ -400,7 +402,25 @@ export default function CompassHub({
         ? [{ id: 'teacher-todos' as const, kind: 'widget' as const, spanX: 1 as const, spanY: 1 as const, fontSize: '0.75rem' }]
         : []),
       { id: 'placeholder-1', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
-      { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      {
+        id: 'open-lessons',
+        kind: 'app',
+        view: 'open-lessons',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #3b82f6 0%, #1d4ed8 50%, #1e3a8a 100%)',
+          boxShadow: '0 6px 16px -2px rgba(29, 78, 216, 0.35), inset 0 1px 0 rgba(255,255,255,0.22)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '公开课' : 'Open'}</span>
+            {zh ? null : <span>Lessons</span>}
+          </span>
+        ),
+      },
 
       {
         id: 'teacher-portrait',

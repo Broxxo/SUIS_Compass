@@ -8,6 +8,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { AIContextProvider, useAIContext } from './contexts/AIContext'
 import AdminPanel from './components/AdminPanel'
 import ClassAssistant from './components/ClassAssistant'
+import OpenLessons from './components/OpenLessons'
 import StudentPortrait from './components/StudentPortrait'
 import TeacherPortrait from './components/TeacherPortrait'
 import type { HubPortraitNavigation } from './types/hubNavigation'
@@ -19,6 +20,7 @@ type HubView =
   | 'teacher-portrait'
   | 'academic-reports'
   | 'class-assistant'
+  | 'open-lessons'
   | 'admin';
 
 const MOBILE_BREAKPOINT = 768;
@@ -146,6 +148,10 @@ function AppContent() {
 
   if (view === 'class-assistant') {
     return <ClassAssistant onBackToHub={() => setView('hub')} />
+  }
+
+  if (view === 'open-lessons') {
+    return <OpenLessons onBackToHub={() => setView('hub')} />
   }
 
   if (view === 'student-portrait' || view === 'academic-reports') {

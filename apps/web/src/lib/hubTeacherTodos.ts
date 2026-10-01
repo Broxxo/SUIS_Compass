@@ -5,7 +5,8 @@ import {
   type TeacherPortraitCollectionType,
 } from '@repo/shared';
 import { api, USE_CLOUD_STORAGE } from './api';
-import { loadAcademicYears, loadCurrentAcademicYearId } from './classStorage';
+import { loadAcademicYears } from './classStorage';
+import { latestAcademicYear } from './academicPeriodDefault';
 import type { HubTeacherTodoItem } from '../types/hubNavigation';
 import type { Term } from '../types/classManagement';
 
@@ -20,9 +21,10 @@ function collectionTypeFromRaw(raw: string): TeacherPortraitCollectionType {
 }
 
 async function resolveHubTodoYearContext(isZh: boolean) {
-  const [years, currentYearId] = await Promise.all([loadAcademicYears(), loadCurrentAcademicYearId()]);
-  const yearId = currentYearId || years[0]?.id || '';
-  const yearName = years.find((y) => y.id === yearId)?.name?.trim() || (isZh ? '本学年' : 'This year');
+  const years = await loadAcademicYears();
+  const year = latestAcademicYear(years);
+  const yearId = year?.id || '';
+  const yearName = year?.name?.trim() || (isZh ? '本学年' : 'This year');
   return { yearId, yearName };
 }
 

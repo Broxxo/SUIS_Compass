@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ClassItem, ClassGroup, ClassGroupMembership, ClassGroupScheme, Student } from '../../types/classManagement'
 import {
-  getCurrentAcademicYearId,
+  loadAcademicYears,
   loadAllClasses,
   loadAllClassesSync,
   loadEnrollments,
@@ -27,6 +27,7 @@ import {
   loadClassAssistantFromCloud,
 } from '../../lib/classStorage'
 import { playAddSound, playMinusSound, isFeedbackSoundEnabled, setFeedbackSoundEnabled } from '../../lib/feedbackSound'
+import { latestAcademicYear } from '../../lib/academicPeriodDefault'
 import { STORAGE_KEYS } from '../../lib/constants'
 
 function getLastSelectedClassId(): string | null {
@@ -45,7 +46,7 @@ function setLastSelectedClassId(id: string | null): void {
 }
 
 export function useClassAssistantData(user: { id: string; role: string } | null, isZh: boolean) {
-  const currentYearId = getCurrentAcademicYearId()
+  const [currentYearId, setCurrentYearId] = useState<string | null>(null)
   const [dataVersion, setDataVersion] = useState(0)
 
   const allClasses = useMemo<ClassItem[]>(() => {
@@ -71,6 +72,17 @@ export function useClassAssistantData(user: { id: string; role: string } | null,
   }
 
   // 课堂助手依赖班级/学生/学籍数据：进入后先从云端拉取写入本地缓存，避免教师端看到空数据
+  useEffect(() => {
+    if (!user) return
+    let cancelled = false
+    loadAcademicYears().then((years) => {
+      if (!cancelled) setCurrentYearId(latestAcademicYear(years)?.id ?? null)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id])
+
   useEffect(() => {
     if (!user) return
     let cancelled = false

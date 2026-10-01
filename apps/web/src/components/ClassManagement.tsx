@@ -9,11 +9,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { AcademicYear, ClassItem, Student, Enrollment } from '../types/classManagement';
+import { latestAcademicYear } from '../lib/academicPeriodDefault';
 import {
   loadAcademicYears,
-  loadCurrentAcademicYearId,
   setCurrentAcademicYearId,
-  getCurrentAcademicYearId,
   loadClasses,
   loadClassesSync,
   loadStudents,
@@ -132,17 +131,11 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
     setNewClassGrade((prev) =>
       normalizedGc.items.some((item) => item.level === prev) ? prev : (normalizedGc.items[0]?.level ?? 1),
     );
-    const cur = await loadCurrentAcademicYearId();
-    if (cur) setCurrentYearId(cur);
-    else if (list.length > 0) {
-      if (!getCurrentAcademicYearId()) setCurrentAcademicYearId(list[0].id);
-      setCurrentYearId(list[0].id);
-    }
-    const yid = cur || list[0]?.id || null;
+    const yid = latestAcademicYear(list)?.id ?? null;
+    setCurrentYearId(yid);
     if (yid) {
       const cls = await loadClasses(yid);
       setClasses(cls);
-      setCurrentYearId(yid);
     } else {
       setClasses([]);
     }
@@ -236,7 +229,6 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
     try {
       await deleteAcademicYear(y.id);
       await refresh();
-      if (currentYearId === y.id) setCurrentYearId(getCurrentAcademicYearId());
       setDialogYearManagement(false);
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Failed to delete year');

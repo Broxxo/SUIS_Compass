@@ -41,6 +41,7 @@ import {
   importStudentAccounts,
 } from '../lib/adminStorage';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
+import { latestAcademicYear, useTermForYear } from '../lib/academicPeriodDefault';
 import {
   loadAcademicYears,
   loadCurrentAcademicYearId,
@@ -771,9 +772,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [studentCurrentYearId, setStudentCurrentYearId] = useState<string | null>(null);
   const [dialogCreateStudent, setDialogCreateStudent] = useState(false);
   const [reportSettingYearId, setReportSettingYearId] = useState<string>('');
-  const [reportSettingTerm, setReportSettingTerm] = useState<Term>('Semester 1');
+  const { term: reportSettingTerm, setTerm: setReportSettingTerm, ready: reportSettingTermReady } = useTermForYear(reportSettingYearId);
   const [teacherPortraitSettingYearId, setTeacherPortraitSettingYearId] = useState<string>('');
-  const [teacherPortraitSettingTerm, setTeacherPortraitSettingTerm] = useState<Term>('Semester 1');
+  const { term: teacherPortraitSettingTerm, setTerm: setTeacherPortraitSettingTerm } = useTermForYear(teacherPortraitSettingYearId);
   const [teacherPortraitSettingLoading, setTeacherPortraitSettingLoading] = useState(false);
   const [reportSettingStatus, setReportSettingStatus] = useState<ReportTemplateStatus>('draft');
   const [reportSettingHomeroomCommentMode, setReportSettingHomeroomCommentMode] = useState<HomeroomCommentMode>('optional');
@@ -1114,8 +1115,9 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     const cur = await loadCurrentAcademicYearId();
     if (cur) setCurrentYearId(cur);
     else if (list.length > 0) {
-      if (!getCurrentAcademicYearId()) setCurrentAcademicYearId(list[0].id);
-      setCurrentYearId(list[0].id);
+      const fallback = latestAcademicYear(list)?.id || list[0].id;
+      if (!getCurrentAcademicYearId()) setCurrentAcademicYearId(fallback);
+      setCurrentYearId(fallback);
     }
   };
 
@@ -1735,20 +1737,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       return;
     }
     setReportSettingLoading(true);
-    Promise.all([loadAcademicYears(), loadCurrentAcademicYearId()])
-      .then(([list, cur]) => {
+    loadAcademicYears()
+      .then((list) => {
         setYears(list);
-        const id = cur || list[0]?.id || '';
+        const id = latestAcademicYear(list)?.id || '';
         setReportSettingYearId(id);
-        if (id) {
-          return Promise.all([
-            loadReportTemplateList(id, reportSettingTerm),
-            loadReportYearDimensionPreset(id),
-          ]);
-        }
+        if (id) return loadReportYearDimensionPreset(id);
       })
       .finally(() => setReportSettingLoading(false));
-  }, [adminTab, loadReportYearDimensionPreset, reportSettingTerm]);
+  }, [adminTab, loadReportYearDimensionPreset]);
 
   useEffect(() => {
     if (adminTab !== 'teacher-portrait-settings') return;
@@ -1757,20 +1754,20 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       return;
     }
     setTeacherPortraitSettingLoading(true);
-    Promise.all([loadAcademicYears(), loadCurrentAcademicYearId()])
-      .then(([list, cur]) => {
+    loadAcademicYears()
+      .then((list) => {
         setYears(list);
-        setTeacherPortraitSettingYearId(cur || list[0]?.id || '');
+        setTeacherPortraitSettingYearId(latestAcademicYear(list)?.id || '');
       })
       .finally(() => setTeacherPortraitSettingLoading(false));
   }, [adminTab]);
 
   useEffect(() => {
-    if (adminTab !== 'report-settings' || !reportSettingYearId) return;
+    if (adminTab !== 'report-settings' || !reportSettingYearId || !reportSettingTermReady) return;
     if (!USE_CLOUD_STORAGE) return;
     void loadReportTemplateList(reportSettingYearId, reportSettingTerm);
     void loadReportYearDimensionPreset(reportSettingYearId);
-  }, [reportSettingYearId, reportSettingTerm, adminTab, loadReportYearDimensionPreset]);
+  }, [reportSettingYearId, reportSettingTerm, reportSettingTermReady, adminTab, loadReportYearDimensionPreset]);
 
   useEffect(() => {
     if (!USE_CLOUD_STORAGE || !reportSettingYearId) {
@@ -1861,13 +1858,12 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       loadStudents(),
       loadAcademicYears(),
       loadAllClasses(),
-      loadCurrentAcademicYearId(),
-    ]).then(([stList, yList, clsList, curYearId]) => {
+    ]).then(([stList, yList, clsList]) => {
       setStudents(stList);
       setAllYears(yList);
       setAllClasses(clsList);
       setEnrollments(loadEnrollmentsSync());
-      setStudentCurrentYearId(curYearId || (yList.length > 0 ? yList[0].id : null));
+      setStudentCurrentYearId(latestAcademicYear(yList)?.id ?? null);
     }).finally(() => setStudentLoading(false));
   }, [adminTab]);
 
@@ -1877,20 +1873,19 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     Promise.all([
       loadAcademicYears(),
       loadAllClasses(),
-      loadCurrentAcademicYearId(),
       USE_CLOUD_STORAGE ? api.getCourses() : Promise.resolve([] as Course[]),
       loadUsers('staff'),
       USE_CLOUD_STORAGE
         ? api.getSchoolTeachingSubjectGroups()
         : Promise.resolve([] as TeachingSubjectGroup[]),
     ])
-      .then(async ([yList, clsList, curYearId, courseList, userList, subjectGroups]) => {
+      .then(async ([yList, clsList, courseList, userList, subjectGroups]) => {
         setAllYears(yList);
         setAllClasses(clsList);
         setStaffingCourses(courseList.filter(isCourseIncludedInStaffing));
         setStaffingTeachers(userList.filter((u) => u.role === 'teacher'));
         setTeachingSubjectGroups(subjectGroups);
-        const id = curYearId || yList[0]?.id || '';
+        const id = latestAcademicYear(yList)?.id || '';
         setStaffingYearId(id);
         if (id && USE_CLOUD_STORAGE) {
           const [assignments, functionalRoles, members, selfStudyBundle, electiveBundle] = await Promise.all([

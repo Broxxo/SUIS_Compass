@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTermForYear } from '../lib/academicPeriodDefault';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import { buildTeacherPersonalAssignments } from '../lib/teacherPortraitStats';
-import type { AcademicYear, ClassItem, StaffingAssignment, Term } from '../types/classManagement';
+import type { AcademicYear, ClassItem, StaffingAssignment } from '../types/classManagement';
 import {
   AcademicYearSelectField,
   FilterField,
@@ -31,7 +32,7 @@ export default function TeacherPortraitAdminPersonalDashboard({
   classById: Map<string, ClassItem>;
   teachers: Array<{ id: string; primarySubject?: string | null }>;
 }) {
-  const [term, setTerm] = useState<Term>('Semester 1');
+  const { term, setTerm } = useTermForYear(yearId);
   const [teacherId, setTeacherId] = useState('');
   const [teacherOptions, setTeacherOptions] = useState<TeacherOption[]>([]);
   const [loadingTeachers, setLoadingTeachers] = useState(false);

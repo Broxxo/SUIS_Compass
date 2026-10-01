@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTermForYear } from '../lib/academicPeriodDefault';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import {
   ALL_SUBJECTS_PORTRAIT_GROUP_ID,
@@ -6,7 +7,6 @@ import {
   type SubjectGroupDataSource,
   type SubjectGroupPortraitDashboard,
   type SubjectGroupPortraitSummary,
-  type Term,
 } from '../types/classManagement';
 import {
   AcademicYearSelectField,
@@ -51,7 +51,7 @@ export default function TeacherPortraitSubjectGroupDashboard({
   onYearIdChange: (id: string) => void;
   onAIContextChange?: (slice: TeacherPortraitSubjectDashboardSlice | null) => void;
 }) {
-  const [term, setTerm] = useState<Term>('Semester 1');
+  const { term, setTerm } = useTermForYear(yearId);
   const [selectedSourceKey, setSelectedSourceKey] = useState('');
   const [sourceOptions, setSourceOptions] = useState<SourceOption[]>([]);
   const [groups, setGroups] = useState<SubjectGroupPortraitSummary[]>([]);

@@ -185,6 +185,27 @@
     border-radius: 3px;
   }
 
+  /* 提醒事项：只显示滚动条滑块，轨道不另铺灰色底 */
+  .hub-todos-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100, 116, 139, 0.55) transparent;
+  }
+  .hub-todos-scroll::-webkit-scrollbar {
+    width: 6px;
+    background: transparent;
+  }
+  .hub-todos-scroll::-webkit-scrollbar-track,
+  .hub-todos-scroll::-webkit-scrollbar-track-piece {
+    background: transparent;
+  }
+  .hub-todos-scroll::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.5);
+    border-radius: 999px;
+  }
+  .hub-todos-scroll::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
   .no-scrollbar::-webkit-scrollbar {
     display: none;
   }

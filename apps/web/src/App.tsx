@@ -8,6 +8,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { AIContextProvider, useAIContext } from './contexts/AIContext'
 import AdminPanel from './components/AdminPanel'
 import ClassAssistant from './components/ClassAssistant'
+import HubMoreApps from './components/HubMoreApps'
 import OpenLessons from './components/OpenLessons'
 import StudentPortrait from './components/StudentPortrait'
 import TeacherPortrait from './components/TeacherPortrait'
@@ -21,6 +22,7 @@ type HubView =
   | 'academic-reports'
   | 'class-assistant'
   | 'open-lessons'
+  | 'more'
   | 'admin';
 
 const MOBILE_BREAKPOINT = 768;
@@ -146,12 +148,33 @@ function AppContent() {
     return <AdminPanel onBackToHub={() => setView('hub')} />;
   }
 
+  if (view === 'more') {
+    return (
+      <HubMoreApps
+        onBack={() => setView('hub')}
+        onOpen={(next) => setView(next)}
+      />
+    );
+  }
+
   if (view === 'class-assistant') {
-    return <ClassAssistant onBackToHub={() => setView('hub')} />
+    return <ClassAssistant onBackToHub={() => setView('more')} />
   }
 
   if (view === 'open-lessons') {
-    return <OpenLessons onBackToHub={() => setView('hub')} />
+    const nav = portraitNav?.view === 'open-lessons' ? portraitNav : null;
+    return (
+      <OpenLessons
+        onBackToHub={() => {
+          setPortraitNav(null);
+          setView('hub');
+        }}
+        initialYearId={nav?.academicYearId}
+        initialTerm={nav?.term}
+        initialLessonKind={nav?.lessonKind}
+        initialLessonId={nav?.lessonId}
+      />
+    );
   }
 
   if (view === 'student-portrait' || view === 'academic-reports') {

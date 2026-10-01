@@ -9,6 +9,7 @@ import { loadAcademicYears } from './classStorage';
 import { latestAcademicYear } from './academicPeriodDefault';
 import type { HubTeacherTodoItem } from '../types/hubNavigation';
 import type { Term } from '../types/classManagement';
+import type { OpenLesson } from '../types/openLesson';
 
 function termLabel(term: Term, isZh: boolean): string {
   if (term === 'Semester 1') return isZh ? '上学期' : 'Semester 1';
@@ -26,6 +27,82 @@ async function resolveHubTodoYearContext(isZh: boolean) {
   const yearId = year?.id || '';
   const yearName = year?.name?.trim() || (isZh ? '本学年' : 'This year');
   return { yearId, yearName };
+}
+
+function localDateKey(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function timeStartMinutes(text: string): number {
+  const match = text.match(/(\d{1,2})\s*[:：]\s*(\d{2})/);
+  if (!match) return Number.POSITIVE_INFINITY;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function nearbyDayLabel(lessonDate: string, today: string, isZh: boolean): string {
+  if (lessonDate === today) return isZh ? '今天' : 'Today';
+  return isZh ? '明天' : 'Tomorrow';
+}
+
+/** 学科组名取一个学科，例如「小学英语组」→「英语」 */
+function openLessonSubjectLabel(groupNameZh: string): string {
+  return groupNameZh.trim().replace(/^(小学|初中|高中)/, '').replace(/组$/, '').trim();
+}
+
+/** 只取开始钟点，例如 09:00-09:40 → 09:00 */
+function lessonStartClock(timeText: string): string {
+  const match = timeText.match(/(\d{1,2})\s*[:：]\s*(\d{2})/);
+  if (!match) {
+    return timeText.trim().split(/\s*[-–—~～至]\s*/)[0]?.trim() ?? '';
+  }
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+}
+
+/** 今日、明日的公开课，按日期和时间由近到远。日常课由接口按创建者和上课教师过滤。 */
+async function fetchNearbyOpenLessons(yearId: string, isZh: boolean): Promise<HubTeacherTodoItem[]> {
+  const today = localDateKey(new Date());
+  const tomorrowDate = new Date();
+  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+  const tomorrow = localDateKey(tomorrowDate);
+  const lists = await Promise.all(
+    (['Semester 1', 'Semester 2'] as const).map((term) =>
+      api.listOpenLessonsForTerm(yearId, term).catch(() => [] as OpenLesson[]),
+    ),
+  );
+  const lessons = lists
+    .flat()
+    .filter((lesson) => lesson.lessonDate === today || lesson.lessonDate === tomorrow)
+    .sort((a, b) => {
+      const byDate = a.lessonDate.localeCompare(b.lessonDate);
+      if (byDate !== 0) return byDate;
+      const byTime = timeStartMinutes(a.timeText) - timeStartMinutes(b.timeText);
+      if (byTime !== 0) return byTime;
+      return a.gradeUnitTopic.localeCompare(b.gradeUnitTopic, 'zh');
+    });
+  return lessons.map((lesson) => {
+    const teacher = (isZh ? lesson.teacherNameZh : lesson.teacherNameEn).trim() || lesson.teacherNameZh || lesson.teacherNameEn;
+    const when = `${nearbyDayLabel(lesson.lessonDate, today, isZh)} ${lessonStartClock(lesson.timeText)}`.trim();
+    const subject = openLessonSubjectLabel(lesson.groupNameZh);
+    const className = lesson.className.trim();
+    const location = lesson.location.trim();
+    const classPlace = className && location ? `${className}(${location})` : className || location;
+    const label = [when, subject, teacher, classPlace].filter((part) => part.trim()).join(' ');
+    return {
+      key: `open-lesson-${lesson.id}`,
+      label,
+      subtitle: '',
+      publishedAt: null,
+      target: {
+        type: 'open-lesson' as const,
+        academicYearId: lesson.academicYearId,
+        term: lesson.term,
+        lessonKind: lesson.lessonKind,
+        lessonId: lesson.id,
+      },
+    };
+  });
 }
 
 function sortHubTodoItems(items: HubTeacherTodoItem[]): HubTeacherTodoItem[] {
@@ -107,7 +184,9 @@ export async function fetchHubTeacherTodos(isZh: boolean): Promise<HubTeacherTod
     }
   }
 
-  return sortHubTodoItems(items);
+  const tasks = sortHubTodoItems(items);
+  const lessons = await fetchNearbyOpenLessons(yearId, isZh);
+  return [...tasks, ...lessons];
 }
 
 /** 管理员：全校仍有未完成进度的已发布任务 */
@@ -185,5 +264,7 @@ export async function fetchHubAdminTodos(isZh: boolean): Promise<HubTeacherTodoI
     });
   }
 
-  return sortHubTodoItems(items);
+  const tasks = sortHubTodoItems(items);
+  const lessons = await fetchNearbyOpenLessons(yearId, isZh);
+  return [...tasks, ...lessons];
 }

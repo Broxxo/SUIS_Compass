@@ -10,23 +10,32 @@ import { Input } from './ui/input';
 import {
   AcademicYearSelect,
   FilterField,
+  FilterSelect,
   FilterToolbar,
   TermSelect,
 } from './academicPeriodSelectors';
 import { useLanguage } from '../contexts/LanguageContext';
 import { api } from '../lib/api';
+import { downloadOpenLessonWorkbook, parseOpenLessonWorkbook } from '../lib/openLessonExcel';
 import { latestAcademicYear, useTermForYear } from '../lib/academicPeriodDefault';
 import { sortAcademicYearsByYear } from '../lib/classStorage';
-import type { AcademicYear } from '../types/classManagement';
+import type { AcademicYear, Term } from '../types/classManagement';
 import type {
   OpenLesson,
   OpenLessonBoard,
+  OpenLessonClassOption,
   OpenLessonGroupOption,
+  OpenLessonImportIssue,
+  OpenLessonKind,
   OpenLessonStaffOption,
 } from '../types/openLesson';
 
 interface OpenLessonsProps {
   onBackToHub?: () => void;
+  initialYearId?: string;
+  initialTerm?: Term;
+  initialLessonKind?: OpenLessonKind;
+  initialLessonId?: string;
 }
 
 type SheetRow = {
@@ -34,6 +43,8 @@ type SheetRow = {
   id: string | null;
   groupId: string;
   teacherId: string;
+  classId: string;
+  className: string;
   lessonDate: string;
   timeText: string;
   gradeUnitTopic: string;
@@ -59,7 +70,7 @@ type LessonSort = { key: SortKey; dir: SortDir };
 
 type SavedFields = Pick<
   SheetRow,
-  'groupId' | 'teacherId' | 'lessonDate' | 'timeText' | 'gradeUnitTopic' | 'location' | 'remarks'
+  'groupId' | 'teacherId' | 'classId' | 'lessonDate' | 'timeText' | 'gradeUnitTopic' | 'location' | 'remarks'
 >;
 
 /** 取时间段的开始时刻。08:20–09:00 按 08:20 排，早的在上面。 */
@@ -99,6 +110,7 @@ function rowSnapshot(row: SheetRow): SavedFields {
   return {
     groupId: row.groupId,
     teacherId: row.teacherId,
+    classId: row.classId,
     lessonDate: row.lessonDate,
     timeText: row.timeText.trim(),
     gradeUnitTopic: row.gradeUnitTopic.trim(),
@@ -111,6 +123,7 @@ function sameSnapshot(a: SavedFields, b: SavedFields): boolean {
   return (
     a.groupId === b.groupId &&
     a.teacherId === b.teacherId &&
+    a.classId === b.classId &&
     a.lessonDate === b.lessonDate &&
     a.timeText === b.timeText &&
     a.gradeUnitTopic === b.gradeUnitTopic &&
@@ -129,6 +142,8 @@ function lessonToRow(lesson: OpenLesson): SheetRow {
     id: lesson.id,
     groupId: lesson.groupId,
     teacherId: lesson.teacherId,
+    classId: lesson.classId,
+    className: lesson.className,
     lessonDate: lesson.lessonDate,
     timeText: lesson.timeText,
     gradeUnitTopic: lesson.gradeUnitTopic,
@@ -165,11 +180,23 @@ function rowReady(row: SheetRow): boolean {
   return Boolean(
     row.groupId &&
       row.teacherId &&
+      row.classId &&
       row.lessonDate &&
       row.timeText.trim() &&
       row.gradeUnitTopic.trim() &&
       row.location.trim(),
   );
+}
+
+const LESSON_KIND_OPTIONS: OpenLessonKind[] = ['group', 'routine', 'school'];
+
+function lessonKindLabel(kind: OpenLessonKind, isZh: boolean): string {
+  const copy: Record<OpenLessonKind, [string, string]> = {
+    group: ['组内公开课', 'Group open lesson'],
+    routine: ['日常课', 'Daily lesson'],
+    school: ['校级公开课', 'School open lesson'],
+  };
+  return isZh ? copy[kind][0] : copy[kind][1];
 }
 
 function errorText(code: string, isZh: boolean): string {
@@ -178,21 +205,45 @@ function errorText(code: string, isZh: boolean): string {
     year_required: ['请选择学年', 'Choose an academic year'],
     year_not_found: ['找不到这个学年', 'Academic year not found'],
     term_invalid: ['请选择学期', 'Choose a term'],
+    kind_invalid: ['请选择公开课类型', 'Choose a lesson type'],
     group_required: ['请选择组别', 'Choose a group'],
     teacher_required: ['请选择教师', 'Choose a teacher'],
+    class_required: ['请选择班级', 'Choose a class'],
+    class_not_found: ['这个班级不在本学年的班级管理里', 'This class is not in class management for this year'],
     date_required: ['请填写日期', 'Enter a date'],
     time_required: ['请填写时间', 'Enter a time'],
-    topic_required: ['请填写年级-单元-课题', 'Enter the grade, unit and topic'],
+    topic_required: ['请填写学期-单元-课题', 'Enter the term, unit and topic'],
     location_required: ['请填写上课地点', 'Enter a location'],
     field_too_long: ['有一项内容太长', 'One of the fields is too long'],
     assign_forbidden: ['不能把这节课登记给这个组别或这位教师', 'You cannot assign this lesson to that group or teacher'],
+    school_add_forbidden: ['只有学科组长和管理员可以添加校级公开课', 'Only subject heads and admins can add a school open lesson'],
     forbidden: ['没有权限修改这条公开课', 'You cannot change this open lesson'],
+    import_forbidden: ['本学期还有你不能修改的公开课，所以不能整表导入', 'This term includes lessons you cannot change, so the sheet cannot replace them'],
+    no_rows: ['表格里没有可导入的公开课', 'The sheet has no open lessons to import'],
+    empty_sheet: ['这个表格是空的', 'This workbook is empty'],
+    file_unreadable: ['读不了这个文件，请使用导出的 xlsx 表格', 'This file could not be read. Use the exported xlsx workbook'],
+    header_missing: ['表头需要包含：类型、组别、教师、班级、日期、时间、学期-单元-课题、上课地点、备注', 'The header must include type, group, teacher, class, date, time, topic, location and remarks'],
+    group_not_found: ['找不到这个组别', 'Group not found'],
+    group_ambiguous: ['这个组别对应了多个组', 'This group name matches more than one group'],
+    teacher_not_found: ['找不到这位教师', 'Teacher not found'],
+    teacher_ambiguous: ['这个姓名对应了多位教师', 'This teacher name matches more than one person'],
+    class_ambiguous: ['这个班级名称对应了多个班', 'This class name matches more than one class'],
     not_found: ['这条公开课已经不在了', 'This open lesson no longer exists'],
     internal: ['保存失败，请稍后再试', 'Could not save. Try again.'],
   };
   const pair = copy[code];
   if (pair) return isZh ? pair[0] : pair[1];
   return code;
+}
+
+function formatImportIssue(issue: OpenLessonImportIssue, isZh: boolean): string {
+  const where = issue.row > 0 ? (isZh ? `第${issue.row}行：` : `Row ${issue.row}: `) : '';
+  const detail = issue.detail?.trim();
+  if (issue.code === 'header_missing' && detail) {
+    return isZh ? `表头缺少：${detail}` : `Missing columns: ${detail}`;
+  }
+  const text = errorText(issue.code, isZh);
+  return detail ? `${where}${text}（${detail}）` : `${where}${text}`;
 }
 
 function blankDraft(board: OpenLessonBoard): SheetRow {
@@ -209,6 +260,8 @@ function blankDraft(board: OpenLessonBoard): SheetRow {
     id: null,
     groupId,
     teacherId,
+    classId: '',
+    className: '',
     lessonDate: '',
     timeText: '',
     gradeUnitTopic: '',
@@ -222,12 +275,19 @@ function blankDraft(board: OpenLessonBoard): SheetRow {
   };
 }
 
-export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
+export default function OpenLessons({
+  onBackToHub,
+  initialYearId,
+  initialTerm,
+  initialLessonKind,
+  initialLessonId,
+}: OpenLessonsProps) {
   const { language } = useLanguage();
   const isZh = language === 'zh';
   const [years, setYears] = useState<AcademicYear[]>([]);
   const [yearId, setYearId] = useState('');
-  const { term, setTerm, ready: termReady } = useTermForYear(yearId);
+  const { term, setTerm, ready: termReady } = useTermForYear(yearId, initialYearId, initialTerm);
+  const [lessonKind, setLessonKind] = useState<OpenLessonKind>(initialLessonKind ?? 'group');
   const [board, setBoard] = useState<OpenLessonBoard | null>(null);
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -238,6 +298,9 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
   const [groupFilter, setGroupFilter] = useState<string[] | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [excelBusy, setExcelBusy] = useState<'export' | 'import' | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const excelInputRef = useRef<HTMLInputElement>(null);
   const rowsRef = useRef<SheetRow[]>([]);
   const boardRef = useRef<OpenLessonBoard | null>(null);
   const savedRows = useRef<Map<string, SavedFields>>(new Map());
@@ -255,7 +318,8 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
         if (cancelled) return;
         const sorted = sortAcademicYearsByYear(list);
         setYears(sorted);
-        const nextYearId = latestAcademicYear(sorted)?.id || '';
+        const pinned = initialYearId && sorted.some((year) => year.id === initialYearId) ? initialYearId : '';
+        const nextYearId = pinned || latestAcademicYear(sorted)?.id || '';
         setYearId(nextYearId);
         if (!nextYearId) setLoading(false);
       })
@@ -282,7 +346,7 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
     setGroupFilter(null);
     setFilterOpen(false);
     api
-      .getOpenLessonBoard(yearId, term)
+      .getOpenLessonBoard(yearId, term, lessonKind)
       .then((next) => {
         if (cancelled) return;
         const nextRows = next.lessons.map(lessonToRow);
@@ -306,9 +370,22 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
     return () => {
       cancelled = true;
     };
-  }, [yearId, term, termReady]);
+  }, [yearId, term, termReady, lessonKind, reloadToken]);
 
-  const canAdd = useMemo(() => (board ? assignableGroups(board).length > 0 : false), [board]);
+  useEffect(() => {
+    if (!initialLessonId || loading) return;
+    const lessonId = initialLessonId;
+    const frame = window.requestAnimationFrame(() => {
+      rowNodes.current.get(lessonId)?.scrollIntoView({ block: 'center' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [initialLessonId, loading, rows]);
+
+  const canAdd = useMemo(() => {
+    if (!board || assignableGroups(board).length === 0) return false;
+    if (lessonKind === 'school' && !board.isAdmin && board.ledGroupIds.length === 0) return false;
+    return true;
+  }, [board, lessonKind]);
 
   const filterGroups = useMemo(() => {
     const ids = new Set(rows.map((row) => row.groupId).filter(Boolean));
@@ -364,6 +441,7 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
       const lesson = await api.updateOpenLesson(row.id, {
         academicYearId: currentBoard.academicYearId,
         term: currentBoard.term,
+        lessonKind: currentBoard.lessonKind,
         ...snapshot,
       });
       if (saveSeq.current.get(key) !== seq) return;
@@ -414,6 +492,9 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
               : '';
         }
       }
+      if (patch.classId !== undefined && currentBoard) {
+        updated.className = currentBoard.classes.find((item) => item.id === updated.classId)?.name ?? '';
+      }
       return updated;
     });
     writeRows(next);
@@ -438,6 +519,10 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
     if (!patched.groupId || !patched.teacherId) {
       patched = { ...patched, groupId: saved.groupId, teacherId: saved.teacherId };
     }
+    if (!patched.classId) {
+      const known = boardRef.current?.classes.find((item) => item.id === saved.classId);
+      patched = { ...patched, classId: saved.classId, className: known?.name || row.className };
+    }
     if (!sameSnapshot(rowSnapshot(row), rowSnapshot(patched))) writeRows(rowsRef.current.map((item) => (item.key === key ? patched : item)));
     if (!rowReady(patched)) return;
     void persistRow(key);
@@ -461,6 +546,71 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
       setRowError((prev) => ({ ...prev, [row.key]: code }));
     } finally {
       setSavingKey(null);
+    }
+  };
+
+  const showImportProblems = (issues: OpenLessonImportIssue[]) => {
+    const lines = issues.slice(0, 12).map((issue) => formatImportIssue(issue, isZh));
+    if (issues.length > 12) lines.push(isZh ? `…还有 ${issues.length - 12} 条` : `…${issues.length - 12} more`);
+    const text = lines.join('\n');
+    setPageError(text);
+    window.alert(text);
+  };
+
+  const exportExcel = async () => {
+    if (!yearId || !termReady || excelBusy) return;
+    setExcelBusy('export');
+    setPageError('');
+    try {
+      const pending = [...saveTimers.current.keys()];
+      for (const key of pending) {
+        const timer = saveTimers.current.get(key);
+        if (timer) clearTimeout(timer);
+        saveTimers.current.delete(key);
+      }
+      await Promise.all(pending.map((key) => persistRow(key)));
+      const lessons = await api.listOpenLessonsForTerm(yearId, term);
+      const yearLabel = years.find((year) => year.id === yearId)?.name ?? '';
+      await downloadOpenLessonWorkbook({ lessons, academicYearLabel: yearLabel, term, isZh });
+    } catch (error: unknown) {
+      setPageError(error instanceof Error ? error.message : 'internal');
+    } finally {
+      setExcelBusy(null);
+    }
+  };
+
+  const importExcel = async (file: File) => {
+    if (!yearId || !termReady || excelBusy) return;
+    setExcelBusy('import');
+    setPageError('');
+    try {
+      const parsed = await parseOpenLessonWorkbook(await file.arrayBuffer());
+      if (parsed.issues.length > 0) {
+        showImportProblems(parsed.issues);
+        return;
+      }
+      if (parsed.rows.length === 0) {
+        setPageError('no_rows');
+        window.alert(errorText('no_rows', isZh));
+        return;
+      }
+      const yearLabel = years.find((year) => year.id === yearId)?.name ?? '';
+      const termText = term === 'Semester 1' ? (isZh ? '上学期' : 'Semester 1') : isZh ? '下学期' : 'Semester 2';
+      const ok = window.confirm(
+        isZh
+          ? `将用这个表格替换 ${yearLabel} ${termText} 的全部公开课，包含组内公开课、日常课和校级公开课。表格里没有的课会被删除。`
+          : `This replaces every open lesson in ${yearLabel} ${termText}, including group, daily and school lessons. Lessons missing from the file will be deleted.`,
+      );
+      if (!ok) return;
+      const result = await api.importOpenLessons(yearId, term, parsed.rows);
+      setReloadToken((token) => token + 1);
+      window.alert(isZh ? `已导入 ${result.count} 条公开课。` : `Imported ${result.count} open lessons.`);
+    } catch (error: unknown) {
+      const issues = error && typeof error === 'object' && 'issues' in error ? (error as { issues?: OpenLessonImportIssue[] }).issues : undefined;
+      if (issues && issues.length > 0) showImportProblems(issues);
+      else setPageError(error instanceof Error ? error.message : 'internal');
+    } finally {
+      setExcelBusy(null);
     }
   };
 
@@ -492,7 +642,7 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
     <div className="min-h-screen bg-slate-50 pt-16">
       <AppTopBar title={isZh ? '公开课' : 'Open Lessons'} showBack={!!onBackToHub} onBack={onBackToHub} />
       <div className="mx-auto w-[90%] max-w-[1296px] px-3 py-4 sm:px-6 sm:py-6">
-        <div className="flex items-end justify-between gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-4">
           <FilterToolbar>
             <FilterField label={isZh ? '学年' : 'Year'} htmlFor="open-lesson-year">
               <AcademicYearSelect
@@ -507,22 +657,69 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
             <FilterField label={isZh ? '学期' : 'Term'} htmlFor="open-lesson-term">
               <TermSelect id="open-lesson-term" isZh={isZh} value={term} onChange={setTerm} />
             </FilterField>
+            <FilterField label={isZh ? '类型' : 'Type'} htmlFor="open-lesson-kind">
+              <FilterSelect
+                id="open-lesson-kind"
+                width="md"
+                className="min-w-[9.5rem]"
+                value={lessonKind}
+                onChange={(e) => setLessonKind(e.target.value as OpenLessonKind)}
+              >
+                {LESSON_KIND_OPTIONS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {lessonKindLabel(kind, isZh)}
+                  </option>
+                ))}
+              </FilterSelect>
+            </FilterField>
           </FilterToolbar>
-          {canAdd ? (
-            <Button type="button" className="shrink-0" onClick={() => setAddOpen(true)}>
-              {isZh ? '添加公开课' : 'Add open lesson'}
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!yearId || !termReady || excelBusy !== null}
+              onClick={() => void exportExcel()}
+            >
+              {excelBusy === 'export' ? (isZh ? '导出中…' : 'Exporting…') : isZh ? '导出 Excel' : 'Export Excel'}
             </Button>
-          ) : null}
+            <input
+              ref={excelInputRef}
+              type="file"
+              accept=".xlsx,.xls"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (file) void importExcel(file);
+              }}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!yearId || !termReady || excelBusy !== null}
+              onClick={() => excelInputRef.current?.click()}
+            >
+              {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+            </Button>
+            {canAdd ? (
+              <Button type="button" size="sm" onClick={() => setAddOpen(true)}>
+                {isZh ? '添加公开课' : 'Add open lesson'}
+              </Button>
+            ) : null}
+          </div>
         </div>
 
-        {pageError ? <p className="mt-3 text-sm text-red-600">{errorText(pageError, isZh)}</p> : null}
+        {pageError ? <p className="mt-3 whitespace-pre-line text-sm text-red-600">{errorText(pageError, isZh)}</p> : null}
 
         <div className="-mr-11 mt-3 max-h-[calc(100vh-11rem)] overflow-auto pr-11">
           <div className="overflow-visible rounded-xl border border-primary/25 bg-white shadow-sm">
-          <table className="w-full min-w-[64rem] table-fixed border-collapse text-left">
+          <table className="w-full min-w-[71rem] table-fixed border-collapse text-left">
             <colgroup>
               <col style={{ width: '9rem' }} />
               <col style={{ width: '8rem' }} />
+              <col style={{ width: '6.5rem' }} />
               <col style={{ width: '8.5rem' }} />
               <col style={{ width: '9rem' }} />
               <col />
@@ -532,24 +729,32 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
             <thead className="sticky top-0 z-10 bg-primary text-primary-foreground">
               <tr>
                 <th className={`${headCell} relative`} aria-sort={sort.key === 'group' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                  <div ref={filterRootRef} className="flex items-center justify-center gap-1">
-                    <SortHeader
-                      zh="组别"
-                      en="Group"
-                      active={sort.key === 'group'}
-                      dir={sort.dir}
-                      label={sortLabel(isZh, '组别', sort.key === 'group', sort.dir)}
-                      onClick={() => toggleSort('group')}
-                    />
-                    <button
-                      type="button"
-                      aria-expanded={filterOpen}
-                      aria-label={isZh ? '筛选组别' : 'Filter groups'}
-                      className={`rounded p-0.5 ${groupFilter ? 'text-amber-200' : 'text-primary-foreground/70 hover:text-primary-foreground'}`}
-                      onClick={() => setFilterOpen((open) => !open)}
-                    >
-                      <ListFilter className="h-3.5 w-3.5" aria-hidden />
-                    </button>
+                  <div ref={filterRootRef}>
+                    <div className="flex justify-center">
+                      <div className="relative">
+                        <SortHeader
+                          zh="组别"
+                          en="Group"
+                          active={sort.key === 'group'}
+                          dir={sort.dir}
+                          label={sortLabel(isZh, '组别', sort.key === 'group', sort.dir)}
+                          onClick={() => toggleSort('group')}
+                        />
+                        <button
+                          type="button"
+                          aria-expanded={filterOpen}
+                          aria-label={isZh ? '筛选组别' : 'Filter groups'}
+                          className={`absolute left-full top-1/2 z-10 ml-2 -translate-y-1/2 rounded-md border p-1 ${
+                            groupFilter
+                              ? 'border-amber-200 bg-amber-300 text-amber-950'
+                              : 'border-white/70 bg-white/25 text-white hover:bg-white/40'
+                          }`}
+                          onClick={() => setFilterOpen((open) => !open)}
+                        >
+                          <ListFilter className="h-4 w-4" strokeWidth={2.5} aria-hidden />
+                        </button>
+                      </div>
+                    </div>
                     {filterOpen ? (
                       <GroupFilterMenu
                         groups={filterGroups}
@@ -561,6 +766,7 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
                   </div>
                 </th>
                 <th className={headCell}><Header zh="教师" en="Teacher" /></th>
+                <th className={headCell}><Header zh="班级" en="Class" /></th>
                 <th className={headCell} aria-sort={sort.key === 'date' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                   <SortHeader
                     zh="日期"
@@ -572,7 +778,7 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
                   />
                 </th>
                 <th className={headCell}><Header zh="时间" en="Time" /></th>
-                <th className={headCell}><Header zh="年级-单元-课题" en="Grade-Unit-Topic" /></th>
+                <th className={headCell}><Header zh="学期-单元-课题" en="Term-Unit-Topic" /></th>
                 <th className={headCell}><Header zh="上课地点" en="Location" /></th>
                 <th className={headCell}><Header zh="备注" en="Remarks" /></th>
               </tr>
@@ -580,19 +786,21 @@ export default function OpenLessons({ onBackToHub }: OpenLessonsProps) {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-sm text-slate-500">
+                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
                     {isZh ? '正在读取本学期公开课…' : 'Loading open lessons…'}
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-sm text-slate-500">
-                    {isZh ? '本学期还没有公开课。' : 'No open lessons this term.'}
+                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
+                    {isZh
+                      ? `本学期还没有${lessonKindLabel(lessonKind, true)}。`
+                      : `No ${lessonKindLabel(lessonKind, false).toLowerCase()}s this term.`}
                   </td>
                 </tr>
               ) : visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-sm text-slate-500">
+                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
                     {isZh ? '没有符合筛选的公开课。' : 'No open lessons match this filter.'}
                   </td>
                 </tr>
@@ -767,6 +975,12 @@ function LessonRow({
           : null,
       )
     : [];
+  const classOptions: OpenLessonClassOption[] = board
+    ? withCurrentOption(
+        board.classes,
+        row.classId ? { id: row.classId, grade: 0, name: row.className || row.classId } : null,
+      )
+    : [];
 
   return (
     <>
@@ -799,6 +1013,25 @@ function LessonRow({
               {teacherOptions.map((teacher) => (
                 <option key={teacher.id} value={teacher.id}>
                   {personLabel(isZh, teacher.nameZh, teacher.nameEn)}
+                </option>
+              ))}
+            </select>
+          )}
+        </td>
+        <td className={bodyCell}>
+          {readOnly ? (
+            <ReadCell value={row.className} />
+          ) : (
+            <select
+              className={cellInput}
+              value={row.classId}
+              onChange={(e) => onChange({ classId: e.target.value }, true)}
+              onBlur={onCommit}
+            >
+              <option value="">{isZh ? '选择班级' : 'Class'}</option>
+              {classOptions.filter((item) => item.id).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
                 </option>
               ))}
             </select>
@@ -883,7 +1116,7 @@ function LessonRow({
       </tr>
       {error ? (
         <tr>
-          <td colSpan={7} className="border-b border-slate-100 px-3 py-1 text-xs text-red-600">
+          <td colSpan={8} className="border-b border-slate-100 px-3 py-1 text-xs text-red-600">
             {error}
           </td>
         </tr>
@@ -961,8 +1194,10 @@ function AddLessonDialog({
       const lesson = await api.createOpenLesson({
         academicYearId: board.academicYearId,
         term: board.term,
+        lessonKind: board.lessonKind,
         groupId: form.groupId,
         teacherId: form.teacherId,
+        classId: form.classId,
         lessonDate: form.lessonDate,
         timeText: form.timeText.trim(),
         gradeUnitTopic: form.gradeUnitTopic.trim(),
@@ -983,7 +1218,9 @@ function AddLessonDialog({
         <DialogHeader>
           <DialogTitle>{isZh ? '添加公开课' : 'Add open lesson'}</DialogTitle>
           <DialogDescription>
-            {isZh ? '登记后出现在本学期的表里。' : 'It appears in this term’s table after you add it.'}
+            {isZh
+              ? `登记后出现在本学期的${lessonKindLabel(board.lessonKind, true)}里。`
+              : `It appears in this term’s ${lessonKindLabel(board.lessonKind, false).toLowerCase()} list.`}
           </DialogDescription>
         </DialogHeader>
         {form ? (
@@ -1013,6 +1250,16 @@ function AddLessonDialog({
                 ))}
               </select>
             </Field>
+            <Field label={isZh ? '班级' : 'Class'}>
+              <select className={formControl} value={form.classId} onChange={(e) => patch({ classId: e.target.value })}>
+                <option value="">{isZh ? '选择班级' : 'Class'}</option>
+                {board.classes.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label={isZh ? '日期' : 'Date'}>
                 <Input type="date" value={form.lessonDate} onChange={(e) => patch({ lessonDate: e.target.value })} />
@@ -1025,7 +1272,7 @@ function AddLessonDialog({
                 />
               </Field>
             </div>
-            <Field label={isZh ? '年级-单元-课题' : 'Grade-Unit-Topic'}>
+            <Field label={isZh ? '学期-单元-课题' : 'Term-Unit-Topic'}>
               <Input
                 value={form.gradeUnitTopic}
                 placeholder={isZh ? 'G5 · 第二单元 · 分数' : 'G5 · Unit 2 · Fractions'}

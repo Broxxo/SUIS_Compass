@@ -37,7 +37,8 @@ type HubView =
   | 'teacher-portrait'
   | 'academic-reports'
   | 'class-assistant'
-  | 'open-lessons';
+  | 'open-lessons'
+  | 'more';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
 const tileBase =
@@ -47,7 +48,7 @@ const tileBase =
 
 type HubTileId =
   | 'teacher-todos'
-  | 'class-assistant'
+  | 'more-features'
   | 'suis-ai'
   | 'curriculum-roadmap'
   | 'student-portrait'
@@ -69,11 +70,12 @@ type HubTile = {
   renderLabel?: (isZh: boolean) => React.ReactNode;
 };
 
-const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v3';
+const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v4';
 
 function migrateSavedHubIds(savedIds: string[]): string[] {
   const out: string[] = [];
-  for (const id of savedIds) {
+  for (const raw of savedIds) {
+    const id = raw === 'class-assistant' ? 'more-features' : raw;
     if (id === 'class-management') continue;
     if (!out.includes(id)) out.push(id);
   }
@@ -378,6 +380,16 @@ export default function CompassHub({
   const rows = isPortrait ? 5 : 3;
 
   const handleOpenTodo = (item: HubTeacherTodoItem) => {
+    if (item.target.type === 'open-lesson') {
+      onOpenTodo({
+        view: 'open-lessons',
+        academicYearId: item.target.academicYearId,
+        term: item.target.term,
+        lessonKind: item.target.lessonKind,
+        lessonId: item.target.lessonId,
+      });
+      return;
+    }
     if (item.target.type === 'teacher-portrait-collection') {
       onOpenTodo({
         view: 'teacher-portrait',
@@ -399,9 +411,8 @@ export default function CompassHub({
   const defaultTiles: HubTile[] = useMemo(
     () => [
       ...(showTodosTile
-        ? [{ id: 'teacher-todos' as const, kind: 'widget' as const, spanX: 1 as const, spanY: 1 as const, fontSize: '0.75rem' }]
+        ? [{ id: 'teacher-todos' as const, kind: 'widget' as const, spanX: 2 as const, spanY: 1 as const, fontSize: '0.75rem' }]
         : []),
-      { id: 'placeholder-1', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
       {
         id: 'open-lessons',
         kind: 'app',
@@ -426,10 +437,10 @@ export default function CompassHub({
         id: 'teacher-portrait',
         kind: 'app',
         view: 'teacher-portrait',
-        spanX: 2,
-        spanY: 2,
-        fontSize: 'clamp(1.25rem, 3vw, 1.85rem)',
-        className: 'p-2 sm:p-4',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
         style: {
           background: 'linear-gradient(145deg, #d9776c 0%, #c4685a 50%, #a85548 100%)',
           boxShadow: '0 8px 24px -4px rgba(168, 85, 72, 0.38), inset 0 1px 0 rgba(255,255,255,0.2)',
@@ -513,22 +524,25 @@ export default function CompassHub({
           </span>
         ),
       },
+      { id: 'placeholder-1', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      { id: 'placeholder-3', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
       {
-        id: 'class-assistant',
+        id: 'more-features',
         kind: 'app',
-        view: 'class-assistant',
+        view: 'more',
         spanX: 1,
         spanY: 1,
         fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
         className: 'p-1.5 sm:p-2',
         style: {
-          background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
-          boxShadow: '0 6px 16px -2px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+          background: 'linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%)',
+          boxShadow: '0 6px 16px -2px rgba(71, 85, 105, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
         },
         renderLabel: (zh) => (
           <span className="flex flex-col items-center leading-tight">
-            <span>{zh ? '课堂' : 'Class'}</span>
-            <span>{zh ? '助手' : 'Assistant'}</span>
+            <span>{zh ? '更多' : 'More'}</span>
+            <span>{zh ? '功能' : 'Features'}</span>
           </span>
         ),
       },
@@ -539,8 +553,7 @@ export default function CompassHub({
   const [tiles, setTiles] = useState<HubTile[]>(() => {
     try {
       if (typeof window === 'undefined') return defaultTiles;
-      let raw = window.localStorage.getItem(HUB_LAYOUT_STORAGE_KEY);
-      if (!raw) raw = window.localStorage.getItem('suis-compass-hub-layout-v2');
+      const raw = window.localStorage.getItem(HUB_LAYOUT_STORAGE_KEY);
       const saved = raw ? migrateSavedHubIds(JSON.parse(raw) as string[]) : null;
       return reorderBySavedIds(defaultTiles, saved);
     } catch {
@@ -743,7 +756,7 @@ export default function CompassHub({
                     aria-hidden
                   >
                     {activeTile.kind === 'app' && activeTile.renderLabel ? activeTile.renderLabel(isZh) : null}
-                    {activeTile.kind === 'widget' ? (isZh ? '待办' : 'Tasks') : null}
+                    {activeTile.kind === 'widget' ? (isZh ? '提醒事项' : 'Reminders') : null}
                   </div>
                 ) : null}
               </DragOverlay>

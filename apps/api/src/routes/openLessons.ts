@@ -7,9 +7,13 @@ import {
   createOpenLesson,
   deleteOpenLesson,
   getOpenLessonBoard,
+  isOpenLessonKind,
   isOpenLessonTerm,
+  listOpenLessonsForTerm,
   parseOpenLessonInput,
+  replaceOpenLessonsForTerm,
   updateOpenLesson,
+  type OpenLessonImportRow,
 } from '../lib/openLessons.js';
 
 type ReqWithUserId = Request & { userId?: string };
@@ -26,9 +30,11 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
     if (!userId) return fail(res, 401, 'unauthorized');
     const academicYearId = String(req.query.academicYearId ?? '').trim();
     const term = String(req.query.term ?? '').trim();
+    const lessonKind = String(req.query.lessonKind ?? 'group').trim();
     if (!academicYearId) return fail(res, 400, 'year_required');
     if (!isOpenLessonTerm(term)) return fail(res, 400, 'term_invalid');
-    const board = await getOpenLessonBoard(userId, academicYearId, term);
+    if (!isOpenLessonKind(lessonKind)) return fail(res, 400, 'kind_invalid');
+    const board = await getOpenLessonBoard(userId, academicYearId, term, lessonKind);
     if ('error' in board) {
       const status = board.error === 'year_not_found' ? 404 : 403;
       return fail(res, status, board.error);
@@ -36,6 +42,67 @@ router.get('/', async (req: ReqWithUserId, res: Response) => {
     return res.json(board);
   } catch (error) {
     console.error('List open lessons error:', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+router.get('/term', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const academicYearId = String(req.query.academicYearId ?? '').trim();
+    const term = String(req.query.term ?? '').trim();
+    if (!academicYearId) return fail(res, 400, 'year_required');
+    if (!isOpenLessonTerm(term)) return fail(res, 400, 'term_invalid');
+    const listed = await listOpenLessonsForTerm(userId, academicYearId, term);
+    if ('error' in listed) {
+      const status = listed.error === 'year_not_found' ? 404 : 403;
+      return fail(res, status, listed.error);
+    }
+    return res.json(listed);
+  } catch (error) {
+    console.error('List open lessons for term error:', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+router.post('/import', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+    const academicYearId = String(body.academicYearId ?? '').trim();
+    const term = String(body.term ?? '').trim();
+    const rawRows = Array.isArray(body.rows) ? body.rows : [];
+    const rows: OpenLessonImportRow[] = rawRows.map((item, index) => {
+      const rec = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+      const rowNumber = Number(rec.row);
+      return {
+        row: Number.isFinite(rowNumber) && rowNumber > 0 ? rowNumber : index + 3,
+        lessonKind: String(rec.lessonKind ?? ''),
+        groupName: String(rec.groupName ?? ''),
+        teacherName: String(rec.teacherName ?? ''),
+        className: String(rec.className ?? ''),
+        lessonDate: String(rec.lessonDate ?? ''),
+        timeText: String(rec.timeText ?? ''),
+        gradeUnitTopic: String(rec.gradeUnitTopic ?? ''),
+        location: String(rec.location ?? ''),
+        remarks: String(rec.remarks ?? ''),
+      };
+    });
+    const result = await replaceOpenLessonsForTerm(userId, academicYearId, term, rows);
+    if ('error' in result) {
+      const status =
+        result.error === 'year_not_found'
+          ? 404
+          : result.error === 'import_forbidden' || result.error === 'forbidden'
+            ? 403
+            : 400;
+      return res.status(status).json(result);
+    }
+    return res.json(result);
+  } catch (error) {
+    console.error('Import open lessons error:', error);
     return fail(res, 500, 'internal');
   }
 });
@@ -48,7 +115,12 @@ router.post('/', async (req: ReqWithUserId, res: Response) => {
     if ('error' in parsed) return fail(res, 400, parsed.error);
     const created = await createOpenLesson(userId, parsed);
     if ('error' in created) {
-      const status = created.error === 'year_not_found' ? 404 : created.error === 'assign_forbidden' ? 403 : 400;
+      const status =
+        created.error === 'year_not_found'
+          ? 404
+          : created.error === 'assign_forbidden' || created.error === 'school_add_forbidden'
+            ? 403
+            : 400;
       return fail(res, status, created.error);
     }
     return res.status(201).json({ lesson: created });

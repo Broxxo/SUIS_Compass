@@ -12,6 +12,13 @@ export type HubTeacherTodoTarget =
       academicYearId: string;
       term: Term;
       templateId: string;
+    }
+  | {
+      type: 'open-lesson';
+      academicYearId: string;
+      term: Term;
+      lessonKind: 'group' | 'routine' | 'school';
+      lessonId: string;
     };
 
 export interface HubTeacherTodoItem {
@@ -35,4 +42,11 @@ export type HubPortraitNavigation =
       academicYearId: string;
       term: Term;
       templateId: string;
+    }
+  | {
+      view: 'open-lessons';
+      academicYearId: string;
+      term: Term;
+      lessonKind: 'group' | 'routine' | 'school';
+      lessonId: string;
     };

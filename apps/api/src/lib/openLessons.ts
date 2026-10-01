@@ -7,6 +7,10 @@ import { ensureTeachingSubjectGroupMembersTable } from './teachingSubjectGroupMe
 export const OPEN_LESSON_TERMS = ['Semester 1', 'Semester 2'] as const;
 export type OpenLessonTerm = (typeof OPEN_LESSON_TERMS)[number];
 
+export const OPEN_LESSON_KINDS = ['group', 'routine', 'school'] as const;
+export type OpenLessonKind = (typeof OPEN_LESSON_KINDS)[number];
+export const DEFAULT_OPEN_LESSON_KIND: OpenLessonKind = 'group';
+
 export type OpenLessonGroupOption = {
   id: string;
   nameZh: string;
@@ -24,16 +28,25 @@ export type OpenLessonMembership = {
   teacherId: string;
 };
 
+export type OpenLessonClassOption = {
+  id: string;
+  grade: number;
+  name: string;
+};
+
 export type OpenLessonRow = {
   id: string;
   academicYearId: string;
   term: OpenLessonTerm;
+  lessonKind: OpenLessonKind;
   groupId: string;
   groupNameZh: string;
   groupNameEn: string;
   teacherId: string;
   teacherNameZh: string;
   teacherNameEn: string;
+  classId: string;
+  className: string;
   lessonDate: string;
   timeText: string;
   gradeUnitTopic: string;
@@ -45,6 +58,7 @@ export type OpenLessonRow = {
 export type OpenLessonBoard = {
   academicYearId: string;
   term: OpenLessonTerm;
+  lessonKind: OpenLessonKind;
   viewerId: string;
   isAdmin: boolean;
   ledGroupIds: string[];
@@ -52,14 +66,17 @@ export type OpenLessonBoard = {
   groups: OpenLessonGroupOption[];
   staff: OpenLessonStaffOption[];
   memberships: OpenLessonMembership[];
+  classes: OpenLessonClassOption[];
   lessons: OpenLessonRow[];
 };
 
 export type OpenLessonInput = {
   academicYearId: string;
   term: OpenLessonTerm;
+  lessonKind: OpenLessonKind;
   groupId: string;
   teacherId: string;
+  classId: string;
   lessonDate: string;
   timeText: string;
   gradeUnitTopic: string;
@@ -87,6 +104,10 @@ export function isOpenLessonTerm(value: string): value is OpenLessonTerm {
   return (OPEN_LESSON_TERMS as readonly string[]).includes(value);
 }
 
+export function isOpenLessonKind(value: string): value is OpenLessonKind {
+  return (OPEN_LESSON_KINDS as readonly string[]).includes(value);
+}
+
 export async function ensureOpenLessonsTable(): Promise<void> {
   if (ensured) return;
   await pool.query(`
@@ -94,8 +115,10 @@ export async function ensureOpenLessonsTable(): Promise<void> {
       id VARCHAR(50) PRIMARY KEY,
       academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
       term VARCHAR(20) NOT NULL CHECK (term IN ('Semester 1', 'Semester 2')),
+      lesson_kind VARCHAR(20) NOT NULL DEFAULT 'group' CHECK (lesson_kind IN ('group', 'routine', 'school')),
       group_id VARCHAR(80) NOT NULL,
       teacher_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      class_id VARCHAR(50) REFERENCES classes(id) ON DELETE SET NULL,
       lesson_date DATE NOT NULL,
       time_label VARCHAR(80) NOT NULL,
       grade_unit_topic VARCHAR(300) NOT NULL,
@@ -111,6 +134,26 @@ export async function ensureOpenLessonsTable(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_open_lessons_year_term
       ON open_lessons(academic_year_id, term, lesson_date, time_label)
   `);
+  await pool.query(`
+    ALTER TABLE open_lessons
+      ADD COLUMN IF NOT EXISTS class_id VARCHAR(50) REFERENCES classes(id) ON DELETE SET NULL
+  `);
+  await pool.query(`
+    ALTER TABLE open_lessons
+      ADD COLUMN IF NOT EXISTS lesson_kind VARCHAR(20) NOT NULL DEFAULT 'group'
+  `);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'open_lessons_lesson_kind_check'
+      ) THEN
+        ALTER TABLE open_lessons
+          ADD CONSTRAINT open_lessons_lesson_kind_check
+          CHECK (lesson_kind IN ('group', 'routine', 'school'));
+      END IF;
+    END $$
+  `);
   ensured = true;
 }
 
@@ -122,8 +165,10 @@ export function parseOpenLessonInput(body: unknown, fallbackYear = '', fallbackT
   const rec = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
   const academicYearId = String(rec.academicYearId ?? fallbackYear).trim();
   const term = String(rec.term ?? fallbackTerm).trim();
+  const lessonKind = String(rec.lessonKind ?? '').trim();
   const groupId = String(rec.groupId ?? '').trim();
   const teacherId = String(rec.teacherId ?? '').trim();
+  const classId = String(rec.classId ?? '').trim();
   const lessonDate = String(rec.lessonDate ?? '').trim();
   const timeText = String(rec.timeText ?? '').trim();
   const gradeUnitTopic = String(rec.gradeUnitTopic ?? '').trim();
@@ -131,8 +176,10 @@ export function parseOpenLessonInput(body: unknown, fallbackYear = '', fallbackT
   const remarks = String(rec.remarks ?? '').trim();
   if (!academicYearId) return { error: 'year_required' };
   if (!isOpenLessonTerm(term)) return { error: 'term_invalid' };
+  if (!isOpenLessonKind(lessonKind)) return { error: 'kind_invalid' };
   if (!groupId) return { error: 'group_required' };
   if (!teacherId) return { error: 'teacher_required' };
+  if (!classId) return { error: 'class_required' };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(lessonDate) || Number.isNaN(Date.parse(`${lessonDate}T00:00:00Z`))) {
     return { error: 'date_required' };
   }
@@ -146,8 +193,10 @@ export function parseOpenLessonInput(body: unknown, fallbackYear = '', fallbackT
   return {
     academicYearId,
     term,
+    lessonKind,
     groupId,
     teacherId,
+    classId,
     lessonDate,
     timeText,
     gradeUnitTopic,
@@ -242,6 +291,11 @@ async function loadAccess(viewerId: string, academicYearId: string): Promise<Acc
   };
 }
 
+function canAddLessonKind(access: Access, kind: OpenLessonKind): boolean {
+  if (kind !== 'school') return true;
+  return access.isAdmin || access.ledGroupIds.length > 0;
+}
+
 function canEditPair(access: Access, groupId: string, teacherId: string): boolean {
   if (access.isAdmin) return true;
   if (teacherId === access.viewerId) return true;
@@ -275,8 +329,11 @@ type LessonDbRow = {
   id: string;
   academic_year_id: string;
   term: string;
+  lesson_kind: string;
   group_id: string;
   teacher_id: string;
+  class_id: string | null;
+  class_name: string | null;
   lesson_date: string;
   time_label: string;
   grade_unit_topic: string;
@@ -284,7 +341,16 @@ type LessonDbRow = {
   remarks: string;
   teacher_name_zh: string;
   teacher_name_en: string;
+  created_by: string | null;
 };
+
+function canSeeOpenLesson(
+  viewerId: string,
+  lesson: { lesson_kind: string; teacher_id: string; created_by: string | null },
+): boolean {
+  if (lesson.lesson_kind !== 'routine') return true;
+  return lesson.teacher_id === viewerId || lesson.created_by === viewerId;
+}
 
 function mapLesson(row: LessonDbRow, access: Access): OpenLessonRow {
   const group = access.groups.find((g) => g.id === row.group_id);
@@ -292,12 +358,15 @@ function mapLesson(row: LessonDbRow, access: Access): OpenLessonRow {
     id: row.id,
     academicYearId: row.academic_year_id,
     term: row.term as OpenLessonTerm,
+    lessonKind: row.lesson_kind as OpenLessonKind,
     groupId: row.group_id,
     groupNameZh: group?.nameZh ?? row.group_id,
     groupNameEn: group?.nameEn ?? group?.nameZh ?? row.group_id,
     teacherId: row.teacher_id,
     teacherNameZh: row.teacher_name_zh,
     teacherNameEn: row.teacher_name_en,
+    classId: row.class_id ?? '',
+    className: row.class_name ?? '',
     lessonDate: row.lesson_date,
     timeText: row.time_label,
     gradeUnitTopic: row.grade_unit_topic,
@@ -308,13 +377,15 @@ function mapLesson(row: LessonDbRow, access: Access): OpenLessonRow {
 }
 
 const LESSON_SELECT = `
-  SELECT l.id, l.academic_year_id, l.term, l.group_id, l.teacher_id,
+  SELECT l.id, l.academic_year_id, l.term, l.lesson_kind, l.group_id, l.teacher_id, l.class_id,
+         c.name AS class_name,
          to_char(l.lesson_date, 'YYYY-MM-DD') AS lesson_date,
-         l.time_label, l.grade_unit_topic, l.location, l.remarks,
+         l.time_label, l.grade_unit_topic, l.location, l.remarks, l.created_by,
          ${STAFF_NAME_ZH} AS teacher_name_zh,
          ${STAFF_NAME_EN} AS teacher_name_en
   FROM open_lessons l
   JOIN users u ON u.id = l.teacher_id
+  LEFT JOIN classes c ON c.id = l.class_id
 `;
 
 async function yearExists(academicYearId: string): Promise<boolean> {
@@ -322,26 +393,54 @@ async function yearExists(academicYearId: string): Promise<boolean> {
   return result.rows.length > 0;
 }
 
+async function loadYearClasses(academicYearId: string): Promise<OpenLessonClassOption[]> {
+  const result = await pool.query(
+    `SELECT id, grade, name
+     FROM classes
+     WHERE academic_year_id = $1
+     ORDER BY grade ASC, name ASC`,
+    [academicYearId],
+  );
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    grade: Number(row.grade),
+    name: String(row.name),
+  }));
+}
+
+async function classInYear(classId: string, academicYearId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM classes WHERE id = $1 AND academic_year_id = $2`,
+    [classId, academicYearId],
+  );
+  return result.rows.length > 0;
+}
+
 export async function getOpenLessonBoard(
   viewerId: string,
   academicYearId: string,
   term: OpenLessonTerm,
+  lessonKind: OpenLessonKind,
 ): Promise<OpenLessonBoard | { error: string }> {
   await ensureOpenLessonsTable();
   if (!(await yearExists(academicYearId))) return { error: 'year_not_found' };
   const access = await loadAccess(viewerId, academicYearId);
   if (!access) return { error: 'forbidden' };
-  const rows = (
-    await pool.query(
+  const [lessonResult, classes] = await Promise.all([
+    pool.query(
       `${LESSON_SELECT}
-       WHERE l.academic_year_id = $1 AND l.term = $2
+       WHERE l.academic_year_id = $1 AND l.term = $2 AND l.lesson_kind = $3
+         AND (l.lesson_kind <> 'routine' OR l.teacher_id = $4 OR l.created_by = $4)
        ORDER BY l.lesson_date ASC, l.time_label ASC, l.created_at ASC`,
-      [academicYearId, term],
-    )
-  ).rows as LessonDbRow[];
+      [academicYearId, term, lessonKind, viewerId],
+    ),
+    loadYearClasses(academicYearId),
+  ]);
+  const rows = lessonResult.rows as LessonDbRow[];
   return {
     academicYearId,
     term,
+    lessonKind,
     viewerId: access.viewerId,
     isAdmin: access.isAdmin,
     ledGroupIds: access.ledGroupIds,
@@ -349,6 +448,7 @@ export async function getOpenLessonBoard(
     groups: access.groups,
     staff: access.staff,
     memberships: access.memberships,
+    classes,
     lessons: rows.map((row) => mapLesson(row, access)),
   };
 }
@@ -366,19 +466,23 @@ export async function createOpenLesson(
   if (!(await yearExists(input.academicYearId))) return { error: 'year_not_found' };
   const access = await loadAccess(viewerId, input.academicYearId);
   if (!access) return { error: 'forbidden' };
+  if (!canAddLessonKind(access, input.lessonKind)) return { error: 'school_add_forbidden' };
   if (!canWrite(access, null, input)) return { error: 'assign_forbidden' };
+  if (!(await classInYear(input.classId, input.academicYearId))) return { error: 'class_not_found' };
   const id = newId();
   await pool.query(
     `INSERT INTO open_lessons (
-       id, academic_year_id, term, group_id, teacher_id, lesson_date, time_label,
+       id, academic_year_id, term, lesson_kind, group_id, teacher_id, class_id, lesson_date, time_label,
        grade_unit_topic, location, remarks, created_by, updated_by
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
     [
       id,
       input.academicYearId,
       input.term,
+      input.lessonKind,
       input.groupId,
       input.teacherId,
+      input.classId,
       input.lessonDate,
       input.timeText,
       input.gradeUnitTopic,
@@ -402,24 +506,28 @@ export async function updateOpenLesson(
   if (!existing) return { error: 'not_found' };
   const access = await loadAccess(viewerId, existing.academic_year_id);
   if (!access) return { error: 'forbidden' };
+  if (!canSeeOpenLesson(viewerId, existing)) return { error: 'not_found' };
   const next = {
     ...input,
     academicYearId: existing.academic_year_id,
     term: existing.term as OpenLessonTerm,
+    lessonKind: existing.lesson_kind as OpenLessonKind,
   };
   if (!canWrite(access, { groupId: existing.group_id, teacherId: existing.teacher_id }, next)) {
     return { error: 'assign_forbidden' };
   }
+  if (!(await classInYear(next.classId, existing.academic_year_id))) return { error: 'class_not_found' };
   await pool.query(
     `UPDATE open_lessons
-     SET group_id = $2, teacher_id = $3, lesson_date = $4, time_label = $5,
-         grade_unit_topic = $6, location = $7, remarks = $8, updated_by = $9,
+     SET group_id = $2, teacher_id = $3, class_id = $4, lesson_date = $5, time_label = $6,
+         grade_unit_topic = $7, location = $8, remarks = $9, updated_by = $10,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
     [
       id,
       next.groupId,
       next.teacherId,
+      next.classId,
       next.lessonDate,
       next.timeText,
       next.gradeUnitTopic,
@@ -433,12 +541,265 @@ export async function updateOpenLesson(
   return mapLesson(row, access);
 }
 
+export async function listOpenLessonsForTerm(
+  viewerId: string,
+  academicYearId: string,
+  term: OpenLessonTerm,
+): Promise<{ lessons: OpenLessonRow[] } | { error: string }> {
+  await ensureOpenLessonsTable();
+  if (!(await yearExists(academicYearId))) return { error: 'year_not_found' };
+  const access = await loadAccess(viewerId, academicYearId);
+  if (!access) return { error: 'forbidden' };
+  const lessonResult = await pool.query(
+    `${LESSON_SELECT}
+     WHERE l.academic_year_id = $1 AND l.term = $2
+       AND (l.lesson_kind <> 'routine' OR l.teacher_id = $3 OR l.created_by = $3)
+     ORDER BY l.lesson_date ASC, l.time_label ASC,
+       CASE l.lesson_kind WHEN 'group' THEN 1 WHEN 'routine' THEN 2 ELSE 3 END,
+       l.created_at ASC`,
+    [academicYearId, term, viewerId],
+  );
+  return { lessons: (lessonResult.rows as LessonDbRow[]).map((row) => mapLesson(row, access)) };
+}
+
+export type OpenLessonImportRow = {
+  row: number;
+  lessonKind: string;
+  groupName: string;
+  teacherName: string;
+  className: string;
+  lessonDate: string;
+  timeText: string;
+  gradeUnitTopic: string;
+  location: string;
+  remarks: string;
+};
+
+export type OpenLessonImportIssue = {
+  row: number;
+  code: string;
+  detail?: string;
+};
+
+const KIND_LABELS: Record<string, OpenLessonKind> = {
+  group: 'group',
+  routine: 'routine',
+  school: 'school',
+  组内公开课: 'group',
+  日常课: 'routine',
+  校级公开课: 'school',
+  'group open lesson': 'group',
+  'daily lesson': 'routine',
+  'school open lesson': 'school',
+};
+
+function normName(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function addAlias(index: Map<string, Set<string>>, alias: string, id: string) {
+  const key = normName(alias);
+  if (!key) return;
+  let ids = index.get(key);
+  if (!ids) {
+    ids = new Set();
+    index.set(key, ids);
+  }
+  ids.add(id);
+}
+
+function resolveAlias(
+  index: Map<string, Set<string>>,
+  name: string,
+): { id: string } | { error: 'not_found' | 'ambiguous' } {
+  const ids = index.get(normName(name));
+  if (!ids || ids.size === 0) return { error: 'not_found' };
+  if (ids.size > 1) return { error: 'ambiguous' };
+  return { id: [...ids][0] };
+}
+
+function lessonKindFromLabel(value: string): OpenLessonKind | null {
+  const key = value.trim().replace(/\s+/g, ' ').toLowerCase();
+  return KIND_LABELS[key] ?? null;
+}
+
+function normalizeTimeText(value: string): string {
+  return value.trim().replace(/[–—−~～]/g, '-').replace(/：/g, ':').replace(/\s+/g, '');
+}
+
+export async function replaceOpenLessonsForTerm(
+  viewerId: string,
+  academicYearId: string,
+  term: string,
+  rows: OpenLessonImportRow[],
+): Promise<{ count: number } | { error: string; issues?: OpenLessonImportIssue[] }> {
+  await ensureOpenLessonsTable();
+  if (!academicYearId) return { error: 'year_required' };
+  if (!isOpenLessonTerm(term)) return { error: 'term_invalid' };
+  if (!(await yearExists(academicYearId))) return { error: 'year_not_found' };
+  const access = await loadAccess(viewerId, academicYearId);
+  if (!access) return { error: 'forbidden' };
+  if (rows.length === 0) return { error: 'no_rows' };
+
+  const staffRows = (
+    await pool.query(
+      `SELECT id,
+              TRIM(COALESCE(name_zh, '')) AS name_zh,
+              TRIM(COALESCE(name_en, '')) AS name_en,
+              TRIM(COALESCE(display_name, '')) AS display_name,
+              TRIM(COALESCE(username, '')) AS username
+       FROM users
+       WHERE role IN ('teacher', 'admin', 'system-admin')`,
+    )
+  ).rows as Array<{ id: string; name_zh: string; name_en: string; display_name: string; username: string }>;
+  const teacherIndex = new Map<string, Set<string>>();
+  for (const staff of staffRows) {
+    const zh = staff.name_zh || staff.display_name || staff.username || staff.id;
+    const en = staff.name_en || staff.name_zh || staff.display_name || staff.username || staff.id;
+    addAlias(teacherIndex, staff.name_zh, staff.id);
+    addAlias(teacherIndex, staff.name_en, staff.id);
+    addAlias(teacherIndex, staff.display_name, staff.id);
+    addAlias(teacherIndex, staff.username, staff.id);
+    addAlias(teacherIndex, zh, staff.id);
+    addAlias(teacherIndex, en, staff.id);
+  }
+  const groupIndex = new Map<string, Set<string>>();
+  for (const group of access.groups) {
+    addAlias(groupIndex, group.nameZh, group.id);
+    addAlias(groupIndex, group.nameEn, group.id);
+  }
+  const classes = await loadYearClasses(academicYearId);
+  const classIndex = new Map<string, Set<string>>();
+  for (const item of classes) addAlias(classIndex, item.name, item.id);
+
+  const issues: OpenLessonImportIssue[] = [];
+  const resolved: OpenLessonInput[] = [];
+  for (const item of rows) {
+    const lessonKind = lessonKindFromLabel(item.lessonKind);
+    const group = resolveAlias(groupIndex, item.groupName);
+    const teacher = resolveAlias(teacherIndex, item.teacherName);
+    const classMatch = item.className.trim() ? resolveAlias(classIndex, item.className) : { error: 'not_found' as const };
+    const timeText = normalizeTimeText(item.timeText);
+    const rowIssues: OpenLessonImportIssue[] = [];
+    if (!lessonKind) rowIssues.push({ row: item.row, code: 'kind_invalid', detail: item.lessonKind });
+    if (!item.groupName.trim()) rowIssues.push({ row: item.row, code: 'group_required' });
+    else if ('error' in group) {
+      rowIssues.push({
+        row: item.row,
+        code: group.error === 'ambiguous' ? 'group_ambiguous' : 'group_not_found',
+        detail: item.groupName,
+      });
+    }
+    if (!item.teacherName.trim()) rowIssues.push({ row: item.row, code: 'teacher_required' });
+    else if ('error' in teacher) {
+      rowIssues.push({
+        row: item.row,
+        code: teacher.error === 'ambiguous' ? 'teacher_ambiguous' : 'teacher_not_found',
+        detail: item.teacherName,
+      });
+    }
+    if (!item.className.trim()) rowIssues.push({ row: item.row, code: 'class_required' });
+    else if ('error' in classMatch) {
+      rowIssues.push({
+        row: item.row,
+        code: classMatch.error === 'ambiguous' ? 'class_ambiguous' : 'class_not_found',
+        detail: item.className,
+      });
+    }
+    if (rowIssues.length > 0 || !lessonKind || !('id' in group) || !('id' in teacher) || !('id' in classMatch)) {
+      issues.push(...rowIssues);
+      continue;
+    }
+    const parsed = parseOpenLessonInput({
+      academicYearId,
+      term,
+      lessonKind,
+      groupId: group.id,
+      teacherId: teacher.id,
+      classId: classMatch.id,
+      lessonDate: item.lessonDate,
+      timeText,
+      gradeUnitTopic: item.gradeUnitTopic,
+      location: item.location,
+      remarks: item.remarks,
+    });
+    if ('error' in parsed) {
+      issues.push({ row: item.row, code: parsed.error });
+      continue;
+    }
+    if (!canAddLessonKind(access, lessonKind)) {
+      issues.push({ row: item.row, code: 'school_add_forbidden' });
+      continue;
+    }
+    if (!canAssign(access, group.id, teacher.id)) {
+      issues.push({ row: item.row, code: 'assign_forbidden', detail: item.teacherName });
+      continue;
+    }
+    resolved.push(parsed);
+  }
+  if (issues.length > 0) return { error: 'import_invalid', issues };
+
+  const existing = (
+    await pool.query(
+      `SELECT group_id, teacher_id, lesson_kind, created_by
+       FROM open_lessons WHERE academic_year_id = $1 AND term = $2`,
+      [academicYearId, term],
+    )
+  ).rows as Array<{ group_id: string; teacher_id: string; lesson_kind: string; created_by: string | null }>;
+  const visibleExisting = existing.filter((row) => canSeeOpenLesson(viewerId, row));
+  if (visibleExisting.some((row) => !canEditPair(access, row.group_id, row.teacher_id))) {
+    return { error: 'import_forbidden' };
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM open_lessons
+       WHERE academic_year_id = $1 AND term = $2
+         AND (lesson_kind <> 'routine' OR teacher_id = $3 OR created_by = $3)`,
+      [academicYearId, term, viewerId],
+    );
+    for (const input of resolved) {
+      await client.query(
+        `INSERT INTO open_lessons (
+           id, academic_year_id, term, lesson_kind, group_id, teacher_id, class_id, lesson_date, time_label,
+           grade_unit_topic, location, remarks, created_by, updated_by
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+        [
+          newId(),
+          input.academicYearId,
+          input.term,
+          input.lessonKind,
+          input.groupId,
+          input.teacherId,
+          input.classId,
+          input.lessonDate,
+          input.timeText,
+          input.gradeUnitTopic,
+          input.location,
+          input.remarks,
+          viewerId,
+        ],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  return { count: resolved.length };
+}
+
 export async function deleteOpenLesson(viewerId: string, id: string): Promise<{ ok: true } | { error: string }> {
   await ensureOpenLessonsTable();
   const existing = await loadLessonById(id);
   if (!existing) return { error: 'not_found' };
   const access = await loadAccess(viewerId, existing.academic_year_id);
   if (!access) return { error: 'forbidden' };
+  if (!canSeeOpenLesson(viewerId, existing)) return { error: 'not_found' };
   if (!canEditPair(access, existing.group_id, existing.teacher_id)) return { error: 'forbidden' };
   await pool.query(`DELETE FROM open_lessons WHERE id = $1`, [id]);
   return { ok: true };

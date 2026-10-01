@@ -1,5 +1,12 @@
 import type { CourseDomainsConfig, TeachingResearchGroup, TeachingSubjectGroup, SelfStudyModule, SelfStudySlot, SelfStudyGradeConfig, ElectiveScheduleConfig, ElectiveCourse } from '@repo/shared';
-import type { OpenLesson, OpenLessonBoard, OpenLessonInput } from '../types/openLesson';
+import type {
+  OpenLesson,
+  OpenLessonBoard,
+  OpenLessonImportIssue,
+  OpenLessonImportRow,
+  OpenLessonInput,
+  OpenLessonKind,
+} from '../types/openLesson';
 import { normalizeCourseDomainsConfig } from '@repo/shared';
 import type { Course, GradeConfig, SemesterData, User } from '../types';
 import type {
@@ -2314,8 +2321,8 @@ export const api = {
     return (data as { dashboard: import('../types/classManagement').SubjectGroupPortraitDashboard }).dashboard;
   },
 
-  async getOpenLessonBoard(academicYearId: string, term: Term): Promise<OpenLessonBoard> {
-    const q = new URLSearchParams({ academicYearId, term });
+  async getOpenLessonBoard(academicYearId: string, term: Term, lessonKind: OpenLessonKind): Promise<OpenLessonBoard> {
+    const q = new URLSearchParams({ academicYearId, term, lessonKind });
     const response = await fetch(apiUrl(`/api/open-lessons?${q.toString()}`), { headers: getHeaders() });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
@@ -2350,6 +2357,40 @@ export const api = {
     }
     const data = await readJsonOrThrow(response, 'internal');
     return (data as { lesson: OpenLesson }).lesson;
+  },
+
+  async listOpenLessonsForTerm(academicYearId: string, term: Term): Promise<OpenLesson[]> {
+    const q = new URLSearchParams({ academicYearId, term });
+    const response = await fetch(apiUrl(`/api/open-lessons/term?${q.toString()}`), { headers: getHeaders() });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
+    const data = await readJsonOrThrow(response, 'internal');
+    return (data as { lessons: OpenLesson[] }).lessons;
+  },
+
+  async importOpenLessons(
+    academicYearId: string,
+    term: Term,
+    rows: OpenLessonImportRow[],
+  ): Promise<{ count: number }> {
+    const response = await fetch(apiUrl('/api/open-lessons/import'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ academicYearId, term, rows }),
+    });
+    const data = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      issues?: OpenLessonImportIssue[];
+      count?: number;
+    };
+    if (!response.ok) {
+      const error = new Error(data.error || 'internal') as Error & { issues?: OpenLessonImportIssue[] };
+      error.issues = data.issues;
+      throw error;
+    }
+    return { count: data.count ?? rows.length };
   },
 
   async deleteOpenLesson(id: string): Promise<void> {

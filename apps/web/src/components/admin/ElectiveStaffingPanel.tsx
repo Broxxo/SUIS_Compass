@@ -1,3 +1,4 @@
+import { MenuSelect } from '../MenuSelect';
 import { useMemo, useState } from 'react';
 import type {
   ElectiveAgeBandId,
@@ -464,7 +465,7 @@ export default function ElectiveStaffingPanel({
             </div>
             <div>
               <label className="text-sm font-medium text-slate-700 block mb-1">{isZh ? '时长类型' : 'Duration type'}</label>
-              <select
+              <MenuSelect
                 value={draft.durationPeriods}
                 onChange={(e) =>
                   setDraft({
@@ -476,7 +477,7 @@ export default function ElectiveStaffingPanel({
               >
                 <option value={1}>{electiveDurationTypeLabel(1, isZh)}</option>
                 <option value={2}>{electiveDurationTypeLabel(2, isZh)}</option>
-              </select>
+              </MenuSelect>
               <p className="text-xs text-slate-500 mt-1.5">{electiveDurationTypeHint(draft.durationPeriods, isZh)}</p>
               {draftMode === 'repeat' ? (
                 <p className="text-xs text-slate-500 mt-1">
@@ -495,7 +496,7 @@ export default function ElectiveStaffingPanel({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">{teacher1Label}</label>
-                <select
+                <MenuSelect
                   value={draft.teacherId}
                   onChange={(e) => setDraft({ ...draft, teacherId: e.target.value })}
                   className={selectClassName}
@@ -506,11 +507,11 @@ export default function ElectiveStaffingPanel({
                       {teacherDisplayName(t, isZh)}
                     </option>
                   ))}
-                </select>
+                </MenuSelect>
               </div>
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">{teacher2Label}</label>
-                <select
+                <MenuSelect
                   value={draft.teacher2Id}
                   onChange={(e) => setDraft({ ...draft, teacher2Id: e.target.value })}
                   className={selectClassName}
@@ -521,7 +522,7 @@ export default function ElectiveStaffingPanel({
                       {teacherDisplayName(t, isZh)}
                     </option>
                   ))}
-                </select>
+                </MenuSelect>
               </div>
             </div>
             <div>

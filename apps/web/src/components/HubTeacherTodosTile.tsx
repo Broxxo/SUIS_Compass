@@ -66,15 +66,15 @@ export default function HubTeacherTodosTile({
     >
       <div className="relative z-10 flex h-full w-full flex-col text-left text-slate-800">
         <div className="shrink-0 px-2.5 pb-1 pt-2.5">
-          <div className="text-[10px] font-medium tracking-wide text-slate-500 sm:text-[11px]">
+          <div className="text-[12px] font-medium tracking-wide text-slate-500 sm:text-[13px]">
             {isZh ? '提醒事项' : 'Reminders'}
           </div>
         </div>
         <div className="hub-todos-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {loading ? (
-            <p className="text-[10px] text-slate-500 sm:text-[11px]">{isZh ? '加载中…' : 'Loading…'}</p>
+            <p className="text-[12px] text-slate-500 sm:text-[13px]">{isZh ? '加载中…' : 'Loading…'}</p>
           ) : todos.length === 0 ? (
-            <p className="text-[10px] leading-snug text-slate-500 sm:text-[11px]">
+            <p className="text-[12px] leading-snug text-slate-500 sm:text-[13px]">
               {isZh ? '暂无提醒事项' : 'No reminders'}
             </p>
           ) : (
@@ -98,11 +98,11 @@ export default function HubTeacherTodosTile({
                     }}
                     className="flex w-full items-baseline justify-between gap-3 rounded-lg px-1.5 py-1.5 text-left transition-all hover:bg-cyan-100/60 hover:ring-1 hover:ring-cyan-200/45 active:bg-cyan-200/50 active:ring-cyan-300/40 disabled:pointer-events-none disabled:opacity-60"
                   >
-                    <div className="min-w-0 truncate text-[10px] font-medium leading-tight text-slate-700 sm:text-[11px]">
+                    <div className="min-w-0 truncate text-[12px] font-medium leading-tight text-slate-700 sm:text-[13px]">
                       {item.label}
                     </div>
                     {item.subtitle ? (
-                      <div className="max-w-[58%] shrink-0 truncate text-right text-[9px] leading-tight text-slate-500 sm:text-[10px]">
+                      <div className="max-w-[58%] shrink-0 truncate text-right text-[11px] leading-tight text-slate-500 sm:text-[12px]">
                         {item.subtitle}
                       </div>
                     ) : null}

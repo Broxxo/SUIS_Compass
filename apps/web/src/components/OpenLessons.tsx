@@ -1,6 +1,7 @@
 /**
  * 公开课：按学年学期的全校登记表。能改的行直接在格子里改。
  */
+import { MenuSelect } from './MenuSelect';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp, ListFilter, Trash2 } from 'lucide-react';
 import AppTopBar from './AppTopBar';
@@ -81,6 +82,45 @@ function timeStartMinutes(text: string): number {
   const minute = Number(match[2]);
   if (hour > 23 || minute > 59) return Number.POSITIVE_INFINITY;
   return hour * 60 + minute;
+}
+
+function openLessonDayParts(date: string, isZh: boolean): { date: string; weekday: string } {
+  if (!date) return { date: isZh ? '未填' : '—', weekday: '' };
+  const match = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return { date, weekday: '' };
+  const parsed = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const weekdays = isZh
+    ? ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return {
+    date: `${match[2]}/${match[3]}`,
+    weekday: weekdays[parsed.getDay()] ?? '',
+  };
+}
+
+function groupRowsByDate(rows: SheetRow[]): Array<{ date: string; rows: SheetRow[] }> {
+  const sorted = [...rows].sort((a, b) => {
+    if (a.lessonDate !== b.lessonDate) {
+      if (!a.lessonDate) return 1;
+      if (!b.lessonDate) return -1;
+      return a.lessonDate < b.lessonDate ? -1 : 1;
+    }
+    const byTime = timeStartMinutes(a.timeText) - timeStartMinutes(b.timeText);
+    if (byTime !== 0) return byTime;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+  const order: string[] = [];
+  const map = new Map<string, SheetRow[]>();
+  for (const row of sorted) {
+    const date = row.lessonDate;
+    const list = map.get(date);
+    if (list) list.push(row);
+    else {
+      map.set(date, [row]);
+      order.push(date);
+    }
+  }
+  return order.map((date) => ({ date, rows: map.get(date) ?? [] }));
 }
 
 function groupSortLabel(row: SheetRow, board: OpenLessonBoard | null, isZh: boolean): string {
@@ -297,6 +337,7 @@ export default function OpenLessons({
   const [sort, setSort] = useState<LessonSort>({ key: 'date', dir: 'asc' });
   const [groupFilter, setGroupFilter] = useState<string[] | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [mobileTable, setMobileTable] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [excelBusy, setExcelBusy] = useState<'export' | 'import' | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -639,7 +680,7 @@ export default function OpenLessons({
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 pt-16">
+    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)]">
       <AppTopBar title={isZh ? '公开课' : 'Open Lessons'} showBack={!!onBackToHub} onBack={onBackToHub} />
       <div className="mx-auto w-[90%] max-w-[1296px] px-3 py-4 sm:px-6 sm:py-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -661,7 +702,7 @@ export default function OpenLessons({
               <FilterSelect
                 id="open-lesson-kind"
                 width="md"
-                className="min-w-[9.5rem]"
+                className="min-w-0 sm:min-w-[9.5rem]"
                 value={lessonKind}
                 onChange={(e) => setLessonKind(e.target.value as OpenLessonKind)}
               >
@@ -673,7 +714,7 @@ export default function OpenLessons({
               </FilterSelect>
             </FilterField>
           </FilterToolbar>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <div className="hidden shrink-0 flex-wrap items-center justify-end gap-2 md:flex">
             <Button
               type="button"
               variant="outline"
@@ -713,7 +754,94 @@ export default function OpenLessons({
 
         {pageError ? <p className="mt-3 whitespace-pre-line text-sm text-red-600">{errorText(pageError, isZh)}</p> : null}
 
-        <div className="-mr-11 mt-3 max-h-[calc(100vh-11rem)] overflow-auto pr-11">
+        <div className="mt-3 md:hidden">
+          <div className="flex flex-nowrap items-center justify-between gap-2">
+            <button
+              type="button"
+              className="shrink-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700"
+              onClick={() => setMobileTable((open) => !open)}
+            >
+              {mobileTable ? (isZh ? '卡片' : 'Cards') : isZh ? '表格' : 'Sheet'}
+            </button>
+            <div className="flex shrink-0 items-center justify-end gap-1.5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0 px-2 text-xs"
+                disabled={!yearId || !termReady || excelBusy !== null}
+                onClick={() => void exportExcel()}
+              >
+                {excelBusy === 'export' ? (isZh ? '导出中…' : 'Exporting…') : isZh ? '导出' : 'Export'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0 px-2 text-xs"
+                disabled={!yearId || !termReady || excelBusy !== null}
+                onClick={() => excelInputRef.current?.click()}
+              >
+                {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入' : 'Import'}
+              </Button>
+              {canAdd ? (
+                <Button type="button" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={() => setAddOpen(true)}>
+                  {isZh ? '添加公开课' : 'Add'}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+          {!mobileTable ? (
+            <div className="mt-3 space-y-2">
+              {loading ? (
+                <p className="text-sm text-slate-500">{isZh ? '正在读取本学期公开课…' : 'Loading open lessons…'}</p>
+              ) : visibleRows.length === 0 ? (
+                <p className="rounded-xl border border-slate-200 bg-white px-3 py-6 text-center text-sm text-slate-500">
+                  {rows.length === 0
+                    ? isZh
+                      ? `本学期还没有${lessonKindLabel(lessonKind, true)}。`
+                      : `No ${lessonKindLabel(lessonKind, false).toLowerCase()}s this term.`
+                    : isZh
+                      ? '没有符合筛选的公开课。'
+                      : 'No open lessons match this filter.'}
+                </p>
+              ) : (
+                groupRowsByDate(visibleRows).map((day) => {
+                  const parts = openLessonDayParts(day.date, isZh);
+                  return (
+                    <section key={day.date || 'undated'} className="flex overflow-hidden rounded-xl border border-slate-200 bg-white">
+                      <div className="flex w-14 shrink-0 flex-col items-center justify-center border-r border-slate-100 bg-slate-50 px-1 py-2 text-center">
+                        <span className="text-sm font-semibold leading-tight text-slate-800">{parts.date}</span>
+                        {parts.weekday ? (
+                          <span className="text-[11px] leading-tight text-slate-500">{parts.weekday}</span>
+                        ) : null}
+                      </div>
+                      <div className="min-w-0 flex-1 divide-y divide-slate-100">
+                        {day.rows.map((row) => (
+                          <article key={row.key} className="px-3 py-2.5">
+                            <p className="text-sm font-medium leading-snug text-slate-800">
+                              {[row.timeText, personLabel(isZh, row.groupNameZh, row.groupNameEn), personLabel(isZh, row.teacherNameZh, row.teacherNameEn)]
+                                .filter((part) => part.trim())
+                                .join(' ')}
+                              {row.className || row.location
+                                ? ` ${row.className}${row.location ? `(${row.location})` : ''}`
+                                : ''}
+                            </p>
+                            {row.gradeUnitTopic ? (
+                              <p className="mt-1 text-xs leading-snug text-slate-500">{row.gradeUnitTopic}</p>
+                            ) : null}
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  );
+                })
+              )}
+            </div>
+          ) : null}
+        </div>
+
+        <div className={`${mobileTable ? '' : 'hidden'} -mr-11 mt-3 max-h-[calc(100vh-11rem)] overflow-auto pr-11 max-md:mr-0 max-md:max-h-none max-md:overflow-visible max-md:pr-0 md:block`}>
           <div className="overflow-visible rounded-xl border border-primary/25 bg-white shadow-sm">
           <table className="w-full min-w-[71rem] table-fixed border-collapse text-left">
             <colgroup>
@@ -989,21 +1117,21 @@ function LessonRow({
           {readOnly ? (
             <ReadCell value={personLabel(isZh, row.groupNameZh, row.groupNameEn)} />
           ) : (
-            <select className={cellInput} value={row.groupId} onChange={(e) => onChange({ groupId: e.target.value }, true)}>
+            <MenuSelect className={cellInput} value={row.groupId} onChange={(e) => onChange({ groupId: e.target.value }, true)}>
               <option value="">{isZh ? '选择组别' : 'Group'}</option>
               {groupOptions.filter((group) => group.id).map((group) => (
                 <option key={group.id} value={group.id}>
                   {personLabel(isZh, group.nameZh, group.nameEn)}
                 </option>
               ))}
-            </select>
+            </MenuSelect>
           )}
         </td>
         <td className={bodyCell}>
           {readOnly ? (
             <ReadCell value={personLabel(isZh, row.teacherNameZh, row.teacherNameEn)} />
           ) : (
-            <select
+            <MenuSelect
               className={cellInput}
               value={row.teacherId}
               onChange={(e) => onChange({ teacherId: e.target.value }, true)}
@@ -1015,14 +1143,14 @@ function LessonRow({
                   {personLabel(isZh, teacher.nameZh, teacher.nameEn)}
                 </option>
               ))}
-            </select>
+            </MenuSelect>
           )}
         </td>
         <td className={bodyCell}>
           {readOnly ? (
             <ReadCell value={row.className} />
           ) : (
-            <select
+            <MenuSelect
               className={cellInput}
               value={row.classId}
               onChange={(e) => onChange({ classId: e.target.value }, true)}
@@ -1034,7 +1162,7 @@ function LessonRow({
                   {item.name}
                 </option>
               ))}
-            </select>
+            </MenuSelect>
           )}
         </td>
         <td className={bodyCell}>
@@ -1226,17 +1354,17 @@ function AddLessonDialog({
         {form ? (
           <div className="grid gap-3">
             <Field label={isZh ? '组别' : 'Group'}>
-              <select className={formControl} value={form.groupId} onChange={(e) => patch({ groupId: e.target.value })}>
+              <MenuSelect className={formControl} value={form.groupId} onChange={(e) => patch({ groupId: e.target.value })}>
                 <option value="">{isZh ? '选择组别' : 'Group'}</option>
                 {groups.filter((group) => group.id).map((group) => (
                   <option key={group.id} value={group.id}>
                     {personLabel(isZh, group.nameZh, group.nameEn)}
                   </option>
                 ))}
-              </select>
+              </MenuSelect>
             </Field>
             <Field label={isZh ? '教师' : 'Teacher'}>
-              <select
+              <MenuSelect
                 className={formControl}
                 value={form.teacherId}
                 disabled={!form.groupId}
@@ -1248,17 +1376,17 @@ function AddLessonDialog({
                     {personLabel(isZh, teacher.nameZh, teacher.nameEn)}
                   </option>
                 ))}
-              </select>
+              </MenuSelect>
             </Field>
             <Field label={isZh ? '班级' : 'Class'}>
-              <select className={formControl} value={form.classId} onChange={(e) => patch({ classId: e.target.value })}>
+              <MenuSelect className={formControl} value={form.classId} onChange={(e) => patch({ classId: e.target.value })}>
                 <option value="">{isZh ? '选择班级' : 'Class'}</option>
                 {board.classes.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name}
                   </option>
                 ))}
-              </select>
+              </MenuSelect>
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label={isZh ? '日期' : 'Date'}>

@@ -29,7 +29,12 @@
     --chart-3: 197 37% 24%;
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
-    --radius: 0.5rem
+    --radius: 0.5rem;
+    /* 顶栏比原 h-14（3.5rem）高 10%，内部控件按同一比例放大 */
+    --app-topbar-height: 3.85rem;
+    --app-topbar-control: 2.475rem;
+    --app-topbar-icon: 1.1rem;
+    --app-topbar-logo: 2.31rem;
   }
   .dark {
     --background: 0 0% 3.9%;
@@ -66,6 +71,17 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+  /* 手机宽度：整页跟着文档滚动。h-screen / 100vw 会把超出屏幕的内容裁掉，滚轮和滑动都到不了。 */
+  @media (max-width: 767px) {
+    html,
+    body,
+    #root {
+      height: auto;
+      min-height: 100%;
+      max-width: 100%;
+      overflow: auto;
+    }
   }
 }
 

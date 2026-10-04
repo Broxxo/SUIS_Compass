@@ -462,7 +462,7 @@ export default function TeacherPortrait({
   }, [teacherPortraitAIPayload, setContextFromApp, onToggleAI]);
 
   return (
-    <div className={`${onToggleAI ? 'h-full min-h-0' : 'min-h-screen'} bg-slate-50 pt-14 flex flex-col`}>
+    <div className={`${onToggleAI ? 'h-full min-h-0 max-md:h-auto max-md:min-h-dvh' : 'min-h-screen'} flex w-full flex-col overflow-x-auto bg-slate-50 pt-[var(--app-topbar-height)]`}>
       <AppTopBar
         title={isZh ? '教师中心' : 'Teacher Center'}
         showBack
@@ -473,7 +473,7 @@ export default function TeacherPortrait({
               variant={isAIOpen ? 'default' : 'outline'}
               size="icon"
               onClick={onToggleAI}
-              className="h-9 w-9 rounded-lg flex-shrink-0"
+              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
               title="AI"
             >
               <Bot className="h-4 w-4" />
@@ -481,7 +481,7 @@ export default function TeacherPortrait({
           ) : undefined
         }
       />
-      <main className={`flex-1 min-h-0 ${onToggleAI ? 'overflow-y-auto' : ''} max-w-6xl w-full mx-auto px-4 py-6 space-y-4`}>
+      <main className="mx-auto w-full min-h-0 max-w-6xl flex-1 space-y-4 overflow-auto px-4 py-6">
         <div className="flex flex-wrap items-center gap-2 justify-between">
           {isAdmin ? (
             <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
@@ -576,7 +576,7 @@ export default function TeacherPortrait({
               />
             </div>
 
-            <div className="grid lg:grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
               <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
                 <div className="flex items-start justify-between gap-2">
                   <div>

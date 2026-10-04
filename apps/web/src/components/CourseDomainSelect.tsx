@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import type { CourseDomainsConfig } from '@repo/shared';
 import { getCourseDomainLabel } from '@repo/shared';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -19,7 +20,7 @@ export default function CourseDomainSelect({
   const isZh = language === 'zh';
 
   return (
-    <select
+    <MenuSelect
       className={className ?? 'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white'}
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || null)}
@@ -34,6 +35,6 @@ export default function CourseDomainSelect({
           </option>
         );
       })}
-    </select>
+    </MenuSelect>
   );
 }

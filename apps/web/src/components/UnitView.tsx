@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react';
 import { Course, GradeConfig, Semester, Unit } from '../types';
 import AddUnitDialog from './AddUnitDialog';
@@ -278,7 +279,7 @@ export default function UnitView({
       <div className="flex-shrink-0 px-6 py-1.5">
         <div className="flex items-center gap-3">
           <label className="text-sm font-semibold text-gray-700">{t('semester.select')}:</label>
-          <select
+          <MenuSelect
             value={`${selectedSemester.grade}-${selectedSemester.semester}`}
             onChange={(e) => {
               const [grade, semester] = e.target.value.split('-');
@@ -293,7 +294,7 @@ export default function UnitView({
                 </option>
               ))
             )}
-          </select>
+          </MenuSelect>
         </div>
       </div>
 
@@ -301,7 +302,7 @@ export default function UnitView({
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-3 pt-2">
         <div className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           {/* Timeline and Grid Area */}
-          <div className="flex-1 overflow-y-auto overflow-x-hidden relative" ref={scrollContainerRef}>
+          <div className="relative flex-1 overflow-auto" ref={scrollContainerRef}>
             <div className="w-full">
               {/* Week Header - Sticky at top */}
               <div className="flex sticky top-0 z-20 bg-gray-100/95 backdrop-blur-sm border-b border-gray-200">

@@ -1,3 +1,4 @@
+import { MenuSelect } from '../MenuSelect';
 import { useMemo, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { createTeachingSubjectGroupId, type TeachingSubjectGroup } from '@repo/shared';
@@ -65,7 +66,7 @@ function TeacherSelect({
   onChange: (teacherId: string | null) => void;
 }) {
   return (
-    <select
+    <MenuSelect
       value={value}
       onChange={(e) => onChange(e.target.value || null)}
       disabled={disabled}
@@ -78,7 +79,7 @@ function TeacherSelect({
           {teacherDisplayName(teacher, isZh)}
         </option>
       ))}
-    </select>
+    </MenuSelect>
   );
 }
 
@@ -485,7 +486,7 @@ export default function TeachingManagementPanel({
                 <label className="block text-xs font-medium text-slate-600 mb-1">
                   {isZh ? '学科组长' : 'Lead'}
                 </label>
-                <select
+                <MenuSelect
                   value={draft.leadTeacherId}
                   onChange={(e) => setDraft({ ...draft, leadTeacherId: e.target.value })}
                   className={selectClassName}
@@ -498,7 +499,7 @@ export default function TeachingManagementPanel({
                       {teacherDisplayName(t, isZh)}
                     </option>
                   ))}
-                </select>
+                </MenuSelect>
                 {draft.subjectKeys.length > 0 && candidateTeachers.length === 0 ? (
                   <p className="text-[11px] text-amber-700 mt-1">
                     {isZh

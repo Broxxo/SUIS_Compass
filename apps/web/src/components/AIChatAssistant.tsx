@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useState, useEffect, useRef } from 'react';
 import { Course, Semester } from '../types';
 import { Send, User, Bot, X, Loader2, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
@@ -307,7 +308,7 @@ ${context}`
             {/* Model Selection */}
             <div className="flex items-center gap-2">
               <label className="text-[10px] text-gray-600 font-medium whitespace-nowrap">{t('ai.assistant.modelLabel')}:</label>
-              <select
+              <MenuSelect
                 value={selectedModelId}
                 onChange={(e) => {
                   const newModelId = e.target.value;
@@ -322,7 +323,7 @@ ${context}`
                     {model.name}
                   </option>
                 ))}
-              </select>
+              </MenuSelect>
             </div>
           </div>
 

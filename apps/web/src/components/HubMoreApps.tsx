@@ -76,7 +76,7 @@ export default function HubMoreApps({
   }, [columns, rows, isPortrait]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white pt-16 pb-6">
+    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-gradient-to-b from-slate-50 to-white pt-[calc(var(--app-topbar-height)+0.5rem)] pb-6">
       <AppTopBar
         title={isZh ? '更多功能' : 'More'}
         showBack
@@ -86,7 +86,7 @@ export default function HubMoreApps({
             variant="outline"
             size="sm"
             onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-            className="h-9 min-w-[2.5rem] rounded-lg px-3"
+            className="h-[var(--app-topbar-control)] min-w-[2.75rem] rounded-lg px-3 text-[0.9625rem]"
             title={isZh ? 'Switch to English' : '切换到中文'}
           >
             {isZh ? 'EN' : '中'}

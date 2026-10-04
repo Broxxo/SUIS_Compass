@@ -803,3 +803,93 @@ CREATE TABLE IF NOT EXISTS open_lessons (
 );
 CREATE INDEX IF NOT EXISTS idx_open_lessons_year_term
   ON open_lessons(academic_year_id, term, lesson_date, time_label);
+
+-- 校历：模块、学年边界、周次、补班/放假、周主题、具体事项
+CREATE TABLE IF NOT EXISTS school_calendar_modules (
+  id VARCHAR(50) PRIMARY KEY,
+  name_zh VARCHAR(80) NOT NULL,
+  name_en VARCHAR(80) NOT NULL,
+  color VARCHAR(20) NOT NULL,
+  sort_order INTEGER NOT NULL,
+  segment_id VARCHAR(80),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS school_calendar_settings (
+  academic_year_id VARCHAR(50) PRIMARY KEY REFERENCES academic_years(id) ON DELETE CASCADE,
+  first_school_date DATE NOT NULL,
+  winter_break_start DATE NOT NULL,
+  spring_term_start DATE NOT NULL,
+  summer_break_start DATE NOT NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS school_calendar_weeks (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  week_index INTEGER NOT NULL,
+  monday DATE NOT NULL,
+  friday DATE NOT NULL,
+  phase VARCHAR(20) NOT NULL CHECK (phase IN ('autumn_prep', 'autumn', 'winter', 'spring_prep', 'spring', 'summer')),
+  theme VARCHAR(200) NOT NULL DEFAULT '',
+  shared_focus TEXT NOT NULL DEFAULT '',
+  UNIQUE (academic_year_id, monday)
+);
+CREATE TABLE IF NOT EXISTS school_calendar_day_overrides (
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  day DATE NOT NULL,
+  kind VARCHAR(20) NOT NULL CHECK (kind IN ('makeup', 'off')),
+  PRIMARY KEY (academic_year_id, day)
+);
+CREATE TABLE IF NOT EXISTS school_calendar_focuses (
+  id VARCHAR(50) PRIMARY KEY,
+  week_id VARCHAR(50) NOT NULL REFERENCES school_calendar_weeks(id) ON DELETE CASCADE,
+  module_id VARCHAR(50) NOT NULL REFERENCES school_calendar_modules(id) ON DELETE CASCADE,
+  theme VARCHAR(200) NOT NULL DEFAULT '',
+  focus TEXT NOT NULL DEFAULT '',
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (week_id, module_id)
+);
+CREATE TABLE IF NOT EXISTS school_calendar_events (
+  id VARCHAR(50) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  module_id VARCHAR(50) NOT NULL REFERENCES school_calendar_modules(id) ON DELETE CASCADE,
+  week_id VARCHAR(50) NOT NULL REFERENCES school_calendar_weeks(id) ON DELETE CASCADE,
+  event_date DATE NOT NULL,
+  start_time VARCHAR(5) NOT NULL,
+  end_time VARCHAR(5) NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  location VARCHAR(200) NOT NULL DEFAULT '',
+  owner_user_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  participant_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status VARCHAR(20) NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'done', 'cancelled')),
+  note TEXT NOT NULL DEFAULT '',
+  created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS school_calendar_holiday_cache (
+  source TEXT PRIMARY KEY,
+  fetched_at TIMESTAMPTZ NOT NULL,
+  payload JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS compass_mailbox_messages (
+  id VARCHAR(50) PRIMARY KEY,
+  user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS compass_mailbox_messages_created_at_idx
+  ON compass_mailbox_messages (created_at DESC);
+CREATE TABLE IF NOT EXISTS compass_mailbox_replies (
+  id VARCHAR(50) PRIMARY KEY,
+  message_id VARCHAR(50) NOT NULL REFERENCES compass_mailbox_messages(id) ON DELETE CASCADE,
+  user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS compass_mailbox_replies_message_idx
+  ON compass_mailbox_replies (message_id, created_at);

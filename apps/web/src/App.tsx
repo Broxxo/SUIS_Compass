@@ -10,6 +10,8 @@ import AdminPanel from './components/AdminPanel'
 import ClassAssistant from './components/ClassAssistant'
 import HubMoreApps from './components/HubMoreApps'
 import OpenLessons from './components/OpenLessons'
+import SchoolCalendar from './components/SchoolCalendar'
+import MailboxInbox from './components/MailboxInbox'
 import StudentPortrait from './components/StudentPortrait'
 import TeacherPortrait from './components/TeacherPortrait'
 import type { HubPortraitNavigation } from './types/hubNavigation'
@@ -22,14 +24,18 @@ type HubView =
   | 'academic-reports'
   | 'class-assistant'
   | 'open-lessons'
+  | 'school-calendar'
   | 'more'
-  | 'admin';
+  | 'admin'
+  | 'mailbox';
 
 const MOBILE_BREAKPOINT = 768;
 
 /** 桌面侧窗 AI：主内容 55%，侧窗 45%（较原 50/50 侧窗收窄 10%） */
 const AI_DOCK_MAIN_OPEN = 'w-[55%] min-w-0 overflow-hidden';
 const AI_DOCK_MAIN_OPEN_FULL = 'w-[55%] min-w-0 overflow-hidden h-full';
+/** 桌面锁在一屏里；手机宽度放开，让窗口本身能上下、左右滚到超出的内容。 */
+const APP_FRAME = 'flex h-dvh w-full min-w-0 overflow-auto max-md:h-auto max-md:min-h-dvh max-md:overflow-visible';
 const AI_DOCK_PANEL =
   'fixed inset-y-0 right-0 z-30 w-[45%] min-w-[324px] max-w-[648px] bg-white border-l border-slate-200 flex flex-col shadow-xl';
 
@@ -108,7 +114,7 @@ function AppContent() {
   // SUIS AI：从主界面进入，全屏
   if (view === 'suis-ai') {
     return (
-      <div className="h-screen w-screen flex flex-col">
+      <div className="flex h-dvh w-full min-w-0 flex-col overflow-hidden">
         <AIPanel fullScreen fromHub onClose={() => setView('hub')} />
       </div>
     );
@@ -117,9 +123,9 @@ function AppContent() {
   // 课程河流：始终挂载一个 CurriculumRoadmap；打开 AI 时桌面半屏、手机全屏覆盖
   if (view === 'curriculum-roadmap') {
     return (
-      <div className="h-screen w-screen flex relative">
+      <div className="relative flex h-dvh w-full min-w-0 overflow-hidden">
         <div
-          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN : 'w-full'}
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN : 'h-full min-h-0 w-full min-w-0'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
           <CurriculumRoadmap
@@ -161,6 +167,10 @@ function AppContent() {
     return <ClassAssistant onBackToHub={() => setView('more')} />
   }
 
+  if (view === 'school-calendar') {
+    return <SchoolCalendar onBackToHub={() => setView('hub')} />
+  }
+
   if (view === 'open-lessons') {
     const nav = portraitNav?.view === 'open-lessons' ? portraitNav : null;
     return (
@@ -180,7 +190,7 @@ function AppContent() {
   if (view === 'student-portrait' || view === 'academic-reports') {
     const nav = portraitNav?.view === 'academic-reports' ? portraitNav : null;
     return (
-      <div className="h-screen w-screen flex relative">
+      <div className={`${APP_FRAME} relative`}>
         <div
           className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
@@ -216,7 +226,7 @@ function AppContent() {
   if (view === 'teacher-portrait') {
     const nav = portraitNav?.view === 'teacher-portrait' ? portraitNav : null;
     return (
-      <div className="h-screen w-screen flex relative">
+      <div className={`${APP_FRAME} relative`}>
         <div
           className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
@@ -249,6 +259,10 @@ function AppContent() {
     );
   }
 
+  if (view === 'mailbox') {
+    return <MailboxInbox onBack={() => setView('hub')} />;
+  }
+
   // 其他入口暂未实现
   if (view !== 'hub') {
     return (
@@ -267,6 +281,7 @@ function AppContent() {
 
   return (
     <CompassHub
+      onOpenInbox={() => setView('mailbox')}
       onNavigate={(v) => {
         setPortraitNav(null);
         if (v === 'suis-ai') {

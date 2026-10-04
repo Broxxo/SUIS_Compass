@@ -2,6 +2,7 @@
  * 班级管理：学年、班级、学生（后台一级入口「班级管理」）。
  * 浏览班级与学生请使用学生画像；此处仅负责治理侧 CRUD。
  */
+import { MenuSelect } from './MenuSelect';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
@@ -593,7 +594,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
   }, [segmentFilteredClasses]);
 
   return (
-    <div className={`min-h-screen w-full min-w-0 ${embedded ? 'bg-transparent' : 'bg-slate-50 pt-14'}`}>
+    <div className={`min-h-screen w-full min-w-0 ${embedded ? 'bg-transparent' : 'bg-slate-50 pt-[var(--app-topbar-height)]'}`}>
       {!embedded && (
         <AppTopBar
           title={pageTitle}
@@ -607,7 +608,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                   size="icon"
                   type="button"
                   onClick={() => setSettingsMenuOpen((o) => !o)}
-                  className="h-9 w-9 rounded-lg"
+                  className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg"
                   title={isZh ? '设置' : 'Settings'}
                 >
                   <Settings className="h-4 w-4" />
@@ -1028,7 +1029,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
           <div className="space-y-2">
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '年级' : 'Grade'}</label>
-              <select
+              <MenuSelect
                 value={newClassGrade}
                 onChange={(e) => setNewClassGrade(Number(e.target.value))}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1036,7 +1037,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                 {gradeConfig.items.map((item) => (
                   <option key={item.id} value={item.level}>{item.label}</option>
                 ))}
-              </select>
+              </MenuSelect>
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '班级名称' : 'Class name'}</label>
@@ -1049,7 +1050,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '班主任/负责人' : 'Teacher'}</label>
-              <select
+              <MenuSelect
                 value={newClassTeacherId}
                 onChange={(e) => setNewClassTeacherId(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
@@ -1058,7 +1059,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                 {teachers.map((t) => (
                   <option key={t.id} value={t.id}>{t.displayName || t.username}</option>
                 ))}
-              </select>
+              </MenuSelect>
             </div>
           </div>
           <DialogFooter>
@@ -1167,7 +1168,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
           </DialogHeader>
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择班级' : 'Select class'}</label>
-            <select
+            <MenuSelect
               value={addToClassSelectedId}
               onChange={(e) => setAddToClassSelectedId(e.target.value)}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -1176,7 +1177,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
               {classes.map((c) => (
                 <option key={c.id} value={c.id}>{getGradeLabelByLevel(gradeConfig, c.grade)} {c.name}</option>
               ))}
-            </select>
+            </MenuSelect>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogAddToClass(null)}>{isZh ? '取消' : 'Cancel'}</Button>
@@ -1237,7 +1238,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
             <div className="space-y-2">
               <div>
                 <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择班主任' : 'Homeroom teacher'}</label>
-                <select
+                <MenuSelect
                   value={assignTeacherTeacherId}
                   onChange={(e) => setAssignTeacherTeacherId(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
@@ -1246,7 +1247,7 @@ export default function ClassManagement({ onBackToHub, embedded = false, hideYea
                   {teachers.map((t) => (
                     <option key={t.id} value={t.id}>{t.displayName || t.username}</option>
                   ))}
-                </select>
+                </MenuSelect>
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">

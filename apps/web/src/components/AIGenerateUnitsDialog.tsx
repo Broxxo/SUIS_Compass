@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useState, useEffect, useRef } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
@@ -879,7 +880,7 @@ ${uploadedFile ? '7' : '8'}. 关键概念必须从提供的16个概念清单中�
                 <label className="text-sm font-medium text-gray-700 mb-2 block">
                   AI模型
                 </label>
-                <select
+                <MenuSelect
                   value={selectedModelId}
                   onChange={(e) => {
                     const newModelId = e.target.value;
@@ -894,7 +895,7 @@ ${uploadedFile ? '7' : '8'}. 关键概念必须从提供的16个概念清单中�
                       {model.name}
                     </option>
                   ))}
-                </select>
+                </MenuSelect>
               </div>
             </div>
 

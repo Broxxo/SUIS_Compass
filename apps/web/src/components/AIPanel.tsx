@@ -29,6 +29,7 @@ import {
   Paperclip,
   Globe,
   ChevronDown,
+  Check,
   FilePen,
   X,
   Menu,
@@ -173,14 +174,18 @@ interface AIPanelProps {
 export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageToggle = false }: AIPanelProps) {
   /** 课程河流半屏侧栏：不用全屏 fixed 顶栏，避免与左侧顶栏叠在一起且无明确关闭入口 */
   const dockedInSplitView = !fullScreen && !fromHub;
-  /** 主 HUB 进入的全屏 SUIS AI：左侧对话列表常驻，不用抽屉遮罩 */
-  const persistLeftSidebar = fullScreen && fromHub;
-  /** 课程河流桌面半屏 AI：无左侧抽屉，用顶栏历史图标打开居中会话列表 */
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches,
+  );
+  /** 主 HUB 进入的全屏 SUIS AI：桌面左侧对话列表常驻；手机改为默认收起的抽屉 */
+  const persistLeftSidebar = fullScreen && fromHub && !isNarrow;
+  /** 手机全屏：历史栏是抽屉。桌面半屏课程河流无侧栏，用顶栏历史图标打开居中会话列表 */
   const drawerSidebarMode = !persistLeftSidebar && !dockedInSplitView;
   const { user } = useAuth();
   const { t, language, setLanguage } = useLanguage();
   const { screenId, setScreenId, contextPayload, setContextPayload } = useAIContext();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => !persistLeftSidebar);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const historySwipeRef = useRef<{ x: number; y: number; ignore: boolean } | null>(null);
   const [historyPopoverOpen, setHistoryPopoverOpen] = useState(false);
   const [enableWeb, setEnableWeb] = useState(false);
   const [chatList, setChatList] = useState<ChatEntry[]>(() => {
@@ -208,11 +213,13 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string>(getSavedModelId());
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const [deleteConfirmChatId, setDeleteConfirmChatId] = useState<string | null>(null);
   const [expandedReasoning, setExpandedReasoning] = useState<Set<number>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
 
   const displayName = user != null ? formatNavUserLabel(user) : language === 'zh' ? '用户' : 'User';
   const isZh = language === 'zh';
@@ -246,10 +253,23 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
   useEffect(() => {
     const close = (e: MouseEvent) => {
       if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) setContextMenuOpen(false);
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) setModelMenuOpen(false);
     };
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, []);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 767px)');
+    const apply = () => setIsNarrow(mql.matches);
+    apply();
+    mql.addEventListener('change', apply);
+    return () => mql.removeEventListener('change', apply);
+  }, []);
+
+  useEffect(() => {
+    if (isNarrow) setSidebarCollapsed(true);
+  }, [isNarrow]);
 
   useEffect(() => {
     if (!dockedInSplitView || !historyPopoverOpen) return;
@@ -511,9 +531,27 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
       )}
 
       <div
-        className={`flex flex-1 min-h-0 ${dockedInSplitView ? '' : 'pt-14'} ${
+        className={`flex flex-1 min-h-0 ${dockedInSplitView ? '' : 'pt-[var(--app-topbar-height)]'} ${
           persistLeftSidebar ? 'flex-row min-w-0 overflow-hidden' : 'relative'
         }`}
+        onPointerDown={(e) => {
+          if (!drawerSidebarMode || e.button !== 0) return;
+          const target = e.target as HTMLElement | null;
+          historySwipeRef.current = {
+            x: e.clientX,
+            y: e.clientY,
+            ignore: Boolean(target?.closest('button, a, input, textarea, select')),
+          };
+        }}
+        onPointerUp={(e) => {
+          const start = historySwipeRef.current;
+          historySwipeRef.current = null;
+          if (!start || start.ignore || !drawerSidebarMode) return;
+          const dx = e.clientX - start.x;
+          const dy = e.clientY - start.y;
+          if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy)) return;
+          setSidebarCollapsed(dx < 0);
+        }}
       >
         {/* 仅手机全屏课程河流 AI：遮罩 + 左侧滑入抽屉；半屏为居中历史浮层，无侧栏 */}
         {drawerSidebarMode && (
@@ -522,7 +560,7 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
             tabIndex={0}
             onClick={() => setSidebarCollapsed(true)}
             onKeyDown={(e) => e.key === 'Enter' && setSidebarCollapsed(true)}
-            className={`fixed inset-0 top-14 z-20 bg-black/20 transition-opacity duration-200 ${
+            className={`fixed inset-0 top-[var(--app-topbar-height)] z-20 bg-black/20 transition-opacity duration-200 ${
               sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100'
             }`}
             aria-label="关闭侧边栏"
@@ -534,7 +572,7 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
             className={
               persistLeftSidebar
                 ? 'flex h-full min-h-0 w-[202px] sm:w-[230px] shrink-0 flex-col border-r border-slate-200 bg-white'
-                : `fixed left-0 top-14 bottom-0 z-30 flex flex-col border-r border-slate-200 bg-white shadow-xl transition-transform duration-200 ease-out w-[51.84%] max-w-[202px] sm:max-w-[230px] ${
+                : `fixed left-0 top-[var(--app-topbar-height)] bottom-0 z-30 flex flex-col border-r border-slate-200 bg-white shadow-xl transition-transform duration-200 ease-out w-[51.84%] max-w-[202px] sm:max-w-[230px] ${
                     sidebarCollapsed ? '-translate-x-full pointer-events-none' : 'translate-x-0'
                   }`
             }
@@ -592,23 +630,48 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
                 <Menu className="h-5 w-5" />
               </button>
             )}
-            <select
-              value={selectedModelId}
-              onChange={(e) => {
-                const v = e.target.value;
-                setSelectedModelId(v);
-                saveModelId(v);
-              }}
-              className="text-sm font-medium text-slate-700 bg-transparent border-0 py-1 pr-6 focus:ring-0 focus:outline-none cursor-pointer appearance-none"
-              disabled={isLoading}
-            >
-              {AI_MODELS.filter((m) => m.kind !== 'image').map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="h-4 w-4 text-slate-500 -ml-5 pointer-events-none" aria-hidden />
+            <div className="relative" ref={modelMenuRef}>
+              <button
+                type="button"
+                disabled={isLoading}
+                aria-expanded={modelMenuOpen}
+                aria-haspopup="listbox"
+                onClick={() => setModelMenuOpen((open) => !open)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm font-medium text-slate-800 shadow-sm disabled:opacity-60"
+              >
+                <span>{AI_MODELS.find((m) => m.id === selectedModelId)?.name ?? 'AI'}</span>
+                <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${modelMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {modelMenuOpen ? (
+                <div
+                  role="listbox"
+                  className="absolute left-0 top-full z-50 mt-1 min-w-full w-max max-w-[min(18rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
+                >
+                  {AI_MODELS.filter((m) => m.kind !== 'image').map((m) => {
+                    const selected = m.id === selectedModelId;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={`flex w-full items-center justify-between gap-4 px-3 py-2.5 text-left text-sm ${
+                          selected ? 'bg-slate-50 font-medium text-slate-900' : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                        onClick={() => {
+                          setSelectedModelId(m.id);
+                          saveModelId(m.id);
+                          setModelMenuOpen(false);
+                        }}
+                      >
+                        <span className="whitespace-nowrap">{m.name}</span>
+                        {selected ? <Check className="h-4 w-4 shrink-0 text-blue-600" /> : <span className="h-4 w-4 shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
           </div>
           {messages.length === 0 && !isLoading ? (
             <>

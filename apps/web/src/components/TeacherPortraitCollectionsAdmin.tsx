@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   TEACHER_PORTRAIT_COLLECTION_TYPES,
@@ -340,7 +341,7 @@ export default function TeacherPortraitCollectionsAdmin({
         <div className="space-y-3">
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '模版' : 'Template'}</label>
-            <select
+            <MenuSelect
               value={newCollectionType}
               onChange={(e) => setNewCollectionType(e.target.value as TeacherPortraitCollectionType)}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -350,7 +351,7 @@ export default function TeacherPortraitCollectionsAdmin({
                   {teacherPortraitCollectionTypeLabel(type, isZh)}
                 </option>
               ))}
-            </select>
+            </MenuSelect>
           </div>
 
           <div>

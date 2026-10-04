@@ -1,3 +1,4 @@
+import { MenuSelect } from '../MenuSelect';
 import { STAFFING_HOMEROOM_SUBJECT_KEY } from '@repo/shared';
 import type { AdminUser } from '../../lib/adminStorage';
 import {
@@ -61,7 +62,7 @@ function TeacherSelect({
   onChange: (teacherId: string | null) => void;
 }) {
   return (
-    <select
+    <MenuSelect
       value={value}
       onChange={(e) => onChange(e.target.value || null)}
       disabled={disabled}
@@ -74,7 +75,7 @@ function TeacherSelect({
           {teacherDisplayName(teacher, isZh)}
         </option>
       ))}
-    </select>
+    </MenuSelect>
   );
 }
 

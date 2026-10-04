@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Bot } from 'lucide-react';
 import AppTopBar from './AppTopBar';
@@ -451,6 +452,19 @@ function applyWorkbenchPdfCloneTransforms(cloneRoot: HTMLElement, includedStuden
   cloneRoot.querySelectorAll('[data-workbench-pdf-comment-row]').forEach((el) => {
     const id = el.getAttribute('data-workbench-pdf-comment-row');
     if (!id || !includedStudentIds.has(id)) el.remove();
+  });
+
+  cloneRoot.querySelectorAll('[data-menu-select]').forEach((el) => {
+    const span = clonedDoc.createElement('span');
+    span.textContent = (el.getAttribute('data-menu-select-label') ?? '').trim();
+    span.style.display = 'inline-block';
+    span.style.maxWidth = '100%';
+    span.style.verticalAlign = 'middle';
+    span.style.lineHeight = '1.45';
+    span.style.fontFamily = 'inherit';
+    span.style.fontSize = 'inherit';
+    span.style.color = '#0f172a';
+    el.replaceWith(span);
   });
 
   cloneRoot.querySelectorAll('button').forEach((b) => b.remove());
@@ -3570,7 +3584,7 @@ export default function StudentPortrait({
   const renderClassOverviewPanel = () => (
     <div className="border border-slate-200 rounded-xl p-3 space-y-3">
       <div className="flex flex-wrap items-stretch gap-2">
-        <select
+        <MenuSelect
           value={selectedClassReportKey}
           onChange={(e) => setSelectedClassReportKey(e.target.value)}
           disabled={classReportOptions.length === 0}
@@ -3585,7 +3599,7 @@ export default function StudentPortrait({
               </option>
             ))
           )}
-        </select>
+        </MenuSelect>
         {canExportWholeClassPdf && (
           <>
             <Button
@@ -3650,7 +3664,7 @@ export default function StudentPortrait({
         <div className="space-y-4">
           <div className="space-y-3">
             <div className="text-sm font-semibold text-slate-800">{isZh ? '班级整体情况' : 'Class overview'}</div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
               <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
                 <div className="text-xs text-slate-500">{isZh ? '当前人数' : 'Students'}</div>
                 <div className="text-lg font-semibold text-slate-800">{classAcademicInsight.totalStudents}</div>
@@ -3670,7 +3684,7 @@ export default function StudentPortrait({
                 </div>
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <div className="rounded-lg border border-slate-200 p-3 space-y-2">
                 <div className="text-sm font-semibold text-slate-800">{isZh ? '学科均分' : 'Subject average'}</div>
                 {classAcademicInsight.subjectScoreAverages.length === 0 ? (
@@ -3753,7 +3767,7 @@ export default function StudentPortrait({
   );
 
   return (
-    <div className={`${onToggleAI ? 'h-full min-h-0' : 'min-h-screen'} bg-slate-50 pt-14 flex flex-col`}>
+    <div className={`${onToggleAI ? 'h-full min-h-0 max-md:h-auto max-md:min-h-dvh' : 'min-h-screen'} flex w-full flex-col overflow-x-auto bg-slate-50 pt-[var(--app-topbar-height)]`}>
       <AppTopBar
         title={isStudentSelf ? (isZh ? '我的画像' : 'My profile') : isZh ? '学生中心' : 'Student Center'}
         showBack={!isStudentSelf}
@@ -3764,7 +3778,7 @@ export default function StudentPortrait({
               variant={isAIOpen ? 'default' : 'outline'}
               size="icon"
               onClick={onToggleAI}
-              className="h-9 w-9 rounded-lg flex-shrink-0"
+              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
               title="AI"
             >
               <Bot className="h-4 w-4" />
@@ -3772,7 +3786,7 @@ export default function StudentPortrait({
           ) : undefined
         }
       />
-      <main className={`flex-1 min-h-0 ${onToggleAI ? 'overflow-y-auto' : ''} max-w-6xl w-full mx-auto px-4 py-6 space-y-4`}>
+      <main className="mx-auto w-full min-h-0 max-w-6xl flex-1 space-y-4 overflow-auto px-4 py-6">
         {!isStudentSelf && (
           <div className="bg-white border border-slate-200 rounded-xl p-2 inline-flex gap-1">
             {canViewSchoolDashboard && (
@@ -3889,7 +3903,7 @@ export default function StudentPortrait({
                         </div>
                       )}
                       {s.dimensions.length > 0 && (
-                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div className="mt-2 grid grid-cols-2 gap-2">
                           {s.dimensions.map((d) => (
                             <div key={d.id} className="text-xs rounded border border-slate-100 px-2 py-1.5">
                               <span className="text-slate-700">{d.dimensionLabel}</span>
@@ -3921,11 +3935,7 @@ export default function StudentPortrait({
 
         {!loading && canViewSchoolDashboard && tab === 'overview' && (
           <section className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="bg-white rounded-xl border border-slate-200 p-4">
-                <div className="text-xs text-slate-500">{isZh ? '学年在册学生' : 'Students in year'}</div>
-                <div className="text-2xl font-semibold text-slate-800 mt-1">{learningStats.total}</div>
-              </div>
+            <div className="grid grid-cols-2 gap-3">
               <div className="bg-white rounded-xl border border-slate-200 p-4">
                 <div className="text-xs text-slate-500">{isZh ? '在读学生' : 'Active students'}</div>
                 <div className="text-2xl font-semibold text-slate-800 mt-1">{learningStats.active}</div>
@@ -3936,7 +3946,7 @@ export default function StudentPortrait({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
               <div className="bg-white rounded-xl border border-slate-200 p-4">
                 <h3 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '学部分布' : 'Division distribution'}</h3>
                 <ul className="space-y-1 text-sm">
@@ -4162,7 +4172,7 @@ export default function StudentPortrait({
                   <span className="text-sm font-semibold text-slate-800 shrink-0 inline-flex h-9 items-center leading-none">
                     {isZh ? '学业报告' : 'Academic report'}
                   </span>
-                  <select
+                  <MenuSelect
                     value={workbenchClassId}
                     onChange={(e) => setWorkbenchClassId(e.target.value)}
                     className="h-9 rounded-lg border border-slate-300 px-3 text-sm leading-none bg-white min-w-[120px]"
@@ -4173,8 +4183,8 @@ export default function StudentPortrait({
                         {workbenchClassShortLabel(c)}
                       </option>
                     ))}
-                  </select>
-                  <select
+                  </MenuSelect>
+                  <MenuSelect
                     value={workbenchSubjectKey}
                     onChange={(e) => setWorkbenchSubjectKey(e.target.value)}
                     className="h-9 rounded-lg border border-slate-300 px-3 text-sm leading-none bg-white min-w-[240px] max-w-[min(100%,420px)]"
@@ -4192,7 +4202,7 @@ export default function StudentPortrait({
                         {isZh ? '班主任综合评价' : 'Homeroom comprehensive evaluation'}
                       </option>
                     ) : null}
-                  </select>
+                  </MenuSelect>
                   {workbenchDisplayTeacherName ? (
                     <span className="text-sm text-slate-600 shrink-0 inline-flex h-9 items-center leading-none">
                       {isZh ? `教师：${workbenchDisplayTeacherName}` : `Teacher: ${workbenchDisplayTeacherName}`}
@@ -4405,7 +4415,7 @@ export default function StudentPortrait({
                                       'A') as TargetLevel;
                                     return (
                                       <td key={d.id} className="px-2 py-[0.4rem] align-middle text-center">
-                                        <select
+                                        <MenuSelect
                                           value={dimRating}
                                           onChange={(e) =>
                                             setWorkbenchStudentDrafts((prev) =>
@@ -4434,7 +4444,7 @@ export default function StudentPortrait({
                                           <option value="B">B</option>
                                           <option value="C">C</option>
                                           <option value="D">D</option>
-                                        </select>
+                                        </MenuSelect>
                                       </td>
                                     );
                                   })}
@@ -4474,7 +4484,7 @@ export default function StudentPortrait({
                                     </td>
                                   ) : null}
                                   <td className="px-2 py-[0.4rem] align-middle text-center">
-                                    <select
+                                    <MenuSelect
                                       value={row.subject.learningQualityGrade ?? 'A'}
                                       onChange={(e) =>
                                         setWorkbenchStudentDrafts((prev) =>
@@ -4500,7 +4510,7 @@ export default function StudentPortrait({
                                       <option value="B">B</option>
                                       <option value="C">C</option>
                                       <option value="D">D</option>
-                                    </select>
+                                    </MenuSelect>
                                   </td>
                                 </tr>
                               );
@@ -4662,7 +4672,7 @@ export default function StudentPortrait({
               <div className="bg-white border border-slate-200 rounded-xl p-3 lg:col-span-2 flex flex-col gap-3 min-h-0">
                 <div>
                   <label className="block text-xs text-slate-500 mb-1">{isZh ? '班级' : 'Class'}</label>
-                  <select
+                  <MenuSelect
                     value={selectedClassId}
                     onChange={(e) => {
                       const id = e.target.value;
@@ -4683,7 +4693,7 @@ export default function StudentPortrait({
                         </option>
                       ))
                     )}
-                  </select>
+                  </MenuSelect>
                 </div>
                 <div className="min-h-0 flex flex-col">
                   <h3 className="text-sm font-semibold text-slate-800 mb-2 shrink-0">{isZh ? '学生' : 'Students'}</h3>
@@ -4740,7 +4750,7 @@ export default function StudentPortrait({
                             )}
                           </div>
                           <div className="flex flex-wrap items-stretch gap-2">
-                            <select
+                            <MenuSelect
                               value={
                                 releasedReportPickOptions.some(
                                   (o) => o.key === `${currentYearId ?? ''}::${reportTerm}::${selectedTemplateId}`,
@@ -4770,7 +4780,7 @@ export default function StudentPortrait({
                                   </option>
                                 ))
                               )}
-                            </select>
+                            </MenuSelect>
                             <Button
                               type="button"
                               variant="default"

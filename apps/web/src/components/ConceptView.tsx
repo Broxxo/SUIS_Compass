@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useState, useEffect, useRef } from 'react';
 import { Course, GradeConfig, Unit } from '../types';
 import { Sparkles, X, Info } from 'lucide-react';
@@ -912,7 +913,7 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
       <div className="flex-shrink-0 px-6 py-1.5">
         <div className="flex items-center gap-3">
           <label className="text-sm font-semibold text-gray-700">{t('semester.select')}:</label>
-          <select
+          <MenuSelect
             value={selectedSemester ? `${selectedSemester.grade}-${selectedSemester.semester}` : ''}
             onChange={(e) => {
               if (e.target.value) {
@@ -930,7 +931,7 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
                 </option>
               ))
             )}
-          </select>
+          </MenuSelect>
         </div>
       </div>
 

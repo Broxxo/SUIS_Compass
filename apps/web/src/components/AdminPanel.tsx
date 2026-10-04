@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
@@ -770,6 +771,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const [editDateOfBirth, setEditDateOfBirth] = useState('');
   const [editSubmitLoading, setEditSubmitLoading] = useState(false);
   const [studentCurrentYearId, setStudentCurrentYearId] = useState<string | null>(null);
+  const [studentRosterView, setStudentRosterView] = useState<'enrolled' | 'graduates'>('enrolled');
   const [dialogCreateStudent, setDialogCreateStudent] = useState(false);
   const [reportSettingYearId, setReportSettingYearId] = useState<string>('');
   const { term: reportSettingTerm, setTerm: setReportSettingTerm, ready: reportSettingTermReady } = useTermForYear(reportSettingYearId);
@@ -1863,7 +1865,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       setAllYears(yList);
       setAllClasses(clsList);
       setEnrollments(loadEnrollmentsSync());
-      setStudentCurrentYearId(latestAcademicYear(yList)?.id ?? null);
+      setStudentCurrentYearId(yList.find((year) => year.isCurrent)?.id ?? latestAcademicYear(yList)?.id ?? null);
     }).finally(() => setStudentLoading(false));
   }, [adminTab]);
 
@@ -2102,13 +2104,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     const classesInYear = studentCurrentYearId
       ? allClasses.filter((c) => c.academicYearId === studentCurrentYearId)
       : [];
-    let list = [...students];
+    let list = students.filter((s) =>
+      studentRosterView === 'graduates' ? s.status === 'graduated' : s.status !== 'graduated',
+    );
+    const classForRosterStudent = (s: Student) => {
+      if (studentRosterView === 'graduates' && s.currentClassId) {
+        return allClasses.find((c) => c.id === s.currentClassId);
+      }
+      const yearEnr = studentCurrentYearId
+        ? enrollments.find((e) => e.studentId === s.id && e.academicYearId === studentCurrentYearId)
+        : undefined;
+      return yearEnr ? classesInYear.find((c) => c.id === yearEnr.classId) : undefined;
+    };
     if (studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL) {
       list = list.filter((s) => {
-        const yearEnr = studentCurrentYearId
-          ? enrollments.find((e) => e.studentId === s.id && e.academicYearId === studentCurrentYearId)
-          : undefined;
-        const cls = yearEnr ? classesInYear.find((c) => c.id === yearEnr.classId) : undefined;
+        const cls = classForRosterStudent(s);
         if (cls) {
           return filterClassesBySchoolSegment(gradeConfig, [cls], studentFilterSegmentId).length > 0;
         }
@@ -2122,22 +2132,24 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     }
     if (studentFilterGradeLevel) {
       const gradeLevel = Number(studentFilterGradeLevel);
-      list = list.filter((s) => {
-        const yearEnr = studentCurrentYearId
-          ? enrollments.find((e) => e.studentId === s.id && e.academicYearId === studentCurrentYearId)
-          : undefined;
-        const cls = yearEnr ? classesInYear.find((c) => c.id === yearEnr.classId) : undefined;
-        return (cls?.grade ?? s.currentGrade) === gradeLevel;
-      });
+      list = list.filter((s) => (classForRosterStudent(s)?.grade ?? s.currentGrade) === gradeLevel);
     }
     if (studentFilterClass.trim()) {
       const classId = studentFilterClass;
-      const enrolledIds = new Set(
-        enrollments
-          .filter((e) => e.classId === classId && (!studentCurrentYearId || e.academicYearId === studentCurrentYearId))
-          .map((e) => e.studentId),
-      );
-      list = list.filter((s) => enrolledIds.has(s.id));
+      if (studentRosterView === 'graduates') {
+        list = list.filter(
+          (s) =>
+            s.currentClassId === classId ||
+            enrollments.some((e) => e.studentId === s.id && e.classId === classId),
+        );
+      } else {
+        const enrolledIds = new Set(
+          enrollments
+            .filter((e) => e.classId === classId && (!studentCurrentYearId || e.academicYearId === studentCurrentYearId))
+            .map((e) => e.studentId),
+        );
+        list = list.filter((s) => enrolledIds.has(s.id));
+      }
     }
     if (studentFilterName.trim()) {
       const q = studentFilterName.trim().toLowerCase();
@@ -2180,6 +2192,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     enrollments,
     allClasses,
     studentCurrentYearId,
+    studentRosterView,
     studentFilterSegmentId,
     studentFilterGradeLevel,
     studentFilterClass,
@@ -2209,9 +2222,28 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
     return items;
   }, [studentGradeConfig, studentFilterSegmentId]);
 
+  const studentsInViewCount = useMemo(
+    () => students.filter((s) => (studentRosterView === 'graduates' ? s.status === 'graduated' : s.status !== 'graduated')).length,
+    [students, studentRosterView],
+  );
+
   const studentFilterClassOptions = useMemo(() => {
+    if (studentRosterView === 'graduates') {
+      const classIds = new Set(
+        students.filter((s) => s.status === 'graduated' && s.currentClassId).map((s) => s.currentClassId as string),
+      );
+      let cls = allClasses.filter((c) => classIds.has(c.id));
+      if (studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL) {
+        cls = filterClassesBySchoolSegment(studentGradeConfig, cls, studentFilterSegmentId);
+      }
+      if (studentFilterGradeLevel) {
+        const gradeLevel = Number(studentFilterGradeLevel);
+        cls = cls.filter((c) => c.grade === gradeLevel);
+      }
+      return cls.slice().sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }));
+    }
     if (!studentCurrentYearId) return [];
-    let cls = allClasses.filter((c) => c.academicYearId === studentCurrentYearId);
+    let cls = allClasses.filter((c) => c.academicYearId === studentCurrentYearId && !c.archivedAt);
     if (studentFilterSegmentId !== ROADMAP_OVERVIEW_TAB_ALL) {
       cls = filterClassesBySchoolSegment(studentGradeConfig, cls, studentFilterSegmentId);
     }
@@ -2220,7 +2252,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       cls = cls.filter((c) => c.grade === gradeLevel);
     }
     return cls.slice().sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }));
-  }, [allClasses, studentCurrentYearId, studentFilterSegmentId, studentFilterGradeLevel, studentGradeConfig]);
+  }, [allClasses, studentCurrentYearId, studentFilterSegmentId, studentFilterGradeLevel, studentGradeConfig, studentRosterView, students]);
 
   const clearStudentFilters = () => {
     setStudentFilterSegmentId(ROADMAP_OVERVIEW_TAB_ALL);
@@ -2314,11 +2346,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const handleStudentExcelExport = () => {
     setError(null);
     const year = allYears.find((y) => y.id === studentCurrentYearId);
+    const exportStudents = filteredAndSortedStudents;
+    const exportEnrollments =
+      studentRosterView === 'graduates'
+        ? exportStudents.flatMap((s) =>
+            s.currentClassId
+              ? [{ id: s.id, studentId: s.id, classId: s.currentClassId, academicYearId: 'archive' }]
+              : [],
+          )
+        : enrollments;
     downloadStudentsExport({
-      students,
-      enrollments,
-      academicYearId: studentCurrentYearId,
-      academicYearLabel: year?.name ?? '',
+      students: exportStudents,
+      enrollments: exportEnrollments,
+      academicYearId: studentRosterView === 'graduates' ? 'archive' : studentCurrentYearId,
+      academicYearLabel:
+        studentRosterView === 'graduates' ? (isZh ? '毕业生档案' : 'Graduates') : (year?.name ?? ''),
       classes: allClasses,
       isZh,
     });
@@ -5490,7 +5532,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const adminContentFrameClass = 'w-full max-w-7xl mx-auto px-4 sm:px-6';
 
   return (
-    <div className={`${adminTab === 'courses' ? 'h-screen overflow-hidden' : 'min-h-screen'} bg-slate-50 pt-14 flex flex-col`}>
+    <div className={`${adminTab === 'courses' ? 'h-dvh overflow-hidden' : 'min-h-screen'} bg-slate-50 pt-[var(--app-topbar-height)] flex flex-col`}>
       <AppTopBar
         title={isZh ? '后台管理' : 'Admin'}
         showBack
@@ -5718,7 +5760,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                         />
                       </td>
                       <td className="py-1.5 pr-2">
-                        <select
+                        <MenuSelect
                           value={row.role}
                           onChange={(e) =>
                             updateStaffDraftRow(row.id, { role: e.target.value as 'admin' | 'teacher' })
@@ -5732,7 +5774,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                 {ROLE_LABELS[r][isZh ? 'zh' : 'en']}
                               </option>
                             ))}
-                        </select>
+                        </MenuSelect>
                       </td>
                       <td className="py-1.5 pr-2">
                         <input
@@ -5848,7 +5890,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             <div className="flex flex-wrap items-end gap-2 pb-2 mb-3 border-b border-slate-100">
                 <div className="flex flex-col gap-0.5">
                   <span className="text-[10px] uppercase text-slate-400">{isZh ? '部门' : 'Dept.'}</span>
-                  <select
+                  <MenuSelect
                     value={userStaffFilterDepartment}
                     onChange={(e) => setUserStaffFilterDepartment(e.target.value)}
                     className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm bg-white min-w-[7rem]"
@@ -5858,11 +5900,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     {departmentOptions.map((d) => (
                       <option key={d} value={d}>{d}</option>
                     ))}
-                  </select>
+                  </MenuSelect>
                 </div>
                 <div className="flex flex-col gap-0.5">
                   <span className="text-[10px] uppercase text-slate-400">{isZh ? '主学科' : 'Subject'}</span>
-                  <select
+                  <MenuSelect
                     value={userStaffFilterPrimarySubject}
                     onChange={(e) => setUserStaffFilterPrimarySubject(e.target.value)}
                     className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm bg-white min-w-[7rem]"
@@ -5872,11 +5914,11 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     {primarySubjectOptions.map((s) => (
                       <option key={s} value={s}>{s}</option>
                     ))}
-                  </select>
+                  </MenuSelect>
                 </div>
                 <div className="flex flex-col gap-0.5">
                   <span className="text-[10px] uppercase text-slate-400">{isZh ? '权限' : 'Access'}</span>
-                  <select
+                  <MenuSelect
                     value={userStaffFilterRole}
                     onChange={(e) => setUserStaffFilterRole(e.target.value as '' | 'admin' | 'teacher')}
                     className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm bg-white min-w-[6rem]"
@@ -5884,7 +5926,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <option value="">{isZh ? '全部' : 'All'}</option>
                     <option value="admin">{ROLE_LABELS.admin[isZh ? 'zh' : 'en']}</option>
                     <option value="teacher">{ROLE_LABELS.teacher[isZh ? 'zh' : 'en']}</option>
-                  </select>
+                  </MenuSelect>
                 </div>
                 <div className="flex flex-col gap-0.5 flex-1 min-w-[10rem]">
                   <span className="text-[10px] uppercase text-slate-400">{isZh ? '关键词' : 'Search'}</span>
@@ -6024,21 +6066,21 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                         </td>
                         <td className="py-2 pr-4">
                           {currentUser?.role === 'system-admin' && u.role !== 'system-admin' && u.role !== 'student' ? (
-                            <select
+                            <MenuSelect
                               value={u.role}
                               onChange={(e) => handleRoleChange(u, e.target.value as 'admin' | 'teacher')}
                               className="text-sm rounded border border-slate-300 px-2 py-1 bg-white min-w-[100px]"
                             >
                               <option value="admin">{ROLE_LABELS.admin[isZh ? 'zh' : 'en']}</option>
                               <option value="teacher">{ROLE_LABELS.teacher[isZh ? 'zh' : 'en']}</option>
-                            </select>
+                            </MenuSelect>
                           ) : (
                             ROLE_LABELS[u.role][isZh ? 'zh' : 'en']
                           )}
                         </td>
                         <td className="py-2 pr-4">
                           {canEditUser(u) ? (
-                            <select
+                            <MenuSelect
                               value={u.department ?? ''}
                               onChange={(e) => handleDepartmentChange(u, e.target.value || null)}
                               className="text-sm rounded border border-slate-300 px-2 py-1 bg-white min-w-[100px]"
@@ -6050,7 +6092,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                               {u.department && u.department.trim() && !departmentOptions.includes(u.department.trim()) && (
                                 <option value={u.department}>{u.department}</option>
                               )}
-                            </select>
+                            </MenuSelect>
                           ) : (
                             <span className="text-slate-600">{u.department ?? '—'}</span>
                           )}
@@ -6435,7 +6477,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                           const currentTeacherId = assigned?.teacherId ?? '';
                                                           const isSaving = staffingSavingKeys.has(rowKey);
                                                           return (
-                                                            <select
+                                                            <MenuSelect
                                                               key={rowKey}
                                                               value={currentTeacherId}
                                                               onChange={(e) => {
@@ -6460,7 +6502,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                                   {staffingTeacherDisplayName(teacher, isZh)}
                                                                 </option>
                                                               ))}
-                                                            </select>
+                                                            </MenuSelect>
                                                           );
                                                         })}
                                                         {weeklyPeriodsBadge}
@@ -6480,7 +6522,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                         return (
                                                           <>
                                                             <div className="flex w-full items-center justify-center gap-1 min-w-0">
-                                                              <select
+                                                              <MenuSelect
                                                                 value={currentTeacherId}
                                                                 onChange={(e) => {
                                                                   void upsertStaffingAssignment({
@@ -6504,7 +6546,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                                     {staffingTeacherDisplayName(teacher, isZh)}
                                                                   </option>
                                                                 ))}
-                                                              </select>
+                                                              </MenuSelect>
                                                               {weeklyPeriodsBadge}
                                                             </div>
                                                             {isSaving ? (
@@ -6585,7 +6627,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                             <label className="text-xs font-medium text-slate-600">
                               {isZh ? '主学科筛选' : 'Primary subject'}
                             </label>
-                            <select
+                            <MenuSelect
                               value={staffingLoadGrandFilterPrimary}
                               onChange={(e) => setStaffingLoadGrandFilterPrimary(e.target.value)}
                               className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm max-w-[16rem]"
@@ -6598,13 +6640,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                     : key}
                                 </option>
                               ))}
-                            </select>
+                            </MenuSelect>
                           </div>
                           <div className="flex flex-col gap-1 min-w-[11rem]">
                             <label className="text-xs font-medium text-slate-600">
                               {isZh ? '排序' : 'Sort'}
                             </label>
-                            <select
+                            <MenuSelect
                               value={staffingLoadGrandSort}
                               onChange={(e) =>
                                 setStaffingLoadGrandSort(
@@ -6617,7 +6659,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                               <option value="total-asc">{isZh ? '周课时（少→多）' : 'Periods (low → high)'}</option>
                               <option value="name-asc">{isZh ? '教师姓名（A→Z）' : 'Teacher name (A → Z)'}</option>
                               <option value="primary-asc">{isZh ? '主学科（A→Z）' : 'Primary subject (A → Z)'}</option>
-                            </select>
+                            </MenuSelect>
                           </div>
                         </div>
                         <div className="overflow-x-auto rounded-lg border border-slate-200">
@@ -6691,29 +6733,49 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
         {adminTab === 'students' && (
           <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-3">
-              <h2 className="text-base font-semibold text-slate-800">
-                {studentCurrentYearId
-                  ? `${allYears.find((y) => y.id === studentCurrentYearId)?.name ?? ''} — ${isZh ? '学生列表' : 'Students'}`
-                  : (isZh ? '学生列表' : 'Student list')}
-                <span className="text-slate-500 font-normal">
-                  {' '}({studentLoading ? '…' : filteredAndSortedStudents.length}
-                  {hasActiveStudentFilters && !studentLoading && filteredAndSortedStudents.length !== students.length
-                    ? ` / ${students.length}`
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={studentRosterView === 'enrolled'}
+                    onClick={() => {
+                      setStudentRosterView('enrolled');
+                      setStudentFilterClass('');
+                    }}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                      studentRosterView === 'enrolled'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {isZh ? '在校生' : 'Enrolled'}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={studentRosterView === 'graduates'}
+                    onClick={() => {
+                      setStudentRosterView('graduates');
+                      setStudentFilterClass('');
+                    }}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                      studentRosterView === 'graduates'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {isZh ? '毕业生档案' : 'Graduate archive'}
+                  </button>
+                </div>
+                <span className="text-sm text-slate-500">
+                  {studentLoading ? '…' : filteredAndSortedStudents.length}
+                  {hasActiveStudentFilters && !studentLoading && filteredAndSortedStudents.length !== studentsInViewCount
+                    ? ` / ${studentsInViewCount}`
                     : ''}
-                  )
                 </span>
-              </h2>
+              </div>
               <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
-                <label className="text-sm font-medium text-slate-700 whitespace-nowrap">{isZh ? '学年' : 'Year'}</label>
-                <AcademicYearSelect
-                  isZh={isZh}
-                  years={allYears}
-                  value={studentCurrentYearId || ''}
-                  onChange={(id) => setStudentCurrentYearId(id || null)}
-                  allowEmpty={allYears.length === 0}
-                  emptyLabel={isZh ? '暂无学年' : 'No years'}
-                  disabled={studentLoading || allYears.length === 0}
-                />
                 <Button
                   type="button"
                   variant="outline"
@@ -6723,27 +6785,31 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 >
                   {isZh ? '导出 Excel' : 'Export Excel'}
                 </Button>
-                <input
-                  ref={studentExcelInputRef}
-                  type="file"
-                  accept=".xlsx,.xls"
-                  className="hidden"
-                  onChange={(e) => void handleStudentExcelImport(e)}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => studentExcelInputRef.current?.click()}
-                  disabled={studentExcelImporting || studentLoading || !studentCurrentYearId}
-                >
-                  {studentExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
-                </Button>
-                {canManageStudents && (
-                  <Button size="sm" onClick={() => setDialogCreateStudent(true)} disabled={studentLoading}>
-                    <Plus className="h-4 w-4 mr-1" />
-                    {isZh ? '新建学生' : 'New student'}
-                  </Button>
+                {studentRosterView === 'enrolled' && (
+                  <>
+                    <input
+                      ref={studentExcelInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      className="hidden"
+                      onChange={(e) => void handleStudentExcelImport(e)}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => studentExcelInputRef.current?.click()}
+                      disabled={studentExcelImporting || studentLoading || !studentCurrentYearId}
+                    >
+                      {studentExcelImporting ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+                    </Button>
+                    {canManageStudents && (
+                      <Button size="sm" onClick={() => setDialogCreateStudent(true)} disabled={studentLoading}>
+                        <Plus className="h-4 w-4 mr-1" />
+                        {isZh ? '新建学生' : 'New student'}
+                      </Button>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -6794,13 +6860,15 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   controlSize="sm"
                   width="sm"
                   value={studentFilterClass}
-                  disabled={!studentCurrentYearId}
+                  disabled={studentRosterView === 'enrolled' && !studentCurrentYearId}
                   onChange={(e) => setStudentFilterClass(e.target.value)}
                 >
                   <option value="">{isZh ? '全部班级' : 'All classes'}</option>
                   {studentFilterClassOptions.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {getGradeLabelByLevel(studentGradeConfig, c.grade)} · {c.name}
+                      {studentRosterView === 'graduates'
+                        ? `${allYears.find((y) => y.id === c.academicYearId)?.name ?? ''} · ${getGradeLabelByLevel(studentGradeConfig, c.grade)} · ${c.name}`
+                        : `${getGradeLabelByLevel(studentGradeConfig, c.grade)} · ${c.name}`}
                     </option>
                   ))}
                 </FilterSelect>
@@ -6925,15 +6993,37 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     </thead>
                     <tbody>
                       {filteredAndSortedStudents.length === 0 ? (
-                        <tr><td colSpan={11} className="py-8 text-center text-slate-500 text-sm">{isZh ? '暂无学生' : 'No students'}</td></tr>
+                        <tr>
+                          <td colSpan={11} className="py-8 text-center text-slate-500 text-sm">
+                            {hasActiveStudentFilters
+                              ? (isZh ? '没有符合筛选的学生' : 'No students match the filters')
+                              : studentRosterView === 'graduates'
+                                ? (isZh ? '毕业生档案里还没有学生' : 'No graduates yet')
+                                : (isZh ? '暂无学生' : 'No students')}
+                          </td>
+                        </tr>
                       ) : (
                         filteredAndSortedStudents.map((s) => {
-                          const myEnrollments = enrollments.filter((e) => e.studentId === s.id);
-                          const classLabels = myEnrollments.map((e) => {
-                            const cls = allClasses.find((c) => c.id === e.classId);
-                            const year = allYears.find((y) => y.id === e.academicYearId);
-                            return year && cls ? `${year.name} · ${cls.name}` : cls?.name ?? e.classId;
-                          });
+                          const classLabels =
+                            studentRosterView === 'graduates'
+                              ? (() => {
+                                  const cls = s.currentClassId
+                                    ? allClasses.find((c) => c.id === s.currentClassId)
+                                    : undefined;
+                                  if (!cls) return [] as string[];
+                                  const year = allYears.find((y) => y.id === cls.academicYearId);
+                                  return [year ? `${year.name} · ${cls.name}` : cls.name];
+                                })()
+                              : enrollments
+                                  .filter(
+                                    (e) =>
+                                      e.studentId === s.id &&
+                                      (!studentCurrentYearId || e.academicYearId === studentCurrentYearId),
+                                  )
+                                  .map((e) => {
+                                    const cls = allClasses.find((c) => c.id === e.classId);
+                                    return cls?.name ?? e.classId;
+                                  });
                           return (
                             <tr key={s.id} className="border-t border-slate-100 hover:bg-slate-50">
                               <td className="py-2.5 px-3 font-medium text-slate-800">{s.nameZh ?? '—'}</td>
@@ -7726,7 +7816,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择学科进行配置' : 'Subject to configure'}</label>
-                    <select
+                    <MenuSelect
                       value={reportTargetActiveSubjectKey}
                       onChange={(e) => setReportTargetActiveSubjectKey(e.target.value)}
                       className="w-full h-10 rounded-lg border border-slate-300 px-3 text-sm bg-white"
@@ -7739,7 +7829,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                           {s.subjectNameZh} {s.subjectNameEn && s.subjectNameEn !== s.subjectNameZh ? `(${s.subjectNameEn})` : ''}
                         </option>
                       ))}
-                    </select>
+                    </MenuSelect>
                   </div>
                   {reportTargetActiveSubject && (
                     <div className="space-y-3 border-t border-slate-100 pt-3">
@@ -7982,7 +8072,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">{isZh ? '选择考试学科进行配置' : 'Exam subject to configure'}</label>
-                    <select
+                    <MenuSelect
                       value={reportExamActiveCourseId}
                       onChange={(e) => setReportExamActiveCourseId(e.target.value)}
                       className="w-full h-10 rounded-lg border border-slate-300 px-3 text-sm bg-white"
@@ -7999,7 +8089,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                           </option>
                         );
                       })}
-                    </select>
+                    </MenuSelect>
                   </div>
                   {reportExamActiveCourseId ? (
                     (() => {
@@ -8229,7 +8319,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                     <label htmlFor="new-report-preview-grade" className="text-xs text-slate-500 whitespace-nowrap">
                       {isZh ? '预览年级' : 'Preview grade'}
                     </label>
-                    <select
+                    <MenuSelect
                       id="new-report-preview-grade"
                       value={newReportPreviewGradeId}
                       onChange={(e) => setNewReportPreviewGradeId(e.target.value)}
@@ -8240,7 +8330,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                           {g.label}
                         </option>
                       ))}
-                    </select>
+                    </MenuSelect>
                   </div>
                 ) : null}
               </div>
@@ -8362,7 +8452,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                     <label className="text-xs font-medium text-slate-600">
                                       {isZh ? '课程（来自课程设置）' : 'Course (from curriculum)'}
                                     </label>
-                                    <select
+                                    <MenuSelect
                                       value={s.courseId}
                                       onChange={(e) => {
                                         const courseId = e.target.value;
@@ -8400,7 +8490,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                           {formatCourseBilingualDisplayName(c)}
                                         </option>
                                       ))}
-                                    </select>
+                                    </MenuSelect>
                                   </>
                                 )}
                               </div>
@@ -8489,7 +8579,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                 {dimLabel}
                                               </td>
                                               <td className="border border-slate-200 p-1 align-middle w-[7.5rem]">
-                                                <select
+                                                <MenuSelect
                                                   className="w-full rounded border border-slate-300 bg-white px-1.5 py-1 text-xs"
                                                   value={academicPreviewTargetLevels[previewKey] ?? ''}
                                                   onChange={(e) =>
@@ -8506,7 +8596,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                       {lv}
                                                     </option>
                                                   ))}
-                                                </select>
+                                                </MenuSelect>
                                               </td>
                                             </tr>
                                           );
@@ -8519,7 +8609,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                             {isZh ? '学习品质：兴趣、习惯与态度' : 'Learning quality: interest, habits, attitude'}
                                           </td>
                                           <td className="border border-slate-200 p-1.5 align-middle w-[7.5rem] bg-slate-50/95">
-                                            <select
+                                            <MenuSelect
                                               className="w-full rounded border border-slate-300 bg-white px-1.5 py-1 text-xs"
                                               value={academicPreviewLearningQuality[lqPreviewKey] ?? ''}
                                               onChange={(e) =>
@@ -8540,7 +8630,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                                   {lv}
                                                 </option>
                                               ))}
-                                            </select>
+                                            </MenuSelect>
                                           </td>
                                         </tr>
                                       ) : null}
@@ -8689,7 +8779,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                       <div className="text-xs font-medium leading-tight text-slate-600">
                                         {isZh ? '学习品质' : 'Learning quality'}
                                       </div>
-                                      <select
+                                      <MenuSelect
                                         className="h-9 w-full max-w-md rounded border border-slate-300 bg-white px-2 text-sm"
                                         value={academicPreviewLearningQuality[lqPreviewKey] ?? ''}
                                         onChange={(e) =>
@@ -8706,7 +8796,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                                             {lv}
                                           </option>
                                         ))}
-                                      </select>
+                                      </MenuSelect>
                                     </div>
                                   )}
                                   {s.enableScore && (
@@ -8807,7 +8897,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
           <div className="space-y-3 py-1">
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '学段' : 'Segment'}</label>
-              <select
+              <MenuSelect
                 value={scoreBandSegmentId}
                 onChange={(e) => setScoreBandSegmentId(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -8815,7 +8905,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 {reportTargetSegments.map((seg) => (
                   <option key={seg.id} value={seg.id}>{seg.label}</option>
                 ))}
-              </select>
+              </MenuSelect>
             </div>
             <div className="text-xs text-slate-500">
               {isZh
@@ -9110,7 +9200,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '性别' : 'Gender'}</label>
-              <select
+              <MenuSelect
                 value={editGender}
                 onChange={(e) => setEditGender(e.target.value as Student['gender'])}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -9118,7 +9208,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                 <option value="male">{isZh ? '男' : 'Male'}</option>
                 <option value="female">{isZh ? '女' : 'Female'}</option>
                 <option value="other">{isZh ? '其他' : 'Other'}</option>
-              </select>
+              </MenuSelect>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -9132,7 +9222,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
               </div>
               <div>
                 <label className="block text-xs text-slate-500 mb-1">{isZh ? '在读状态' : 'Status'}</label>
-                <select
+                <MenuSelect
                   value={editStatus || 'active'}
                   onChange={(e) => setEditStatus(e.target.value as Student['status'])}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -9141,7 +9231,7 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
                   <option value="leave">{isZh ? '休学' : 'Leave'}</option>
                   <option value="graduated">{isZh ? '毕业' : 'Graduated'}</option>
                   <option value="withdrawn">{isZh ? '离校' : 'Withdrawn'}</option>
-                </select>
+                </MenuSelect>
               </div>
             </div>
             <div>

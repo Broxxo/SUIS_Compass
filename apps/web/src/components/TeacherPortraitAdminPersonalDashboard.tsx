@@ -154,7 +154,7 @@ export default function TeacherPortraitAdminPersonalDashboard({
       </FilterToolbar>
 
       {selectedTeacher && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4">
           <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 space-y-3">
             <h3 className="text-sm font-semibold text-slate-800">
               {isZh ? '任课情况' : 'Teaching assignments'} · {selectedTeacher.name}

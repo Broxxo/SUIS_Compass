@@ -848,7 +848,7 @@ export default function CurriculumRoadmap({
       className={
         embedded
           ? 'flex-1 min-h-0 w-full bg-white overflow-hidden flex flex-col'
-          : 'h-screen w-screen bg-white overflow-hidden flex flex-col'
+          : 'flex h-full min-h-0 w-full flex-col overflow-hidden bg-white'
       }
     >
       {showRoadmapTopBar && (
@@ -862,7 +862,7 @@ export default function CurriculumRoadmap({
                 variant={isAIOpen ? 'default' : 'outline'}
                 size="icon"
                 onClick={onToggleAI}
-                className="h-9 w-9 rounded-lg flex-shrink-0"
+                className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
                 title="AI"
               >
                 <Bot className="h-4 w-4" />
@@ -875,7 +875,7 @@ export default function CurriculumRoadmap({
       {showRoadmapTabToolbar && (
         <div
           className={`relative z-40 flex-shrink-0 overflow-visible border-b border-slate-200 bg-white px-3 sm:px-4 py-2 ${
-            showRoadmapTopBar ? 'mt-14' : ''
+            showRoadmapTopBar ? 'mt-[var(--app-topbar-height)]' : ''
           }`}
         >
           <div className="relative flex min-h-[40px] items-center justify-center overflow-visible">
@@ -899,7 +899,7 @@ export default function CurriculumRoadmap({
       )}
 
       {/* 主内容区 */}
-      <div className={`relative flex-1 min-h-0 overflow-hidden ${showRoadmapTopBar ? '' : 'pt-2'}`}>
+      <div className={`relative min-h-0 flex-1 overflow-hidden ${showRoadmapTopBar ? '' : 'pt-2'}`}>
 
       {/* Course Area：Hub 贴左铺满可用宽度；后台课程管理保持略宽边距 */}
       {viewMode === 'overview' ? (
@@ -923,10 +923,17 @@ export default function CurriculumRoadmap({
             const labelColWidth = isAdminSurface ? GRADE_LABEL_COL_WIDTH_PX : GRADE_LABEL_COL_WIDTH_HUB_PX;
             const periodsColWidth = showTotalPeriods ? 52 : 0;
             const availableCourseWidth = Math.max(0, overviewRowWidthPx - labelColWidth - periodsColWidth);
-            const adaptive =
+            const fitted =
               overviewRowWidthPx > 0
                 ? computeAdaptiveRoadmapLayout(layoutSegments, availableCourseWidth)
                 : { columnWidthPx: COLUMN_WIDTH_DEFAULT_PX, segmentGapPx: COLUMN_GAP_DEFAULT_PX };
+            const narrowOverview = overviewRowWidthPx > 0 && overviewRowWidthPx < 768;
+            const adaptive = narrowOverview
+              ? {
+                  columnWidthPx: Math.max(72, fitted.columnWidthPx),
+                  segmentGapPx: Math.max(8, fitted.segmentGapPx),
+                }
+              : fitted;
             const segmentWidth = (seg: RoadmapLayoutSegment) =>
               seg.kind === 'domain'
                 ? seg.columns.length * adaptive.columnWidthPx +
@@ -938,9 +945,15 @@ export default function CurriculumRoadmap({
             const domainLabelRow = hasDomainSegments ? 14 : 0;
             const totalHeaderHeight = headerHeight + domainLabelRow;
             return (
+              <div className="flex h-full min-h-0 w-full flex-col">
+              {narrowOverview ? (
+                <p className="shrink-0 px-1 pb-1 text-[11px] text-slate-500">
+                  {language === 'zh' ? '左右滑动查看课程，点格子打开单元' : 'Swipe sideways, tap a cell to open units'}
+                </p>
+              ) : null}
               <div
                 ref={overviewRowRef}
-                className="h-full w-full max-w-none min-w-0 flex flex-row gap-0 items-stretch overflow-hidden flex-shrink-0"
+                className="flex min-h-0 w-full max-w-none flex-1 flex-row items-stretch gap-0 overflow-hidden"
               >
                   {/* 左侧年级 */}
                   <div className="flex flex-col flex-shrink-0 pr-1" style={{ width: labelColWidth }}>
@@ -957,9 +970,13 @@ export default function CurriculumRoadmap({
                       ))}
                     </div>
                   </div>
-                  {/* 中间课程网格：列宽自适应铺满，无需横向滚动 */}
-                  <div className="flex-1 min-w-0 h-full overflow-x-hidden overflow-y-hidden pr-0 min-h-0">
-                    <div className="flex flex-col w-full h-full min-w-0">
+                  {/* 窄屏保持可点的列宽，左右滑动查看；宽屏仍铺满、不出现横向滚动 */}
+                  <div
+                    className={`h-full min-h-0 min-w-0 flex-1 pr-0 ${
+                      narrowOverview ? 'overflow-auto' : 'overflow-x-hidden overflow-y-hidden'
+                    }`}
+                  >
+                    <div className={`flex h-full min-w-0 flex-col ${narrowOverview ? 'w-max min-w-full' : 'w-full'}`}>
                   {/* Course Names at Top - 领域簇 + 学科列（顺序在设置中调整） */}
                   <div className="flex flex-shrink-0 items-end" style={{ height: totalHeaderHeight }}>
                     {layoutSegments.map((segment, segIdx) => {
@@ -1101,6 +1118,7 @@ export default function CurriculumRoadmap({
                       </div>
                     </div>
                   )}
+              </div>
               </div>
             );
           })()}

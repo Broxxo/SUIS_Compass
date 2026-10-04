@@ -1,3 +1,4 @@
+import { MenuSelect } from '../MenuSelect';
 import { useState } from 'react';
 import OrgStructurePanel from './OrgStructurePanel';
 import GradeStructureEditor from '../GradeStructureEditor';
@@ -120,7 +121,7 @@ export default function FoundationSettingsPanel({
           )}
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-sm text-slate-700">{isZh ? '系统默认学年' : 'System default year'}</label>
-            <select
+            <MenuSelect
               value={currentYearId || ''}
               onChange={(e) => {
                 const id = e.target.value || null;
@@ -137,7 +138,7 @@ export default function FoundationSettingsPanel({
                   {y.isCurrent ? (isZh ? '（默认）' : ' (default)') : ''}
                 </option>
               ))}
-            </select>
+            </MenuSelect>
             {canEditYears && (
               <>
                 <Button size="sm" variant="outline" onClick={onOpenCreateYear}>

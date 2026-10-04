@@ -27,6 +27,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { HubPortraitNavigation, HubTeacherTodoItem } from '../types/hubNavigation';
 import AppTopBar from './AppTopBar';
+import CompassMailbox from './CompassMailbox';
 import HubTeacherTodosTile, { hubTodosFrostedStyle, type HubTodosViewerRole } from './HubTeacherTodosTile';
 import { Button } from './ui/button';
 
@@ -38,6 +39,7 @@ type HubView =
   | 'academic-reports'
   | 'class-assistant'
   | 'open-lessons'
+  | 'school-calendar'
   | 'more';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
@@ -55,6 +57,7 @@ type HubTileId =
   | 'teacher-portrait'
   | 'academic-reports'
   | 'open-lessons'
+  | 'school-calendar'
   | `placeholder-${number}`;
 
 type HubTile = {
@@ -75,7 +78,7 @@ const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v4';
 function migrateSavedHubIds(savedIds: string[]): string[] {
   const out: string[] = [];
   for (const raw of savedIds) {
-    const id = raw === 'class-assistant' ? 'more-features' : raw;
+    const id = raw === 'class-assistant' ? 'more-features' : raw === 'placeholder-1' ? 'school-calendar' : raw;
     if (id === 'class-management') continue;
     if (!out.includes(id)) out.push(id);
   }
@@ -253,7 +256,7 @@ function SortableTile({
     transition: transition ?? 'transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)',
     zIndex: isDragging ? 50 : undefined,
     willChange: 'transform',
-    touchAction: 'none',
+    touchAction: editing ? 'none' : 'manipulation',
   };
 
   const baseStyle: React.CSSProperties = {
@@ -343,9 +346,11 @@ function SortableTile({
 export default function CompassHub({
   onNavigate,
   onOpenTodo,
+  onOpenInbox,
 }: {
   onNavigate: (view: HubView) => void;
   onOpenTodo: (nav: HubPortraitNavigation) => void;
+  onOpenInbox: () => void;
 }) {
   const { user } = useAuth();
   const { language, setLanguage } = useLanguage();
@@ -358,6 +363,10 @@ export default function CompassHub({
   const [activeId, setActiveId] = useState<HubTileId | null>(null);
   const lastOverIdRef = useRef<HubTileId | null>(null);
 
+  const [viewport, setViewport] = useState(() => ({
+    w: typeof window !== 'undefined' ? window.innerWidth : 1024,
+    h: typeof window !== 'undefined' ? window.innerHeight : 768,
+  }));
   const [isPortrait, setIsPortrait] = useState(() => {
     if (typeof window === 'undefined') return true;
     return window.matchMedia('(orientation: portrait)').matches;
@@ -524,7 +533,25 @@ export default function CompassHub({
           </span>
         ),
       },
-      { id: 'placeholder-1', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      {
+        id: 'school-calendar',
+        kind: 'app',
+        view: 'school-calendar',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #f59e0b 0%, #d97706 50%, #b45309 100%)',
+          boxShadow: '0 6px 16px -2px rgba(217, 119, 6, 0.35), inset 0 1px 0 rgba(255,255,255,0.22)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '校历' : 'School'}</span>
+            {zh ? null : <span>Calendar</span>}
+          </span>
+        ),
+      },
       { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
       { id: 'placeholder-3', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
       {
@@ -635,9 +662,9 @@ export default function CompassHub({
   const gridWidth = useMemo(() => {
     // Fixed-scale: tile size computed from viewport but uniform inside a screen.
     // Keep breathing room similar to iOS.
-    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
-    const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
-    const topReserved = 64 + 24; // topbar + padding approx
+    const vw = viewport.w;
+    const vh = viewport.h;
+    const topReserved = 70 + 24; // topbar（增高 10%）+ padding approx
     const sidePadding = 16; // outer
     const gap = Math.max(8, Math.min(16, vw * 0.015));
     const usableW = vw - sidePadding * 2;
@@ -647,31 +674,34 @@ export default function CompassHub({
     const tile = Math.max(76, Math.min(140, Math.floor(Math.min(tileByW, tileByH))));
     const width = tile * columns + gap * (columns - 1);
     return { tile, gap, width };
-  }, [columns, rows]);
+  }, [columns, rows, viewport]);
 
   useEffect(() => {
     const onResize = () => {
-      // trigger recompute
       setIsPortrait(window.matchMedia('(orientation: portrait)').matches);
+      setViewport({ w: window.innerWidth, h: window.innerHeight });
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white pt-16 pb-6">
+    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-gradient-to-b from-slate-50 to-white pt-[calc(var(--app-topbar-height)+0.5rem)] pb-6">
       <AppTopBar
         title="SUIS Compass 智能教学中心"
         rightChildren={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-            className="h-9 rounded-lg px-3 min-w-[2.5rem]"
-            title={isZh ? 'Switch to English' : '切换到中文'}
-          >
-            {isZh ? 'EN' : '中'}
-          </Button>
+          <>
+            {user ? <CompassMailbox isZh={isZh} onOpenInbox={onOpenInbox} /> : null}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setLanguage(isZh ? 'en' : 'zh')}
+              className="h-[var(--app-topbar-control)] rounded-lg px-3 min-w-[2.75rem] text-[0.9625rem]"
+              title={isZh ? 'Switch to English' : '切换到中文'}
+            >
+              {isZh ? 'EN' : '中'}
+            </Button>
+          </>
         }
       />
       <div
@@ -688,7 +718,7 @@ export default function CompassHub({
         }}
       >
         <div className="w-full flex justify-center">
-          <div className="w-fit max-w-full">
+          <div className="w-full overflow-auto">
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
@@ -700,7 +730,7 @@ export default function CompassHub({
             >
               <SortableContext items={tiles.map((t) => t.id)} strategy={rectSortingStrategy}>
                 <div
-                  className="grid"
+                  className="mx-auto grid"
                   style={{
                     width: gridWidth.width,
                     height: gridWidth.tile * rows + gridWidth.gap * (rows - 1),

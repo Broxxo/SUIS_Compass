@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import type { CourseDomain, CourseDomainsConfig } from '@repo/shared';
@@ -396,7 +397,7 @@ export default function SettingsDialog({
                           <span className="text-xs text-slate-500 shrink-0">
                             {language === 'zh' ? '领域色系' : 'Color family'}
                           </span>
-                          <select
+                          <MenuSelect
                             className="h-8 rounded-md border border-slate-300 px-2 text-sm bg-white"
                             value={domain.color ?? ''}
                             onChange={(e) =>
@@ -411,14 +412,14 @@ export default function SettingsDialog({
                                 {language === 'zh' ? c.label : c.labelEn}
                               </option>
                             ))}
-                          </select>
+                          </MenuSelect>
                         </div>
                         {unassignedCourses.length > 0 && (
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-slate-500 shrink-0">
                               {language === 'zh' ? '添加课程' : 'Add course'}
                             </span>
-                            <select
+                            <MenuSelect
                               className="h-8 flex-1 rounded-md border border-slate-300 px-2 text-sm bg-white"
                               defaultValue=""
                               onChange={(e) => {
@@ -433,7 +434,7 @@ export default function SettingsDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </MenuSelect>
                           </div>
                         )}
                         <div className="pt-1 border-t border-slate-100">

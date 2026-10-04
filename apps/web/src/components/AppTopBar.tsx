@@ -49,41 +49,41 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
   }, []);
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-20 h-14 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
+    <header className="fixed top-0 left-0 right-0 z-20 h-[var(--app-topbar-height)] border-b border-slate-200 bg-white/95 backdrop-blur-sm">
       <div
-        className={`h-full mx-auto px-3 sm:px-4 flex items-center gap-2 sm:gap-3 ${
+        className={`h-full mx-auto px-3 sm:px-4 flex items-center gap-[0.55rem] sm:gap-[0.825rem] ${
           centerContent ? 'max-w-[100rem] justify-between' : 'max-w-6xl justify-between'
         }`}
       >
         {/* 左侧：主界面为 logo，子应用为返回按钮；右侧固定为用户头像 */}
-        <div className="flex items-center gap-2 min-w-0 shrink-0">
+        <div className="flex items-center gap-[0.55rem] min-w-0 shrink-0">
           {showBack && onBack ? (
             <Button
               variant="outline"
               size="icon"
               onClick={onBack}
-              className="h-9 w-9 rounded-lg flex-shrink-0"
+              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
               title={isZh ? '返回主界面' : 'Back to home'}
             >
-              <ArrowLeft className="h-4 w-4" />
+              <ArrowLeft className="h-[var(--app-topbar-icon)] w-[var(--app-topbar-icon)]" />
             </Button>
           ) : (
-            <img src="/suislogo.png" alt="SUIS" className="h-8 w-auto object-contain flex-shrink-0" />
+            <img src="/suislogo.png" alt="SUIS" className="h-[var(--app-topbar-logo)] w-auto object-contain flex-shrink-0" />
           )}
-          <div className="relative flex items-center gap-2 min-w-0" ref={userMenuRef}>
+          <div className="relative flex items-center gap-[0.55rem] min-w-0" ref={userMenuRef}>
             <Button
               variant="outline"
               size="icon"
               type="button"
               onClick={() => user && setUserMenuOpen((o) => !o)}
-              className="h-9 w-9 rounded-full flex-shrink-0 p-0"
+              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-full flex-shrink-0 p-0"
               title={user ? navUserLabel : isZh ? '未登录' : 'Not logged in'}
             >
-              <UserIcon className="h-4 w-4" />
+              <UserIcon className="h-[var(--app-topbar-icon)] w-[var(--app-topbar-icon)]" />
             </Button>
             {user && (
               <span
-                className="hidden sm:inline-block text-sm font-medium text-slate-700 truncate max-w-[10rem] md:max-w-[14rem]"
+                className="hidden sm:inline-block text-[0.9625rem] font-medium text-slate-700 truncate max-w-[10rem] md:max-w-[14rem]"
                 title={navUserLabel}
               >
                 {navUserLabel}
@@ -128,7 +128,7 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
 
         {centerContent ? (
           <>
-            <span className="hidden sm:inline text-sm font-medium text-slate-600 truncate max-w-[9rem] md:max-w-[12rem] shrink-0">
+            <span className="hidden sm:inline text-[0.9625rem] font-medium text-slate-600 truncate max-w-[9rem] md:max-w-[12rem] shrink-0">
               {title}
             </span>
             <div className="flex-1 min-w-0 flex justify-center overflow-x-auto overflow-y-hidden no-scrollbar">
@@ -136,7 +136,7 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
             </div>
           </>
         ) : (
-          <h1 className="absolute left-1/2 -translate-x-1/2 text-lg sm:text-xl font-semibold text-slate-800 truncate max-w-[50vw] pointer-events-none">
+          <h1 className="absolute left-1/2 -translate-x-1/2 text-[1.2375rem] sm:text-[1.375rem] font-semibold text-slate-800 truncate max-w-[50vw] pointer-events-none">
             {title}
           </h1>
         )}

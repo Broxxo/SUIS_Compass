@@ -1,3 +1,4 @@
+import { MenuSelect } from '../MenuSelect';
 import { useEffect, useMemo, useState } from 'react';
 import type { SelfStudyGradeConfig, SelfStudyModule, SelfStudySlot, SelfStudyWeekday } from '@repo/shared';
 import { selfStudyWeekdayLabel } from '@repo/shared';
@@ -455,7 +456,7 @@ export default function SelfStudyStaffingPanel({
                 <span className="mx-1.5 text-slate-300">·</span>
                 {selfStudyWeekdayLabel(assignCell.weekday, isZh)}
               </p>
-              <select
+              <MenuSelect
                 value={assignCell.teacherId}
                 disabled={assignSaving}
                 onChange={(e) =>
@@ -471,7 +472,7 @@ export default function SelfStudyStaffingPanel({
                     {teacherDisplayName(t, isZh)}
                   </option>
                 ))}
-              </select>
+              </MenuSelect>
             </div>
           ) : null}
           <DialogFooter className="gap-2 sm:gap-0">

@@ -1,6 +1,7 @@
 /**
  * 统一的创建学生弹窗：所有入口共用，当前年级（数值）为必填（G1-G9），可选加入班级。
  */
+import { MenuSelect } from './MenuSelect';
 import { useState, useEffect } from 'react';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
@@ -140,7 +141,7 @@ export default function CreateStudentDialog({
           </p>
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '当前年级（数值）' : 'Current grade (number)'} *</label>
-            <select
+            <MenuSelect
               value={grade}
               onChange={(e) => setGrade(e.target.value)}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -148,11 +149,11 @@ export default function CreateStudentDialog({
               {gradeOptions.map((item) => (
                 <option key={item.id} value={String(item.level)}>{getGradeLabelByLevel(gradeConfig, item.level)}</option>
               ))}
-            </select>
+            </MenuSelect>
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">{isZh ? '性别' : 'Gender'}</label>
-            <select
+            <MenuSelect
               value={gender}
               onChange={(e) => setGender(e.target.value as Student['gender'])}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -160,7 +161,7 @@ export default function CreateStudentDialog({
               <option value="male">{isZh ? '男' : 'Male'}</option>
               <option value="female">{isZh ? '女' : 'Female'}</option>
               <option value="other">{isZh ? '其他' : 'Other'}</option>
-            </select>
+            </MenuSelect>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -174,7 +175,7 @@ export default function CreateStudentDialog({
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '在读状态' : 'Status'}</label>
-              <select
+              <MenuSelect
                 value={status || 'active'}
                 onChange={(e) => setStatus(e.target.value as Student['status'])}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -183,7 +184,7 @@ export default function CreateStudentDialog({
                 <option value="leave">{isZh ? '休学' : 'Leave'}</option>
                 <option value="graduated">{isZh ? '毕业' : 'Graduated'}</option>
                 <option value="withdrawn">{isZh ? '离校' : 'Withdrawn'}</option>
-              </select>
+              </MenuSelect>
             </div>
           </div>
           <div>
@@ -215,7 +216,7 @@ export default function CreateStudentDialog({
           {currentYearId && classesInYear.length > 0 && (
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '加入班级（可选）' : 'Add to class (optional)'}</label>
-              <select
+              <MenuSelect
                 value={enrollClassId}
                 onChange={(e) => setEnrollClassId(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -224,7 +225,7 @@ export default function CreateStudentDialog({
                 {classesInYear.map((c) => (
                   <option key={c.id} value={c.id}>{getGradeLabelByLevel(gradeConfig, c.grade)} {c.name}</option>
                 ))}
-              </select>
+              </MenuSelect>
             </div>
           )}
         </div>

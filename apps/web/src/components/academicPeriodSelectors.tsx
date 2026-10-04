@@ -1,14 +1,15 @@
 import type { ReactNode, SelectHTMLAttributes } from 'react';
 import { cn } from '../lib/utils';
 import type { AcademicYear, Term } from '../types/classManagement';
+import { MenuSelect } from './MenuSelect';
 
 export const FILTER_SELECT_WIDTH = {
-  year: 'min-w-[11rem] max-w-[14rem] w-auto',
-  term: 'min-w-[7.5rem] max-w-[9.5rem] w-auto',
-  teacher: 'min-w-[12rem] max-w-[18rem] w-auto',
-  report: 'min-w-[14rem] max-w-[22rem] w-auto',
-  md: 'min-w-[10rem] max-w-[16rem] w-auto',
-  sm: 'min-w-[6.5rem] max-w-[11rem] w-auto',
+  year: 'w-full min-w-0 sm:w-auto sm:min-w-[11rem] sm:max-w-[14rem]',
+  term: 'w-full min-w-0 sm:w-auto sm:min-w-[7.5rem] sm:max-w-[9.5rem]',
+  teacher: 'w-full min-w-0 sm:w-auto sm:min-w-[12rem] sm:max-w-[18rem]',
+  report: 'w-full min-w-0 sm:w-auto sm:min-w-[14rem] sm:max-w-[22rem]',
+  md: 'w-full min-w-0 sm:w-auto sm:min-w-[10rem] sm:max-w-[16rem]',
+  sm: 'w-full min-w-0 sm:w-auto sm:min-w-[6.5rem] sm:max-w-[11rem]',
 } as const;
 
 export type FilterSelectWidth = keyof typeof FILTER_SELECT_WIDTH;
@@ -38,7 +39,7 @@ export function FilterSelect({
   className,
   ...props
 }: SelectHTMLAttributes<HTMLSelectElement> & { width?: FilterSelectWidth; controlSize?: FilterControlSize }) {
-  return <select className={filterSelectClassName(width, className, controlSize)} {...props} />;
+  return <MenuSelect className={filterSelectClassName(width, className, controlSize)} {...props} />;
 }
 
 export function FilterFieldLabel({
@@ -74,7 +75,7 @@ export function FilterField({
   size?: FilterControlSize;
 }) {
   return (
-    <div className={cn('shrink-0', className)}>
+    <div className={cn('min-w-0 sm:shrink-0', className)}>
       {label != null ? (
         <FilterFieldLabel htmlFor={htmlFor} size={size}>
           {label}
@@ -85,9 +86,18 @@ export function FilterField({
   );
 }
 
-/** 筛选器工具条：学年/学期等并排，宽度随内容而非撑满整行 */
+/** 筛选器工具条：手机上两到三列排开，四五个时自动换到第二行；宽屏仍按内容并排 */
 export function FilterToolbar({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn('flex flex-wrap items-end gap-3', className)}>{children}</div>;
+  return (
+    <div
+      className={cn(
+        'grid w-full grid-cols-3 items-end gap-2 max-[359px]:grid-cols-2 sm:flex sm:w-auto sm:flex-wrap sm:gap-3',
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
 }
 
 export function termOptionLabel(term: Term, isZh: boolean): string {

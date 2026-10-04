@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useState } from 'react'
 import AppTopBar from './AppTopBar'
 import { useAuth } from '../contexts/AuthContext'
@@ -91,7 +92,7 @@ export default function ClassAssistant({ onBackToHub }: ClassAssistantProps) {
   if (!user) return null
 
   return (
-    <div className="min-h-screen bg-slate-50 pt-14">
+    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-slate-50 pt-[var(--app-topbar-height)]">
       <AppTopBar
         title={isZh ? '课堂助手' : 'Class Assistant'}
         showBack={!!onBackToHub}
@@ -156,15 +157,15 @@ export default function ClassAssistant({ onBackToHub }: ClassAssistantProps) {
       </div>
 
       <div className="max-w-4xl mx-auto px-4 py-4 space-y-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-slate-800">
+        <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="shrink-0 text-sm font-semibold text-slate-800">
               {isZh ? '选择班级' : 'Select class'}
             </span>
-            <select
+            <MenuSelect
               value={selectedClassId || ''}
               onChange={(e) => setSelectedClassId(e.target.value || null)}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm bg-white min-w-[180px]"
+              className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm sm:max-w-xs"
             >
               <option value="">{isZh ? '请选择' : 'Please select'}</option>
               {selectableClasses.map((c) => (
@@ -172,7 +173,7 @@ export default function ClassAssistant({ onBackToHub }: ClassAssistantProps) {
                   {`G${c.grade} ${c.name}`}
                 </option>
               ))}
-            </select>
+            </MenuSelect>
           </div>
         </div>
 

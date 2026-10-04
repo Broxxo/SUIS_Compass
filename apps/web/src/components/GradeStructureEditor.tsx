@@ -1,3 +1,4 @@
+import { MenuSelect } from './MenuSelect';
 import { useEffect, useState } from 'react';
 import { Button } from './ui/button';
 import { ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react';
@@ -294,7 +295,7 @@ export default function GradeStructureEditor({ language, canEdit, onSaved }: Gra
                     placeholder={isZh ? '年级显示名' : 'Grade label'}
                   />
                   {canEdit && segments.length > 1 && (
-                    <select
+                    <MenuSelect
                       className="h-9 max-w-[7rem] rounded-lg border border-slate-300 text-xs px-1 shrink-0"
                       value={segIndex}
                       aria-label={isZh ? '移到学段' : 'Move to stage'}
@@ -311,7 +312,7 @@ export default function GradeStructureEditor({ language, canEdit, onSaved }: Gra
                           {s.label.trim() || (isZh ? `学段 ${i + 1}` : `Stage ${i + 1}`)}
                         </option>
                       ))}
-                    </select>
+                    </MenuSelect>
                   )}
                   {canEdit && (
                     <button

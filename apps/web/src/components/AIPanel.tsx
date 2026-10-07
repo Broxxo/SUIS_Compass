@@ -11,11 +11,19 @@ import {
   buildBasicCurriculumPayload,
   buildBasicStudentPortraitPayload,
   buildBasicTeacherPortraitPayload,
+  buildBasicSchoolCalendarPayload,
+  buildBasicLighthousePayload,
+  buildBasicOpenLessonsPayload,
+  buildBasicMailboxPayload,
+  buildBasicAdminPayload,
+  buildBasicClassAssistantPayload,
   type AIScreenId,
   type CurriculumRoadmapPayload,
+  type BasicScreenPayload,
 } from '../contexts/AIContext';
 import { buildStudentPortraitAIContextString, type StudentPortraitAIPayload } from '../lib/studentPortraitAIContext';
 import { buildTeacherPortraitAIContextString, type TeacherPortraitAIPayload } from '../lib/teacherPortraitAIContext';
+import { buildSchoolCalendarAIContextString, type SchoolCalendarAIPayload } from '../lib/schoolCalendarAIContext';
 import { Course } from '../types';
 import { loadSemesterDataSync } from '../lib/storage';
 import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/aiModels';
@@ -102,6 +110,34 @@ function buildContextString(screenId: AIScreenId, payload: Record<string, unknow
   if (screenId === 'teacher-portrait') {
     return buildTeacherPortraitAIContextString(payload as unknown as TeacherPortraitAIPayload, isZh);
   }
+  if (screenId === 'school-calendar') {
+    return buildSchoolCalendarAIContextString(payload as unknown as SchoolCalendarAIPayload, isZh);
+  }
+  if (screenId === 'open-lessons' || screenId === 'lighthouse' || screenId === 'mailbox' || screenId === 'admin' || screenId === 'class-assistant') {
+    const p = payload as unknown as BasicScreenPayload;
+    const summary = p.summary;
+    const labels: Record<string, { zh: string; en: string }> = {
+      'open-lessons': { zh: '公开课', en: 'Open Lessons' },
+      lighthouse: { zh: '协和灯塔', en: 'Xiehe Lighthouse' },
+      mailbox: { zh: '信箱', en: 'Mailbox' },
+      admin: { zh: '后台管理', en: 'Admin Panel' },
+      'class-assistant': { zh: '课堂助手', en: 'Class Assistant' },
+    };
+    const label = labels[screenId][isZh ? 'zh' : 'en'];
+    let ctx = isZh
+      ? `当前正在使用的应用上下文：${label}。\n`
+      : `Current application context: ${label}.\n`;
+    if (summary) ctx += (isZh ? '当前界面摘要：' : 'Current view summary: ') + summary + '\n';
+    if (screenId === 'lighthouse') {
+      ctx += isZh
+        ? '摘要里的文字是协和灯塔墙上已经发布的内容。回答学校方向、理念、规划或制度时以此为准；墙上没有的条款不要编造。\n'
+        : 'The summary is the published text on the Xiehe Lighthouse walls. Use it for school direction, plans, and regulations, and do not invent clauses that are not on the wall.\n';
+    }
+    ctx += isZh
+      ? '用户可能正在浏览该界面的具体内容；若上下文没有列出明细，请基于该应用的一般用途作答，并建议用户描述具体问题或切换到有明细的视图。'
+      : 'The user may be viewing specific content in this app; if the context does not list details, answer based on the app’s general purpose and suggest the user describe their specific question or switch to a view with details.';
+    return ctx;
+  }
   return `当前应用上下文：${screenId}。`;
 }
 
@@ -147,6 +183,44 @@ const SYSTEM_PROMPT_TEACHER_PORTRAIT = `你是教师中心智能助手，辅助�
 
 `;
 
+const SYSTEM_PROMPT_SCHOOL_CALENDAR = `你是校历智能助手，辅助学校管理者和教师审阅学年校历。
+
+你可以看到用户当前在校历界面上能看到的内容。月历视图包含每一周的周次、日期、放假与上学日、周主题、全学部事项和各模块关键工作。周历视图包含屏幕上这一周以及相邻周的上课日和各模块事项。请只根据这些内容作答，不要编造上下文里没有的活动、日期或负责人。
+
+回答原则：
+- 先概括屏幕上的事实，再给出优化建议，并标明哪些是事实、哪些是建议。
+- 月历：看周主题是否连贯，关键节点是否挤在同一周，小学部和中学部是否重复，寒暑假、法定假日是否和关键工作冲突。
+- 周历：看当天事项是否过密，时间是否重叠，模块之间是否互相打架。用户正在看的那一周是分析重点，相邻周只作对照。
+- 若当前视图内容很少，直接说明，并建议切换到月历或具体某一周后再问。
+
+请务必使用 Markdown 格式输出，利用加粗、列表、分级标题等方式让内容层次分明、易于阅读。
+
+`;
+
+const SYSTEM_PROMPT_OPEN_LESSONS = `你是公开课管理助手，辅助教务与教研组管理组内、校级公开课的安排与登记。
+你可以看到用户当前在公开课界面上能看到的内容（学年、学期、类型、教师、学科、班级、日期时间、单元课题、地点、备注等）。请基于这些内容作答，不要编造未出现在上下文中的公开课或教师。
+回答原则：先概括当前筛选条件下的公开课分布，再指出排布是否过密、是否有时间冲突、学科覆盖是否均衡；区分「事实数据」与「分析建议」。若上下文不足，建议用户切换学年/学期/类型或筛选具体学科后再问。
+请务必使用 Markdown 格式输出。
+`;
+
+const SYSTEM_PROMPT_MAILBOX = `你是校内信箱助手，辅助教职工与管理者查看、起草、跟进校内信件。
+你可以看到用户当前在信箱界面上能看到的内容（收件/发件、发件人、主题、时间、状态等）。请基于这些内容作答，不要编造未出现在上下文中的信件。
+回答原则：先概括当前信箱的待办与重要信件，再给出处理优先级与回复建议；区分「事实数据」与「分析建议」。涉及敏感内容时注意措辞。若上下文不足，建议用户切换收件箱/已发送或打开具体信件后再问。
+请务必使用 Markdown 格式输出。
+`;
+
+const SYSTEM_PROMPT_ADMIN = `你是后台管理助手，辅助系统管理员管理学校基础数据、班级、教职工、学业报告、校历等配置。
+你可以看到用户当前在后台界面上能看到的内容（当前所在的管理标签与可见的配置项摘要）。请基于这些内容作答，不要编造未出现在上下文中的配置或数据。
+回答原则：先确认用户当前所在的管理区域与目标，再给出操作建议与注意事项；区分「事实」与「建议」。涉及权限、删除、覆盖性操作时务必提示风险并建议先备份或小范围验证。若上下文不足，建议用户切换到具体管理标签后再问。
+请务必使用 Markdown 格式输出。
+`;
+
+const SYSTEM_PROMPT_CLASS_ASSISTANT = `你是课堂助手，辅助教师管理课堂常规、学生表现记录与教学支持。
+你可以看到用户当前在课堂助手界面上能看到的内容（当前班级、学生、活动、记录等摘要）。请基于这些内容作答，不要编造未出现在上下文中的学生或记录。
+回答原则：先概括当前班级或活动的状态，再给出可操作的课堂管理或教学支持建议；区分「事实数据」与「分析建议」。涉及个别学生时注意隐私与建设性表述。若上下文不足，建议用户选择具体班级或活动后再问。
+请务必使用 Markdown 格式输出。
+`;
+
 const SYSTEM_PROMPT_COURSE = `你是一个专业的课程规划 AI 助手，名为"课程河流智能体"。你的目标是辅助教师进行课程设计、跨学科活动策划和教学内容优化。你可以看到用户当前的课程数据上下文，并据此给出精准建议。
 
 **跨学科学习（IDL）核心理念：**
@@ -167,11 +241,9 @@ interface AIPanelProps {
   /** 是否从主 Hub 直接进入；子应用半窗模式会传 false，用右上角 X 关闭 */
   fromHub: boolean;
   onClose: () => void;
-  /** 语言切换仅在主 HUB（CompassHub）展示；从 HUB 进入的 AI 顶栏不传或传 false */
-  showLanguageToggle?: boolean;
 }
 
-export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageToggle = false }: AIPanelProps) {
+export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) {
   /** 课程河流半屏侧栏：不用全屏 fixed 顶栏，避免与左侧顶栏叠在一起且无明确关闭入口 */
   const dockedInSplitView = !fullScreen && !fromHub;
   const [isNarrow, setIsNarrow] = useState(
@@ -182,7 +254,7 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
   /** 手机全屏：历史栏是抽屉。桌面半屏课程河流无侧栏，用顶栏历史图标打开居中会话列表 */
   const drawerSidebarMode = !persistLeftSidebar && !dockedInSplitView;
   const { user } = useAuth();
-  const { t, language, setLanguage } = useLanguage();
+  const { t, language } = useLanguage();
   const { screenId, setScreenId, contextPayload, setContextPayload } = useAIContext();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const historySwipeRef = useRef<{ x: number; y: number; ignore: boolean } | null>(null);
@@ -326,6 +398,18 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
       setContextPayload(buildBasicStudentPortraitPayload());
     } else if (id === 'teacher-portrait') {
       setContextPayload(buildBasicTeacherPortraitPayload());
+    } else if (id === 'school-calendar') {
+      setContextPayload(buildBasicSchoolCalendarPayload());
+    } else if (id === 'open-lessons') {
+      setContextPayload(buildBasicOpenLessonsPayload());
+    } else if (id === 'lighthouse') {
+      setContextPayload(buildBasicLighthousePayload());
+    } else if (id === 'mailbox') {
+      setContextPayload(buildBasicMailboxPayload());
+    } else if (id === 'admin') {
+      setContextPayload(buildBasicAdminPayload());
+    } else if (id === 'class-assistant') {
+      setContextPayload(buildBasicClassAssistantPayload());
     } else {
       setContextPayload({});
     }
@@ -359,7 +443,17 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
           ? SYSTEM_PROMPT_STUDENT_PORTRAIT
           : screenId === 'teacher-portrait'
             ? SYSTEM_PROMPT_TEACHER_PORTRAIT
-            : SYSTEM_PROMPT_GENERAL;
+            : screenId === 'school-calendar'
+              ? SYSTEM_PROMPT_SCHOOL_CALENDAR
+              : screenId === 'open-lessons'
+                ? SYSTEM_PROMPT_OPEN_LESSONS
+                : screenId === 'mailbox'
+                  ? SYSTEM_PROMPT_MAILBOX
+                  : screenId === 'admin'
+                    ? SYSTEM_PROMPT_ADMIN
+                    : screenId === 'class-assistant'
+                      ? SYSTEM_PROMPT_CLASS_ASSISTANT
+                      : SYSTEM_PROMPT_GENERAL;
     const systemContent = systemBase + `\n${context}`;
     const systemPrompt: Message = { role: 'system', content: systemContent };
     const historyToSend = newMessages.slice(-10);
@@ -461,7 +555,19 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
           ? t('ai.panel.contextStudent')
           : screenId === 'teacher-portrait'
             ? t('ai.panel.contextTeacher')
-            : t('ai.panel.contextNone');
+            : screenId === 'school-calendar'
+              ? t('ai.panel.contextCalendar')
+              : screenId === 'open-lessons'
+                ? t('ai.panel.contextOpenLessons')
+                : screenId === 'lighthouse'
+                  ? t('ai.panel.contextLighthouse')
+                  : screenId === 'mailbox'
+                  ? t('ai.panel.contextMailbox')
+                  : screenId === 'admin'
+                    ? t('ai.panel.contextAdmin')
+                    : screenId === 'class-assistant'
+                      ? t('ai.panel.contextClassAssistant')
+                      : t('ai.panel.contextNone');
   const hasContext = screenId !== null && screenId !== 'hub';
 
   const chatListItems = chatList.map((c) => (
@@ -490,25 +596,12 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
     </div>
   ));
 
-  const langToggle = (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-      className="h-9 rounded-lg px-3 min-w-[2.5rem]"
-      title={isZh ? 'Switch to English' : '切换到中文'}
-    >
-      {isZh ? 'EN' : '中'}
-    </Button>
-  );
-
   const content = (
     <div className="flex flex-col h-full bg-white">
       {dockedInSplitView ? (
-        <header className="shrink-0 z-40 flex h-14 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4">
+        <header className="shrink-0 z-40 flex h-[var(--app-topbar-height)] items-center justify-between gap-3 border-b border-slate-200 bg-white px-4">
           <span className="text-base font-semibold text-slate-900 truncate">SUIS AI</span>
           <div className="flex items-center gap-2 flex-shrink-0">
-            {showLanguageToggle && langToggle}
             <Button
               variant="outline"
               size="icon"
@@ -526,7 +619,6 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
           title="SUIS AI"
           showBack
           onBack={onClose}
-          rightChildren={showLanguageToggle ? langToggle : undefined}
         />
       )}
 
@@ -735,6 +827,24 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
                             <button type="button" onClick={() => handleContextSelect('teacher-portrait')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'teacher-portrait' ? '✓ ' : ''}{t('ai.panel.contextTeacher')}
                             </button>
+                            <button type="button" onClick={() => handleContextSelect('school-calendar')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'school-calendar' ? '✓ ' : ''}{t('ai.panel.contextCalendar')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('open-lessons')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'open-lessons' ? '✓ ' : ''}{t('ai.panel.contextOpenLessons')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('lighthouse')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'lighthouse' ? '✓ ' : ''}{t('ai.panel.contextLighthouse')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('mailbox')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'mailbox' ? '✓ ' : ''}{t('ai.panel.contextMailbox')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('admin')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'admin' ? '✓ ' : ''}{t('ai.panel.contextAdmin')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('class-assistant')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'class-assistant' ? '✓ ' : ''}{t('ai.panel.contextClassAssistant')}
+                            </button>
                           </div>
                         )}
                       </div>
@@ -879,6 +989,24 @@ export default function AIPanel({ fullScreen, fromHub, onClose, showLanguageTogg
                             </button>
                             <button type="button" onClick={() => handleContextSelect('teacher-portrait')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'teacher-portrait' ? '✓ ' : ''}{t('ai.panel.contextTeacher')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('school-calendar')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'school-calendar' ? '✓ ' : ''}{t('ai.panel.contextCalendar')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('open-lessons')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'open-lessons' ? '✓ ' : ''}{t('ai.panel.contextOpenLessons')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('lighthouse')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'lighthouse' ? '✓ ' : ''}{t('ai.panel.contextLighthouse')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('mailbox')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'mailbox' ? '✓ ' : ''}{t('ai.panel.contextMailbox')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('admin')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'admin' ? '✓ ' : ''}{t('ai.panel.contextAdmin')}
+                            </button>
+                            <button type="button" onClick={() => handleContextSelect('class-assistant')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
+                              {screenId === 'class-assistant' ? '✓ ' : ''}{t('ai.panel.contextClassAssistant')}
                             </button>
                           </div>
                         )}

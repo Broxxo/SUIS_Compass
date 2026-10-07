@@ -4,7 +4,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLanguage } from '../contexts/LanguageContext';
 import AppTopBar from './AppTopBar';
-import { Button } from './ui/button';
 
 export type HubMoreView = 'class-assistant';
 
@@ -38,7 +37,7 @@ export default function HubMoreApps({
   onBack: () => void;
   onOpen: (view: HubMoreView) => void;
 }) {
-  const { language, setLanguage } = useLanguage();
+  const { language } = useLanguage();
   const isZh = language === 'zh';
   const [isPortrait, setIsPortrait] = useState(() => {
     if (typeof window === 'undefined') return true;
@@ -81,17 +80,6 @@ export default function HubMoreApps({
         title={isZh ? '更多功能' : 'More'}
         showBack
         onBack={onBack}
-        rightChildren={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-            className="h-[var(--app-topbar-control)] min-w-[2.75rem] rounded-lg px-3 text-[0.9625rem]"
-            title={isZh ? 'Switch to English' : '切换到中文'}
-          >
-            {isZh ? 'EN' : '中'}
-          </Button>
-        }
       />
       <div className="flex justify-center px-2 py-4 sm:p-6">
         <div

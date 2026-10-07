@@ -39,9 +39,7 @@ export type OpenLessonRow = {
   academicYearId: string;
   term: OpenLessonTerm;
   lessonKind: OpenLessonKind;
-  groupId: string;
-  groupNameZh: string;
-  groupNameEn: string;
+  subject: string;
   teacherId: string;
   teacherNameZh: string;
   teacherNameEn: string;
@@ -74,7 +72,7 @@ export type OpenLessonInput = {
   academicYearId: string;
   term: OpenLessonTerm;
   lessonKind: OpenLessonKind;
-  groupId: string;
+  subject: string;
   teacherId: string;
   classId: string;
   lessonDate: string;
@@ -154,6 +152,19 @@ export async function ensureOpenLessonsTable(): Promise<void> {
       END IF;
     END $$
   `);
+  await pool.query(`
+    ALTER TABLE open_lessons
+      ADD COLUMN IF NOT EXISTS subject VARCHAR(80) NOT NULL DEFAULT ''
+  `);
+  const groups = await loadSchoolTeachingSubjectGroups();
+  for (const group of groups) {
+    const name = (group.nameZh || group.nameEn || '').trim().slice(0, 80);
+    if (!name) continue;
+    await pool.query(
+      `UPDATE open_lessons SET subject = $2 WHERE group_id = $1 AND subject = ''`,
+      [group.id, name],
+    );
+  }
   ensured = true;
 }
 
@@ -166,7 +177,7 @@ export function parseOpenLessonInput(body: unknown, fallbackYear = '', fallbackT
   const academicYearId = String(rec.academicYearId ?? fallbackYear).trim();
   const term = String(rec.term ?? fallbackTerm).trim();
   const lessonKind = String(rec.lessonKind ?? '').trim();
-  const groupId = String(rec.groupId ?? '').trim();
+  const subject = String(rec.subject ?? '').trim();
   const teacherId = String(rec.teacherId ?? '').trim();
   const classId = String(rec.classId ?? '').trim();
   const lessonDate = String(rec.lessonDate ?? '').trim();
@@ -177,7 +188,8 @@ export function parseOpenLessonInput(body: unknown, fallbackYear = '', fallbackT
   if (!academicYearId) return { error: 'year_required' };
   if (!isOpenLessonTerm(term)) return { error: 'term_invalid' };
   if (!isOpenLessonKind(lessonKind)) return { error: 'kind_invalid' };
-  if (!groupId) return { error: 'group_required' };
+  if (!subject) return { error: 'subject_required' };
+  if (subject.length > 80) return { error: 'field_too_long' };
   if (!teacherId) return { error: 'teacher_required' };
   if (!classId) return { error: 'class_required' };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(lessonDate) || Number.isNaN(Date.parse(`${lessonDate}T00:00:00Z`))) {
@@ -194,7 +206,7 @@ export function parseOpenLessonInput(body: unknown, fallbackYear = '', fallbackT
     academicYearId,
     term,
     lessonKind,
-    groupId,
+    subject,
     teacherId,
     classId,
     lessonDate,
@@ -296,33 +308,28 @@ function canAddLessonKind(access: Access, kind: OpenLessonKind): boolean {
   return access.isAdmin || access.ledGroupIds.length > 0;
 }
 
-function canEditPair(access: Access, groupId: string, teacherId: string): boolean {
-  if (access.isAdmin) return true;
-  if (teacherId === access.viewerId) return true;
-  return access.ledGroupIds.includes(groupId);
+function leadsTeacher(access: Access, teacherId: string): boolean {
+  return access.ledGroupIds.some((groupId) => access.memberTeacherIdsByGroup.get(groupId)?.has(teacherId));
 }
 
-function canAssign(access: Access, groupId: string, teacherId: string): boolean {
-  if (!access.groups.some((g) => g.id === groupId)) return false;
-  if (!access.staff.some((s) => s.id === teacherId)) return false;
+function canEditTeacher(access: Access, teacherId: string): boolean {
   if (access.isAdmin) return true;
-  const inGroup =
-    access.memberGroupIds.includes(groupId) || access.ledGroupIds.includes(groupId);
-  if (teacherId === access.viewerId && inGroup) return true;
-  if (!access.ledGroupIds.includes(groupId)) return false;
   if (teacherId === access.viewerId) return true;
-  return access.memberTeacherIdsByGroup.get(groupId)?.has(teacherId) ?? false;
+  return leadsTeacher(access, teacherId);
+}
+
+function canAssignTeacher(access: Access, teacherId: string): boolean {
+  return access.staff.some((person) => person.id === teacherId);
 }
 
 function canWrite(
   access: Access,
-  existing: { groupId: string; teacherId: string } | null,
-  next: { groupId: string; teacherId: string },
+  existing: { teacherId: string } | null,
+  next: { teacherId: string },
 ): boolean {
-  if (existing && !canEditPair(access, existing.groupId, existing.teacherId)) return false;
-  const samePair = existing && existing.groupId === next.groupId && existing.teacherId === next.teacherId;
-  if (samePair) return true;
-  return canAssign(access, next.groupId, next.teacherId);
+  if (existing && !canEditTeacher(access, existing.teacherId)) return false;
+  if (existing && existing.teacherId === next.teacherId) return true;
+  return canAssignTeacher(access, next.teacherId);
 }
 
 type LessonDbRow = {
@@ -331,6 +338,7 @@ type LessonDbRow = {
   term: string;
   lesson_kind: string;
   group_id: string;
+  subject: string;
   teacher_id: string;
   class_id: string | null;
   class_name: string | null;
@@ -359,9 +367,7 @@ function mapLesson(row: LessonDbRow, access: Access): OpenLessonRow {
     academicYearId: row.academic_year_id,
     term: row.term as OpenLessonTerm,
     lessonKind: row.lesson_kind as OpenLessonKind,
-    groupId: row.group_id,
-    groupNameZh: group?.nameZh ?? row.group_id,
-    groupNameEn: group?.nameEn ?? group?.nameZh ?? row.group_id,
+    subject: row.subject.trim() || group?.nameZh || group?.nameEn || '',
     teacherId: row.teacher_id,
     teacherNameZh: row.teacher_name_zh,
     teacherNameEn: row.teacher_name_en,
@@ -372,12 +378,12 @@ function mapLesson(row: LessonDbRow, access: Access): OpenLessonRow {
     gradeUnitTopic: row.grade_unit_topic,
     location: row.location,
     remarks: row.remarks ?? '',
-    canEdit: canEditPair(access, row.group_id, row.teacher_id),
+    canEdit: canEditTeacher(access, row.teacher_id),
   };
 }
 
 const LESSON_SELECT = `
-  SELECT l.id, l.academic_year_id, l.term, l.lesson_kind, l.group_id, l.teacher_id, l.class_id,
+  SELECT l.id, l.academic_year_id, l.term, l.lesson_kind, l.group_id, l.subject, l.teacher_id, l.class_id,
          c.name AS class_name,
          to_char(l.lesson_date, 'YYYY-MM-DD') AS lesson_date,
          l.time_label, l.grade_unit_topic, l.location, l.remarks, l.created_by,
@@ -472,15 +478,15 @@ export async function createOpenLesson(
   const id = newId();
   await pool.query(
     `INSERT INTO open_lessons (
-       id, academic_year_id, term, lesson_kind, group_id, teacher_id, class_id, lesson_date, time_label,
+       id, academic_year_id, term, lesson_kind, group_id, subject, teacher_id, class_id, lesson_date, time_label,
        grade_unit_topic, location, remarks, created_by, updated_by
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+     ) VALUES ($1,$2,$3,$4,'',$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
     [
       id,
       input.academicYearId,
       input.term,
       input.lessonKind,
-      input.groupId,
+      input.subject,
       input.teacherId,
       input.classId,
       input.lessonDate,
@@ -513,19 +519,19 @@ export async function updateOpenLesson(
     term: existing.term as OpenLessonTerm,
     lessonKind: existing.lesson_kind as OpenLessonKind,
   };
-  if (!canWrite(access, { groupId: existing.group_id, teacherId: existing.teacher_id }, next)) {
+  if (!canWrite(access, { teacherId: existing.teacher_id }, next)) {
     return { error: 'assign_forbidden' };
   }
   if (!(await classInYear(next.classId, existing.academic_year_id))) return { error: 'class_not_found' };
   await pool.query(
     `UPDATE open_lessons
-     SET group_id = $2, teacher_id = $3, class_id = $4, lesson_date = $5, time_label = $6,
+     SET subject = $2, teacher_id = $3, class_id = $4, lesson_date = $5, time_label = $6,
          grade_unit_topic = $7, location = $8, remarks = $9, updated_by = $10,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
     [
       id,
-      next.groupId,
+      next.subject,
       next.teacherId,
       next.classId,
       next.lessonDate,
@@ -565,7 +571,7 @@ export async function listOpenLessonsForTerm(
 export type OpenLessonImportRow = {
   row: number;
   lessonKind: string;
-  groupName: string;
+  subject: string;
   teacherName: string;
   className: string;
   lessonDate: string;
@@ -663,11 +669,6 @@ export async function replaceOpenLessonsForTerm(
     addAlias(teacherIndex, zh, staff.id);
     addAlias(teacherIndex, en, staff.id);
   }
-  const groupIndex = new Map<string, Set<string>>();
-  for (const group of access.groups) {
-    addAlias(groupIndex, group.nameZh, group.id);
-    addAlias(groupIndex, group.nameEn, group.id);
-  }
   const classes = await loadYearClasses(academicYearId);
   const classIndex = new Map<string, Set<string>>();
   for (const item of classes) addAlias(classIndex, item.name, item.id);
@@ -676,20 +677,13 @@ export async function replaceOpenLessonsForTerm(
   const resolved: OpenLessonInput[] = [];
   for (const item of rows) {
     const lessonKind = lessonKindFromLabel(item.lessonKind);
-    const group = resolveAlias(groupIndex, item.groupName);
+    const subject = item.subject.trim().slice(0, 80);
     const teacher = resolveAlias(teacherIndex, item.teacherName);
     const classMatch = item.className.trim() ? resolveAlias(classIndex, item.className) : { error: 'not_found' as const };
     const timeText = normalizeTimeText(item.timeText);
     const rowIssues: OpenLessonImportIssue[] = [];
     if (!lessonKind) rowIssues.push({ row: item.row, code: 'kind_invalid', detail: item.lessonKind });
-    if (!item.groupName.trim()) rowIssues.push({ row: item.row, code: 'group_required' });
-    else if ('error' in group) {
-      rowIssues.push({
-        row: item.row,
-        code: group.error === 'ambiguous' ? 'group_ambiguous' : 'group_not_found',
-        detail: item.groupName,
-      });
-    }
+    if (!subject) rowIssues.push({ row: item.row, code: 'subject_required' });
     if (!item.teacherName.trim()) rowIssues.push({ row: item.row, code: 'teacher_required' });
     else if ('error' in teacher) {
       rowIssues.push({
@@ -706,7 +700,7 @@ export async function replaceOpenLessonsForTerm(
         detail: item.className,
       });
     }
-    if (rowIssues.length > 0 || !lessonKind || !('id' in group) || !('id' in teacher) || !('id' in classMatch)) {
+    if (rowIssues.length > 0 || !lessonKind || !subject || !('id' in teacher) || !('id' in classMatch)) {
       issues.push(...rowIssues);
       continue;
     }
@@ -714,7 +708,7 @@ export async function replaceOpenLessonsForTerm(
       academicYearId,
       term,
       lessonKind,
-      groupId: group.id,
+      subject,
       teacherId: teacher.id,
       classId: classMatch.id,
       lessonDate: item.lessonDate,
@@ -731,7 +725,7 @@ export async function replaceOpenLessonsForTerm(
       issues.push({ row: item.row, code: 'school_add_forbidden' });
       continue;
     }
-    if (!canAssign(access, group.id, teacher.id)) {
+    if (!canAssignTeacher(access, teacher.id)) {
       issues.push({ row: item.row, code: 'assign_forbidden', detail: item.teacherName });
       continue;
     }
@@ -741,13 +735,13 @@ export async function replaceOpenLessonsForTerm(
 
   const existing = (
     await pool.query(
-      `SELECT group_id, teacher_id, lesson_kind, created_by
+      `SELECT teacher_id, lesson_kind, created_by
        FROM open_lessons WHERE academic_year_id = $1 AND term = $2`,
       [academicYearId, term],
     )
-  ).rows as Array<{ group_id: string; teacher_id: string; lesson_kind: string; created_by: string | null }>;
+  ).rows as Array<{ teacher_id: string; lesson_kind: string; created_by: string | null }>;
   const visibleExisting = existing.filter((row) => canSeeOpenLesson(viewerId, row));
-  if (visibleExisting.some((row) => !canEditPair(access, row.group_id, row.teacher_id))) {
+  if (visibleExisting.some((row) => !canEditTeacher(access, row.teacher_id))) {
     return { error: 'import_forbidden' };
   }
 
@@ -763,15 +757,15 @@ export async function replaceOpenLessonsForTerm(
     for (const input of resolved) {
       await client.query(
         `INSERT INTO open_lessons (
-           id, academic_year_id, term, lesson_kind, group_id, teacher_id, class_id, lesson_date, time_label,
+           id, academic_year_id, term, lesson_kind, group_id, subject, teacher_id, class_id, lesson_date, time_label,
            grade_unit_topic, location, remarks, created_by, updated_by
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+         ) VALUES ($1,$2,$3,$4,'',$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
         [
           newId(),
           input.academicYearId,
           input.term,
           input.lessonKind,
-          input.groupId,
+          input.subject,
           input.teacherId,
           input.classId,
           input.lessonDate,
@@ -800,7 +794,7 @@ export async function deleteOpenLesson(viewerId: string, id: string): Promise<{ 
   const access = await loadAccess(viewerId, existing.academic_year_id);
   if (!access) return { error: 'forbidden' };
   if (!canSeeOpenLesson(viewerId, existing)) return { error: 'not_found' };
-  if (!canEditPair(access, existing.group_id, existing.teacher_id)) return { error: 'forbidden' };
+  if (!canEditTeacher(access, existing.teacher_id)) return { error: 'forbidden' };
   await pool.query(`DELETE FROM open_lessons WHERE id = $1`, [id]);
   return { ok: true };
 }

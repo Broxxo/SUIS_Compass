@@ -5,6 +5,7 @@ import { MenuSelect } from './MenuSelect';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp, ListFilter, Trash2 } from 'lucide-react';
 import AppTopBar from './AppTopBar';
+import { useAIContext } from '../contexts/AIContext';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
@@ -25,7 +26,6 @@ import type {
   OpenLesson,
   OpenLessonBoard,
   OpenLessonClassOption,
-  OpenLessonGroupOption,
   OpenLessonImportIssue,
   OpenLessonKind,
   OpenLessonStaffOption,
@@ -37,13 +37,15 @@ interface OpenLessonsProps {
   initialTerm?: Term;
   initialLessonKind?: OpenLessonKind;
   initialLessonId?: string;
+  isAIOpen?: boolean;
+  onToggleAI?: () => void;
 }
 
 type SheetRow = {
   key: string;
   id: string | null;
-  groupId: string;
   teacherId: string;
+  subject: string;
   classId: string;
   className: string;
   lessonDate: string;
@@ -52,8 +54,6 @@ type SheetRow = {
   location: string;
   remarks: string;
   canEdit: boolean;
-  groupNameZh: string;
-  groupNameEn: string;
   teacherNameZh: string;
   teacherNameEn: string;
 };
@@ -65,13 +65,13 @@ const cellInput =
 const headCell = 'border-b border-r border-white/25 px-2 py-2.5 text-center font-medium last:border-r-0';
 const bodyCell = 'border-b border-r border-slate-200 px-2 py-1 align-top last:border-r-0';
 
-type SortKey = 'date' | 'group';
+type SortKey = 'date' | 'subject';
 type SortDir = 'asc' | 'desc';
 type LessonSort = { key: SortKey; dir: SortDir };
 
 type SavedFields = Pick<
   SheetRow,
-  'groupId' | 'teacherId' | 'classId' | 'lessonDate' | 'timeText' | 'gradeUnitTopic' | 'location' | 'remarks'
+  'teacherId' | 'subject' | 'classId' | 'lessonDate' | 'timeText' | 'gradeUnitTopic' | 'location' | 'remarks'
 >;
 
 /** 取时间段的开始时刻。08:20–09:00 按 08:20 排，早的在上面。 */
@@ -123,16 +123,11 @@ function groupRowsByDate(rows: SheetRow[]): Array<{ date: string; rows: SheetRow
   return order.map((date) => ({ date, rows: map.get(date) ?? [] }));
 }
 
-function groupSortLabel(row: SheetRow, board: OpenLessonBoard | null, isZh: boolean): string {
-  const known = board?.groups.find((group) => group.id === row.groupId);
-  return personLabel(isZh, known?.nameZh || row.groupNameZh, known?.nameEn || row.groupNameEn);
-}
-
-function compareLessons(a: SheetRow, b: SheetRow, sort: LessonSort, board: OpenLessonBoard | null, isZh: boolean): number {
+function compareLessons(a: SheetRow, b: SheetRow, sort: LessonSort, isZh: boolean): number {
   const dir = sort.dir === 'asc' ? 1 : -1;
-  if (sort.key === 'group') {
-    const byGroup = groupSortLabel(a, board, isZh).localeCompare(groupSortLabel(b, board, isZh), isZh ? 'zh-CN' : 'en');
-    if (byGroup !== 0) return byGroup * dir;
+  if (sort.key === 'subject') {
+    const bySubject = a.subject.localeCompare(b.subject, isZh ? 'zh-CN' : 'en');
+    if (bySubject !== 0) return bySubject * dir;
   }
   if (a.lessonDate !== b.lessonDate) {
     if (!a.lessonDate) return 1;
@@ -148,8 +143,8 @@ function compareLessons(a: SheetRow, b: SheetRow, sort: LessonSort, board: OpenL
 
 function rowSnapshot(row: SheetRow): SavedFields {
   return {
-    groupId: row.groupId,
     teacherId: row.teacherId,
+    subject: row.subject.trim(),
     classId: row.classId,
     lessonDate: row.lessonDate,
     timeText: row.timeText.trim(),
@@ -161,8 +156,8 @@ function rowSnapshot(row: SheetRow): SavedFields {
 
 function sameSnapshot(a: SavedFields, b: SavedFields): boolean {
   return (
-    a.groupId === b.groupId &&
     a.teacherId === b.teacherId &&
+    a.subject === b.subject &&
     a.classId === b.classId &&
     a.lessonDate === b.lessonDate &&
     a.timeText === b.timeText &&
@@ -180,8 +175,8 @@ function lessonToRow(lesson: OpenLesson): SheetRow {
   return {
     key: lesson.id,
     id: lesson.id,
-    groupId: lesson.groupId,
     teacherId: lesson.teacherId,
+    subject: lesson.subject,
     classId: lesson.classId,
     className: lesson.className,
     lessonDate: lesson.lessonDate,
@@ -190,25 +185,13 @@ function lessonToRow(lesson: OpenLesson): SheetRow {
     location: lesson.location,
     remarks: lesson.remarks,
     canEdit: lesson.canEdit,
-    groupNameZh: lesson.groupNameZh,
-    groupNameEn: lesson.groupNameEn,
     teacherNameZh: lesson.teacherNameZh,
     teacherNameEn: lesson.teacherNameEn,
   };
 }
 
-function assignableGroups(board: OpenLessonBoard): OpenLessonGroupOption[] {
-  if (board.isAdmin) return board.groups;
-  const ids = new Set([...board.memberGroupIds, ...board.ledGroupIds]);
-  return board.groups.filter((g) => ids.has(g.id));
-}
-
-function assignableTeachers(board: OpenLessonBoard, groupId: string): OpenLessonStaffOption[] {
-  if (!groupId) return [];
-  const memberIds = new Set(
-    board.memberships.filter((membership) => membership.groupId === groupId).map((membership) => membership.teacherId),
-  );
-  return board.staff.filter((staff) => memberIds.has(staff.id));
+function assignableTeachers(board: OpenLessonBoard): OpenLessonStaffOption[] {
+  return board.staff;
 }
 
 function withCurrentOption<T extends { id: string }>(options: T[], current: T | null): T[] {
@@ -218,8 +201,8 @@ function withCurrentOption<T extends { id: string }>(options: T[], current: T | 
 
 function rowReady(row: SheetRow): boolean {
   return Boolean(
-    row.groupId &&
-      row.teacherId &&
+    row.teacherId &&
+      row.subject.trim() &&
       row.classId &&
       row.lessonDate &&
       row.timeText.trim() &&
@@ -246,7 +229,7 @@ function errorText(code: string, isZh: boolean): string {
     year_not_found: ['找不到这个学年', 'Academic year not found'],
     term_invalid: ['请选择学期', 'Choose a term'],
     kind_invalid: ['请选择公开课类型', 'Choose a lesson type'],
-    group_required: ['请选择组别', 'Choose a group'],
+    subject_required: ['请填写学科', 'Enter a subject'],
     teacher_required: ['请选择教师', 'Choose a teacher'],
     class_required: ['请选择班级', 'Choose a class'],
     class_not_found: ['这个班级不在本学年的班级管理里', 'This class is not in class management for this year'],
@@ -255,16 +238,14 @@ function errorText(code: string, isZh: boolean): string {
     topic_required: ['请填写学期-单元-课题', 'Enter the term, unit and topic'],
     location_required: ['请填写上课地点', 'Enter a location'],
     field_too_long: ['有一项内容太长', 'One of the fields is too long'],
-    assign_forbidden: ['不能把这节课登记给这个组别或这位教师', 'You cannot assign this lesson to that group or teacher'],
+    assign_forbidden: ['不能把这节课登记给这位教师', 'You cannot assign this lesson to that teacher'],
     school_add_forbidden: ['只有学科组长和管理员可以添加校级公开课', 'Only subject heads and admins can add a school open lesson'],
     forbidden: ['没有权限修改这条公开课', 'You cannot change this open lesson'],
     import_forbidden: ['本学期还有你不能修改的公开课，所以不能整表导入', 'This term includes lessons you cannot change, so the sheet cannot replace them'],
     no_rows: ['表格里没有可导入的公开课', 'The sheet has no open lessons to import'],
     empty_sheet: ['这个表格是空的', 'This workbook is empty'],
     file_unreadable: ['读不了这个文件，请使用导出的 xlsx 表格', 'This file could not be read. Use the exported xlsx workbook'],
-    header_missing: ['表头需要包含：类型、组别、教师、班级、日期、时间、学期-单元-课题、上课地点、备注', 'The header must include type, group, teacher, class, date, time, topic, location and remarks'],
-    group_not_found: ['找不到这个组别', 'Group not found'],
-    group_ambiguous: ['这个组别对应了多个组', 'This group name matches more than one group'],
+    header_missing: ['表头需要包含：类型、学科、教师、班级、日期、时间、学期-单元-课题、上课地点、备注', 'The header must include type, subject, teacher, class, date, time, topic, location and remarks'],
     teacher_not_found: ['找不到这位教师', 'Teacher not found'],
     teacher_ambiguous: ['这个姓名对应了多位教师', 'This teacher name matches more than one person'],
     class_ambiguous: ['这个班级名称对应了多个班', 'This class name matches more than one class'],
@@ -287,19 +268,16 @@ function formatImportIssue(issue: OpenLessonImportIssue, isZh: boolean): string 
 }
 
 function blankDraft(board: OpenLessonBoard): SheetRow {
-  const groups = assignableGroups(board);
-  const groupId = groups.length === 1 ? groups[0].id : '';
-  const teachers = groupId ? assignableTeachers(board, groupId) : [];
+  const teachers = assignableTeachers(board);
   let teacherId = '';
   if (teachers.some((teacher) => teacher.id === board.viewerId)) teacherId = board.viewerId;
   else if (teachers.length === 1) teacherId = teachers[0].id;
-  const group = groups.find((item) => item.id === groupId);
   const teacher = teachers.find((item) => item.id === teacherId);
   return {
     key: `draft-${crypto.randomUUID()}`,
     id: null,
-    groupId,
     teacherId,
+    subject: '',
     classId: '',
     className: '',
     lessonDate: '',
@@ -308,8 +286,6 @@ function blankDraft(board: OpenLessonBoard): SheetRow {
     location: '',
     remarks: '',
     canEdit: true,
-    groupNameZh: group?.nameZh ?? '',
-    groupNameEn: group?.nameEn ?? '',
     teacherNameZh: teacher?.nameZh ?? '',
     teacherNameEn: teacher?.nameEn ?? '',
   };
@@ -321,6 +297,8 @@ export default function OpenLessons({
   initialTerm,
   initialLessonKind,
   initialLessonId,
+  isAIOpen,
+  onToggleAI,
 }: OpenLessonsProps) {
   const { language } = useLanguage();
   const isZh = language === 'zh';
@@ -335,7 +313,7 @@ export default function OpenLessons({
   const [rowError, setRowError] = useState<Record<string, string>>({});
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [sort, setSort] = useState<LessonSort>({ key: 'date', dir: 'asc' });
-  const [groupFilter, setGroupFilter] = useState<string[] | null>(null);
+  const [subjectFilter, setSubjectFilter] = useState<string[] | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [mobileTable, setMobileTable] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -384,7 +362,7 @@ export default function OpenLessons({
     }
     setLoading(true);
     setPageError('');
-    setGroupFilter(null);
+    setSubjectFilter(null);
     setFilterOpen(false);
     api
       .getOpenLessonBoard(yearId, term, lessonKind)
@@ -422,32 +400,32 @@ export default function OpenLessons({
     return () => window.cancelAnimationFrame(frame);
   }, [initialLessonId, loading, rows]);
 
+  const { setContextFromApp } = useAIContext();
+  useEffect(() => {
+    if (!onToggleAI) return;
+    const yearLabel = years.find((y) => y.id === yearId)?.name ?? '';
+    const summary = isZh
+      ? `${yearLabel} ${term} · ${lessonKind === 'school' ? '校级公开课' : '组内公开课'} · 共 ${rows.length} 节`
+      : `${yearLabel} ${term} · ${lessonKind === 'school' ? 'School-wide' : 'Group'} · ${rows.length} lessons`;
+    setContextFromApp('open-lessons', { view: 'open-lessons', summary });
+  }, [onToggleAI, setContextFromApp, years, yearId, term, lessonKind, rows.length, isZh]);
+
   const canAdd = useMemo(() => {
-    if (!board || assignableGroups(board).length === 0) return false;
+    if (!board || board.staff.length === 0) return false;
     if (lessonKind === 'school' && !board.isAdmin && board.ledGroupIds.length === 0) return false;
     return true;
   }, [board, lessonKind]);
 
-  const filterGroups = useMemo(() => {
-    const ids = new Set(rows.map((row) => row.groupId).filter(Boolean));
-    const known = (board?.groups ?? []).filter((group) => ids.has(group.id));
-    const extras = [...ids]
-      .filter((id) => !known.some((group) => group.id === id))
-      .map((id) => {
-        const row = rows.find((item) => item.groupId === id);
-        return {
-          id,
-          nameZh: row?.groupNameZh || id,
-          nameEn: row?.groupNameEn || row?.groupNameZh || id,
-        };
-      });
-    return [...known, ...extras];
-  }, [rows, board]);
+  const filterSubjects = useMemo(() => {
+    return [...new Set(rows.map((row) => row.subject.trim()).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, isZh ? 'zh-CN' : 'en'),
+    );
+  }, [rows, isZh]);
 
   const visibleRows = useMemo(() => {
-    const filtered = groupFilter ? rows.filter((row) => groupFilter.includes(row.groupId)) : rows;
-    return [...filtered].sort((a, b) => compareLessons(a, b, sort, board, isZh));
-  }, [rows, groupFilter, sort, board, isZh]);
+    const filtered = subjectFilter ? rows.filter((row) => subjectFilter.includes(row.subject.trim())) : rows;
+    return [...filtered].sort((a, b) => compareLessons(a, b, sort, isZh));
+  }, [rows, subjectFilter, sort, isZh]);
 
   const rememberRow = (row: SheetRow) => {
     savedRows.current.set(row.key, rowSnapshot(row));
@@ -523,16 +501,6 @@ export default function OpenLessons({
     const next = rowsRef.current.map((row) => {
       if (row.key !== key || !row.canEdit) return row;
       const updated = { ...row, ...patch };
-      if (patch.groupId && patch.groupId !== row.groupId && currentBoard) {
-        const teachers = assignableTeachers(currentBoard, patch.groupId);
-        if (!teachers.some((teacher) => teacher.id === updated.teacherId)) {
-          updated.teacherId = teachers.some((teacher) => teacher.id === currentBoard.viewerId)
-            ? currentBoard.viewerId
-            : teachers.length === 1
-              ? teachers[0].id
-              : '';
-        }
-      }
       if (patch.classId !== undefined && currentBoard) {
         updated.className = currentBoard.classes.find((item) => item.id === updated.classId)?.name ?? '';
       }
@@ -557,8 +525,8 @@ export default function OpenLessons({
       location: row.location.trim() || saved.location,
       remarks: row.remarks.trim(),
     };
-    if (!patched.groupId || !patched.teacherId) {
-      patched = { ...patched, groupId: saved.groupId, teacherId: saved.teacherId };
+    if (!patched.subject.trim() || !patched.teacherId) {
+      patched = { ...patched, subject: patched.subject.trim() || saved.subject, teacherId: patched.teacherId || saved.teacherId };
     }
     if (!patched.classId) {
       const known = boardRef.current?.classes.find((item) => item.id === saved.classId);
@@ -673,15 +641,15 @@ export default function OpenLessons({
     const row = lessonToRow(lesson);
     rememberRow(row);
     writeRows([...rowsRef.current, row]);
-    setGroupFilter((prev) => (prev && !prev.includes(row.groupId) ? [...prev, row.groupId] : prev));
+    setSubjectFilter((prev) => (prev && row.subject.trim() && !prev.includes(row.subject.trim()) ? [...prev, row.subject.trim()] : prev));
     requestAnimationFrame(() => {
       rowNodes.current.get(row.key)?.scrollIntoView({ block: 'nearest' });
     });
   };
 
   return (
-    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)]">
-      <AppTopBar title={isZh ? '公开课' : 'Open Lessons'} showBack={!!onBackToHub} onBack={onBackToHub} />
+    <div className={`${onToggleAI ? 'h-full min-h-0 overflow-auto max-md:h-auto max-md:min-h-dvh' : 'min-h-dvh overflow-x-auto'} w-full max-w-[100%] bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)]`}>
+      <AppTopBar title={isZh ? '公开课' : 'Open Lessons'} showBack={!!onBackToHub} onBack={onBackToHub} onToggleAI={onToggleAI} isAIOpen={isAIOpen} />
       <div className="mx-auto w-[90%] max-w-[1296px] px-3 py-4 sm:px-6 sm:py-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <FilterToolbar>
@@ -820,7 +788,7 @@ export default function OpenLessons({
                         {day.rows.map((row) => (
                           <article key={row.key} className="px-3 py-2.5">
                             <p className="text-sm font-medium leading-snug text-slate-800">
-                              {[row.timeText, personLabel(isZh, row.groupNameZh, row.groupNameEn), personLabel(isZh, row.teacherNameZh, row.teacherNameEn)]
+                              {[row.timeText, row.subject, personLabel(isZh, row.teacherNameZh, row.teacherNameEn)]
                                 .filter((part) => part.trim())
                                 .join(' ')}
                               {row.className || row.location
@@ -856,24 +824,24 @@ export default function OpenLessons({
             </colgroup>
             <thead className="sticky top-0 z-10 bg-primary text-primary-foreground">
               <tr>
-                <th className={`${headCell} relative`} aria-sort={sort.key === 'group' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                <th className={`${headCell} relative`} aria-sort={sort.key === 'subject' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                   <div ref={filterRootRef}>
                     <div className="flex justify-center">
                       <div className="relative">
                         <SortHeader
-                          zh="组别"
-                          en="Group"
-                          active={sort.key === 'group'}
+                          zh="学科"
+                          en="Subject"
+                          active={sort.key === 'subject'}
                           dir={sort.dir}
-                          label={sortLabel(isZh, '组别', sort.key === 'group', sort.dir)}
-                          onClick={() => toggleSort('group')}
+                          label={sortLabel(isZh, '学科', sort.key === 'subject', sort.dir)}
+                          onClick={() => toggleSort('subject')}
                         />
                         <button
                           type="button"
                           aria-expanded={filterOpen}
-                          aria-label={isZh ? '筛选组别' : 'Filter groups'}
+                          aria-label={isZh ? '筛选学科' : 'Filter subjects'}
                           className={`absolute left-full top-1/2 z-10 ml-2 -translate-y-1/2 rounded-md border p-1 ${
-                            groupFilter
+                            subjectFilter
                               ? 'border-amber-200 bg-amber-300 text-amber-950'
                               : 'border-white/70 bg-white/25 text-white hover:bg-white/40'
                           }`}
@@ -884,11 +852,11 @@ export default function OpenLessons({
                       </div>
                     </div>
                     {filterOpen ? (
-                      <GroupFilterMenu
-                        groups={filterGroups}
-                        selected={groupFilter}
+                      <SubjectFilterMenu
+                        subjects={filterSubjects}
+                        selected={subjectFilter}
                         isZh={isZh}
-                        onChange={setGroupFilter}
+                        onChange={setSubjectFilter}
                       />
                     ) : null}
                   </div>
@@ -1009,21 +977,20 @@ function SortHeader({
   );
 }
 
-function GroupFilterMenu({
-  groups,
+function SubjectFilterMenu({
+  subjects,
   selected,
   isZh,
   onChange,
 }: {
-  groups: OpenLessonGroupOption[];
+  subjects: string[];
   selected: string[] | null;
   isZh: boolean;
   onChange: (next: string[] | null) => void;
 }) {
   const allRef = useRef<HTMLInputElement>(null);
-  const allIds = groups.map((group) => group.id);
-  const selectedIds = selected ?? allIds;
-  const allChecked = allIds.length > 0 && selectedIds.length === allIds.length;
+  const selectedIds = selected ?? subjects;
+  const allChecked = subjects.length > 0 && selectedIds.length === subjects.length;
   const someChecked = selectedIds.length > 0 && !allChecked;
   useEffect(() => {
     if (allRef.current) allRef.current.indeterminate = someChecked;
@@ -1041,19 +1008,19 @@ function GroupFilterMenu({
         {isZh ? '全选' : 'Select all'}
       </label>
       <div className="max-h-56 overflow-auto">
-        {groups.map((group) => {
-          const checked = selectedIds.includes(group.id);
+        {subjects.map((subject) => {
+          const checked = selectedIds.includes(subject);
           return (
-            <label key={group.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-slate-50">
+            <label key={subject} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-slate-50">
               <input
                 type="checkbox"
                 checked={checked}
                 onChange={() => {
-                  const next = checked ? selectedIds.filter((id) => id !== group.id) : [...selectedIds, group.id];
-                  onChange(next.length === allIds.length ? null : next);
+                  const next = checked ? selectedIds.filter((item) => item !== subject) : [...selectedIds, subject];
+                  onChange(next.length === subjects.length ? null : next);
                 }}
               />
-              <span className="truncate">{personLabel(isZh, group.nameZh, group.nameEn)}</span>
+              <span className="truncate">{subject}</span>
             </label>
           );
         })}
@@ -1084,16 +1051,9 @@ function LessonRow({
   rowRef: (node: HTMLTableRowElement | null) => void;
 }) {
   const readOnly = !row.canEdit || !board;
-  const groupOptions = board
-    ? withCurrentOption(assignableGroups(board), {
-        id: row.groupId,
-        nameZh: row.groupNameZh || row.groupId,
-        nameEn: row.groupNameEn || row.groupNameZh || row.groupId,
-      })
-    : [];
   const teacherOptions = board
     ? withCurrentOption(
-        assignableTeachers(board, row.groupId),
+        assignableTeachers(board),
         row.teacherId
           ? {
               id: row.teacherId,
@@ -1115,16 +1075,15 @@ function LessonRow({
       <tr ref={rowRef} className="group">
         <td className={bodyCell}>
           {readOnly ? (
-            <ReadCell value={personLabel(isZh, row.groupNameZh, row.groupNameEn)} />
+            <ReadCell value={row.subject} />
           ) : (
-            <MenuSelect className={cellInput} value={row.groupId} onChange={(e) => onChange({ groupId: e.target.value }, true)}>
-              <option value="">{isZh ? '选择组别' : 'Group'}</option>
-              {groupOptions.filter((group) => group.id).map((group) => (
-                <option key={group.id} value={group.id}>
-                  {personLabel(isZh, group.nameZh, group.nameEn)}
-                </option>
-              ))}
-            </MenuSelect>
+            <input
+              className={cellInput}
+              value={row.subject}
+              placeholder={isZh ? '例如：数学' : 'e.g. Maths'}
+              onChange={(e) => onChange({ subject: e.target.value }, false)}
+              onBlur={onCommit}
+            />
           )}
         </td>
         <td className={bodyCell}>
@@ -1132,6 +1091,7 @@ function LessonRow({
             <ReadCell value={personLabel(isZh, row.teacherNameZh, row.teacherNameEn)} />
           ) : (
             <MenuSelect
+              searchable
               className={cellInput}
               value={row.teacherId}
               onChange={(e) => onChange({ teacherId: e.target.value }, true)}
@@ -1293,25 +1253,10 @@ function AddLessonDialog({
     setSaving(false);
   }, [open, board]);
 
-  const groups = assignableGroups(board);
-  const teachers = form?.groupId ? assignableTeachers(board, form.groupId) : [];
+  const teachers = assignableTeachers(board);
 
   const patch = (next: Partial<SheetRow>) => {
-    setForm((prev) => {
-      if (!prev) return prev;
-      const updated = { ...prev, ...next };
-      if (next.groupId && next.groupId !== prev.groupId) {
-        const options = assignableTeachers(board, next.groupId);
-        if (!options.some((teacher) => teacher.id === updated.teacherId)) {
-          updated.teacherId = options.some((teacher) => teacher.id === board.viewerId)
-            ? board.viewerId
-            : options.length === 1
-              ? options[0].id
-              : '';
-        }
-      }
-      return updated;
-    });
+    setForm((prev) => (prev ? { ...prev, ...next } : prev));
   };
 
   const submit = async () => {
@@ -1323,7 +1268,7 @@ function AddLessonDialog({
         academicYearId: board.academicYearId,
         term: board.term,
         lessonKind: board.lessonKind,
-        groupId: form.groupId,
+        subject: form.subject.trim(),
         teacherId: form.teacherId,
         classId: form.classId,
         lessonDate: form.lessonDate,
@@ -1341,7 +1286,7 @@ function AddLessonDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
+    <Dialog modal={false} open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
       <DialogContent className="sm:max-w-[480px]">
         <DialogHeader>
           <DialogTitle>{isZh ? '添加公开课' : 'Add open lesson'}</DialogTitle>
@@ -1353,21 +1298,14 @@ function AddLessonDialog({
         </DialogHeader>
         {form ? (
           <div className="grid gap-3">
-            <Field label={isZh ? '组别' : 'Group'}>
-              <MenuSelect className={formControl} value={form.groupId} onChange={(e) => patch({ groupId: e.target.value })}>
-                <option value="">{isZh ? '选择组别' : 'Group'}</option>
-                {groups.filter((group) => group.id).map((group) => (
-                  <option key={group.id} value={group.id}>
-                    {personLabel(isZh, group.nameZh, group.nameEn)}
-                  </option>
-                ))}
-              </MenuSelect>
+            <Field label={isZh ? '学科' : 'Subject'}>
+              <Input value={form.subject} placeholder={isZh ? '例如：数学' : 'e.g. Maths'} onChange={(e) => patch({ subject: e.target.value })} />
             </Field>
             <Field label={isZh ? '教师' : 'Teacher'}>
               <MenuSelect
+                searchable
                 className={formControl}
                 value={form.teacherId}
-                disabled={!form.groupId}
                 onChange={(e) => patch({ teacherId: e.target.value })}
               >
                 <option value="">{isZh ? '选择教师' : 'Teacher'}</option>

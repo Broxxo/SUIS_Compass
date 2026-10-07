@@ -1,6 +1,5 @@
 import { MenuSelect } from './MenuSelect';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { Bot } from 'lucide-react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
@@ -3772,19 +3771,8 @@ export default function StudentPortrait({
         title={isStudentSelf ? (isZh ? '我的画像' : 'My profile') : isZh ? '学生中心' : 'Student Center'}
         showBack={!isStudentSelf}
         onBack={isStudentSelf ? undefined : onBackToHub}
-        rightChildren={
-          onToggleAI && !isStudentSelf ? (
-            <Button
-              variant={isAIOpen ? 'default' : 'outline'}
-              size="icon"
-              onClick={onToggleAI}
-              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
-              title="AI"
-            >
-              <Bot className="h-4 w-4" />
-            </Button>
-          ) : undefined
-        }
+        onToggleAI={onToggleAI && !isStudentSelf ? onToggleAI : undefined}
+        isAIOpen={isAIOpen}
       />
       <main className="mx-auto w-full min-h-0 max-w-6xl flex-1 space-y-4 overflow-auto px-4 py-6">
         {!isStudentSelf && (

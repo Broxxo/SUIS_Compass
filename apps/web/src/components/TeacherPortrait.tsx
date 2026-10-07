@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Bot } from 'lucide-react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { useAuth } from '../contexts/AuthContext';
@@ -467,19 +466,8 @@ export default function TeacherPortrait({
         title={isZh ? '教师中心' : 'Teacher Center'}
         showBack
         onBack={onBackToHub}
-        rightChildren={
-          onToggleAI ? (
-            <Button
-              variant={isAIOpen ? 'default' : 'outline'}
-              size="icon"
-              onClick={onToggleAI}
-              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
-              title="AI"
-            >
-              <Bot className="h-4 w-4" />
-            </Button>
-          ) : undefined
-        }
+        onToggleAI={onToggleAI}
+        isAIOpen={isAIOpen}
       />
       <main className="mx-auto w-full min-h-0 max-w-6xl flex-1 space-y-4 overflow-auto px-4 py-6">
         <div className="flex flex-wrap items-center gap-2 justify-between">

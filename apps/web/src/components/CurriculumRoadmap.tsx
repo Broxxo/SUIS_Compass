@@ -19,7 +19,7 @@ import UnitView from './UnitView';
 import ConceptView from './ConceptView';
 import ConceptSettingsDialog from './ConceptSettingsDialog';
 import AppTopBar from './AppTopBar';
-import { Settings, Plus, Bot, Download, Upload, SlidersHorizontal, BarChart2, Globe } from 'lucide-react';
+import { Settings, Plus, Download, Upload, SlidersHorizontal, BarChart2, Globe } from 'lucide-react';
 import { Button } from './ui/button';
 import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from './ui/segment-tab-button';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -856,19 +856,8 @@ export default function CurriculumRoadmap({
           title={topBarTitle}
           showBack={!!onBackToHub}
           onBack={onBackToHub}
-          rightChildren={
-            onToggleAI ? (
-              <Button
-                variant={isAIOpen ? 'default' : 'outline'}
-                size="icon"
-                onClick={onToggleAI}
-                className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] rounded-lg flex-shrink-0"
-                title="AI"
-              >
-                <Bot className="h-4 w-4" />
-              </Button>
-            ) : undefined
-          }
+          onToggleAI={onToggleAI}
+          isAIOpen={isAIOpen}
         />
       )}
 

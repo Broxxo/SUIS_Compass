@@ -2,19 +2,21 @@
  * 中国大陆节假日。放假与调休来自苹果「中国大陆节假日」日历，
  * 地址 https://calendars.icloud.com/holidays/cn_zh.ics/
  * 只采用 X-APPLE-SPECIAL-DAY：WORK-HOLIDAY 为放假，ALTERNATE-WORKDAY 为调休上班。
- * 节气、传统节日名称不标。缓存 24 小时，源更新后下一次读取会换上新日期。
+ * 另外标出每年正月初一的春节。当年放假安排还没公布时，这一天仍然显示，但不因此改成放假。
+ * 节气和其他传统节日名称不标。缓存 24 小时，源更新后下一次读取会换上新日期。
  */
 import { gunzipSync } from 'zlib';
 import pool from '../config/database.js';
 import { ensureSchoolCalendarTables } from './schoolCalendar.js';
 
 export const CN_HOLIDAY_ICS_URL = 'https://calendars.icloud.com/holidays/cn_zh.ics/';
+const CACHE_SOURCE = `${CN_HOLIDAY_ICS_URL}#spring-festival`;
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type PublicHolidayDay = {
   date: string;
-  kind: 'off' | 'work';
+  kind: 'off' | 'work' | 'festival';
   label: string;
   title: string;
 };
@@ -71,9 +73,9 @@ export function parseCnHolidayIcs(ics: string): PublicHolidayDay[] {
   const text = unfold(ics);
   const off = new Map<string, { name: string; span: number }>();
   const work = new Map<string, string>();
+  const springFestival = new Set<string>();
   for (const block of text.split('BEGIN:VEVENT').slice(1)) {
     const special = prop(block, 'X-APPLE-SPECIAL-DAY');
-    if (special !== 'WORK-HOLIDAY' && special !== 'ALTERNATE-WORKDAY') continue;
     const startRaw = prop(block, 'DTSTART');
     if (!/^\d{8}$/.test(startRaw)) continue;
     const endRaw = prop(block, 'DTEND');
@@ -82,6 +84,10 @@ export function parseCnHolidayIcs(ics: string): PublicHolidayDay[] {
     const dates = expandDates(start, endExclusive);
     const name = prop(block, 'SUMMARY').replace(/（(?:休|班)）/g, '').trim();
     if (!name) continue;
+    if (special !== 'WORK-HOLIDAY' && special !== 'ALTERNATE-WORKDAY') {
+      if (name === '春节' && dates.length === 1) springFestival.add(dates[0]);
+      continue;
+    }
     if (special === 'WORK-HOLIDAY') {
       for (const date of dates) {
         const prev = off.get(date);
@@ -100,6 +106,10 @@ export function parseCnHolidayIcs(ics: string): PublicHolidayDay[] {
   for (const [date, name] of work) {
     if (off.has(date)) continue;
     days.push({ date, kind: 'work', label: '班', title: `调休上班（${name}）` });
+  }
+  for (const date of springFestival) {
+    if (off.has(date) || work.has(date)) continue;
+    days.push({ date, kind: 'festival', label: '春节', title: '春节' });
   }
   days.sort((a, b) => a.date.localeCompare(b.date));
   return days;
@@ -137,7 +147,7 @@ function feedFromRow(row: CacheRow): PublicHolidayFeed | null {
 async function readCache(): Promise<CacheRow | null> {
   const result = await pool.query<CacheRow>(
     'SELECT fetched_at, payload FROM school_calendar_holiday_cache WHERE source = $1',
-    [CN_HOLIDAY_ICS_URL],
+    [CACHE_SOURCE],
   );
   return result.rows[0] ?? null;
 }
@@ -148,7 +158,7 @@ async function writeCache(days: PublicHolidayDay[]): Promise<string> {
      VALUES ($1, NOW(), $2::jsonb)
      ON CONFLICT (source) DO UPDATE SET fetched_at = NOW(), payload = EXCLUDED.payload
      RETURNING fetched_at`,
-    [CN_HOLIDAY_ICS_URL, JSON.stringify({ days })],
+    [CACHE_SOURCE, JSON.stringify({ days })],
   );
   return result.rows[0].fetched_at.toISOString();
 }

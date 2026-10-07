@@ -91,7 +91,7 @@ async function readError(response: Response): Promise<never> {
 
 export type PublicHolidayDay = {
   date: string;
-  kind: 'off' | 'work';
+  kind: 'off' | 'work' | 'festival';
   label: string;
   title: string;
 };
@@ -245,6 +245,15 @@ export async function createSchoolCalendarEvent(
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ academicYearId, ...input }),
+  });
+  if (!response.ok) await readError(response);
+}
+
+export async function setSchoolCalendarEventStatus(id: string, status: CalendarEventStatus): Promise<void> {
+  const response = await fetch(apiUrl(`/api/school-calendar/events/${encodeURIComponent(id)}/status`), {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify({ status }),
   });
   if (!response.ok) await readError(response);
 }

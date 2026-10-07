@@ -7,13 +7,19 @@ import { Course, Semester } from '../types';
 import { loadCoursesSync, loadKeyConceptsSync } from '../lib/storage';
 import type { StudentPortraitAIPayload } from '../lib/studentPortraitAIContext';
 import type { TeacherPortraitAIPayload } from '../lib/teacherPortraitAIContext';
+import { buildBasicSchoolCalendarPayload as basicSchoolCalendarPayload, type SchoolCalendarAIPayload } from '../lib/schoolCalendarAIContext';
 
 export type AIScreenId =
   | 'hub'
   | 'curriculum-roadmap'
   | 'student-portrait'
   | 'teacher-portrait'
+  | 'school-calendar'
   | 'class-assistant'
+  | 'open-lessons'
+  | 'lighthouse'
+  | 'mailbox'
+  | 'admin'
   | null;
 
 export interface CurriculumRoadmapPayload {
@@ -29,6 +35,8 @@ export type AIContextPayload =
   | CurriculumRoadmapPayload
   | StudentPortraitAIPayload
   | TeacherPortraitAIPayload
+  | SchoolCalendarAIPayload
+  | BasicScreenPayload
   | Record<string, unknown>;
 
 interface AIContextType {
@@ -63,6 +71,37 @@ export function buildBasicStudentPortraitPayload(): StudentPortraitAIPayload {
 /** 从 Hub / SUIS AI 主入口手动选择「教师中心」时使用：无具体看板明细 */
 export function buildBasicTeacherPortraitPayload(): TeacherPortraitAIPayload {
   return { view: 'idle' };
+}
+
+/** 从 Hub / SUIS AI 主入口手动选择「校历」时使用：没有打开具体月历或周历 */
+export function buildBasicSchoolCalendarPayload(): SchoolCalendarAIPayload {
+  return basicSchoolCalendarPayload();
+}
+
+/** 公开课 / 信箱 / 后台 / 课堂助手 的基础上下文：仅说明当前所在界面，无具体明细 */
+export interface BasicScreenPayload {
+  view: 'open-lessons' | 'lighthouse' | 'mailbox' | 'admin' | 'class-assistant' | 'idle';
+  summary?: string;
+}
+
+export function buildBasicOpenLessonsPayload(): BasicScreenPayload {
+  return { view: 'open-lessons' };
+}
+
+export function buildBasicLighthousePayload(): BasicScreenPayload {
+  return { view: 'lighthouse' };
+}
+
+export function buildBasicMailboxPayload(): BasicScreenPayload {
+  return { view: 'mailbox' };
+}
+
+export function buildBasicAdminPayload(): BasicScreenPayload {
+  return { view: 'admin' };
+}
+
+export function buildBasicClassAssistantPayload(): BasicScreenPayload {
+  return { view: 'class-assistant' };
 }
 
 export function AIContextProvider({ children }: { children: ReactNode }) {

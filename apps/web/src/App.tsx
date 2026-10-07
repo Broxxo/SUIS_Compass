@@ -11,6 +11,7 @@ import ClassAssistant from './components/ClassAssistant'
 import HubMoreApps from './components/HubMoreApps'
 import OpenLessons from './components/OpenLessons'
 import SchoolCalendar from './components/SchoolCalendar'
+import XieheLighthouse from './components/XieheLighthouse'
 import MailboxInbox from './components/MailboxInbox'
 import StudentPortrait from './components/StudentPortrait'
 import TeacherPortrait from './components/TeacherPortrait'
@@ -25,19 +26,24 @@ type HubView =
   | 'class-assistant'
   | 'open-lessons'
   | 'school-calendar'
+  | 'lighthouse'
   | 'more'
   | 'admin'
   | 'mailbox';
 
 const MOBILE_BREAKPOINT = 768;
 
-/** 桌面侧窗 AI：主内容 55%，侧窗 45%（较原 50/50 侧窗收窄 10%） */
-const AI_DOCK_MAIN_OPEN = 'w-[55%] min-w-0 overflow-hidden';
-const AI_DOCK_MAIN_OPEN_FULL = 'w-[55%] min-w-0 overflow-hidden h-full';
+/**
+ * 桌面侧窗 AI 在上一档上再收窄 10%，空出来的宽度还给主栏，两边仍然相接。
+ * 窄屏：主栏 63.55%，侧窗 36.45%（最宽 524.88px）。
+ * 宽于 1440px：主栏 calc(81.775% - 262.44px)，侧窗 calc(18.225% + 262.44px)。
+ */
+const AI_DOCK_MAIN_OPEN = 'w-[63.55%] min-w-0 overflow-hidden min-[1440px]:w-[calc(81.775%-262.44px)]';
+const AI_DOCK_MAIN_OPEN_FULL = 'h-full w-[63.55%] min-w-0 overflow-hidden min-[1440px]:w-[calc(81.775%-262.44px)]';
 /** 桌面锁在一屏里；手机宽度放开，让窗口本身能上下、左右滚到超出的内容。 */
 const APP_FRAME = 'flex h-dvh w-full min-w-0 overflow-auto max-md:h-auto max-md:min-h-dvh max-md:overflow-visible';
 const AI_DOCK_PANEL =
-  'fixed inset-y-0 right-0 z-30 w-[45%] min-w-[324px] max-w-[648px] bg-white border-l border-slate-200 flex flex-col shadow-xl';
+  'fixed inset-y-0 right-0 z-30 flex w-[36.45%] min-w-[262.44px] max-w-[524.88px] flex-col border-l border-slate-200 bg-white shadow-xl min-[1440px]:w-[calc(18.225%+262.44px)] min-[1440px]:max-w-none';
 
 function AppContent() {
   const { isAuthenticated, user } = useAuth();
@@ -151,7 +157,21 @@ function AppContent() {
   }
 
   if (view === 'admin') {
-    return <AdminPanel onBackToHub={() => setView('hub')} />;
+    return (
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <AdminPanel onBackToHub={() => setView('hub')} isAIOpen={aiOverlayOpen} onToggleAI={() => setAiOverlayOpen((open) => !open)} />
+        </div>
+        {aiOverlayOpen && (
+          <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
   }
 
   if (view === 'more') {
@@ -164,26 +184,100 @@ function AppContent() {
   }
 
   if (view === 'class-assistant') {
-    return <ClassAssistant onBackToHub={() => setView('more')} />
+    return (
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <ClassAssistant onBackToHub={() => setView('more')} isAIOpen={aiOverlayOpen} onToggleAI={() => setAiOverlayOpen((open) => !open)} />
+        </div>
+        {aiOverlayOpen && (
+          <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (view === 'lighthouse') {
+    return (
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <XieheLighthouse
+            onBackToHub={() => setView('hub')}
+            isAIOpen={aiOverlayOpen}
+            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+          />
+        </div>
+        {aiOverlayOpen && (
+          <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
   }
 
   if (view === 'school-calendar') {
-    return <SchoolCalendar onBackToHub={() => setView('hub')} />
+    return (
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <SchoolCalendar
+            onBackToHub={() => setView('hub')}
+            isAIOpen={aiOverlayOpen}
+            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+          />
+        </div>
+        {aiOverlayOpen && (
+          <div
+            className={
+              isMobile
+                ? 'fixed inset-0 z-30 bg-white flex flex-col'
+                : AI_DOCK_PANEL
+            }
+          >
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
   }
 
   if (view === 'open-lessons') {
     const nav = portraitNav?.view === 'open-lessons' ? portraitNav : null;
     return (
-      <OpenLessons
-        onBackToHub={() => {
-          setPortraitNav(null);
-          setView('hub');
-        }}
-        initialYearId={nav?.academicYearId}
-        initialTerm={nav?.term}
-        initialLessonKind={nav?.lessonKind}
-        initialLessonId={nav?.lessonId}
-      />
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <OpenLessons
+            onBackToHub={() => {
+              setPortraitNav(null);
+              setView('hub');
+            }}
+            initialYearId={nav?.academicYearId}
+            initialTerm={nav?.term}
+            initialLessonKind={nav?.lessonKind}
+            initialLessonId={nav?.lessonId}
+            isAIOpen={aiOverlayOpen}
+            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+          />
+        </div>
+        {aiOverlayOpen && (
+          <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -260,7 +354,21 @@ function AppContent() {
   }
 
   if (view === 'mailbox') {
-    return <MailboxInbox onBack={() => setView('hub')} />;
+    return (
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <MailboxInbox onBack={() => setView('hub')} isAIOpen={aiOverlayOpen} onToggleAI={() => setAiOverlayOpen((open) => !open)} />
+        </div>
+        {aiOverlayOpen && (
+          <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
   }
 
   // 其他入口暂未实现

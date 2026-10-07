@@ -82,7 +82,7 @@ for (const column of WEEK_COLUMNS) {
 }
 
 const STATUS_LABEL: Record<string, [string, string]> = {
-  planned: ['计划中', 'Planned'],
+  planned: ['待完成', 'To do'],
   done: ['已完成', 'Done'],
   cancelled: ['已取消', 'Cancelled'],
 };

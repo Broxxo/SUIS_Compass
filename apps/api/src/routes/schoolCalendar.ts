@@ -12,6 +12,7 @@ import {
   saveDayOverride,
   saveWeekFocus,
   saveWeekTheme,
+  setCalendarEventStatus,
   updateCalendarEvent,
   updateCalendarModule,
   type CalendarEventStatus,
@@ -287,6 +288,21 @@ router.post('/events', async (req: ReqWithUserId, res: Response) => {
     return res.json(created);
   } catch (error) {
     console.error('school calendar event create', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+router.patch('/events/:id/status', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const statusRaw = String((req.body as { status?: unknown } | undefined)?.status ?? '');
+    if (statusRaw !== 'planned' && statusRaw !== 'done' && statusRaw !== 'cancelled') return fail(res, 400, 'invalid_status');
+    const updated = await setCalendarEventStatus(userId, req.params.id, statusRaw);
+    if (reject(res, updated)) return;
+    return res.json(updated);
+  } catch (error) {
+    console.error('school calendar event status', error);
     return fail(res, 500, 'internal');
   }
 });

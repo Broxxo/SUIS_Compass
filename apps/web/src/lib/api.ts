@@ -1,4 +1,5 @@
 import type { CourseDomainsConfig, TeachingResearchGroup, TeachingSubjectGroup, SelfStudyModule, SelfStudySlot, SelfStudyGradeConfig, ElectiveScheduleConfig, ElectiveCourse } from '@repo/shared';
+import type { LighthouseBoard } from '../types/lighthouse';
 import type {
   OpenLesson,
   OpenLessonBoard,
@@ -2391,6 +2392,30 @@ export const api = {
       throw error;
     }
     return { count: data.count ?? rows.length };
+  },
+
+  async getLighthouse(): Promise<LighthouseBoard> {
+    const response = await fetch(apiUrl('/api/lighthouse'), { headers: getHeaders() });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
+    const data = await readJsonOrThrow(response, 'internal');
+    return (data as { board: LighthouseBoard }).board;
+  },
+
+  async saveLighthouse(board: LighthouseBoard): Promise<LighthouseBoard> {
+    const response = await fetch(apiUrl('/api/lighthouse'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ board }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'internal');
+    }
+    const data = await readJsonOrThrow(response, 'internal');
+    return (data as { board: LighthouseBoard }).board;
   },
 
   async deleteOpenLesson(id: string): Promise<void> {

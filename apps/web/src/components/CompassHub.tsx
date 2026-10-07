@@ -29,7 +29,6 @@ import type { HubPortraitNavigation, HubTeacherTodoItem } from '../types/hubNavi
 import AppTopBar from './AppTopBar';
 import CompassMailbox from './CompassMailbox';
 import HubTeacherTodosTile, { hubTodosFrostedStyle, type HubTodosViewerRole } from './HubTeacherTodosTile';
-import { Button } from './ui/button';
 
 type HubView =
   | 'suis-ai'
@@ -40,6 +39,7 @@ type HubView =
   | 'class-assistant'
   | 'open-lessons'
   | 'school-calendar'
+  | 'lighthouse'
   | 'more';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
@@ -58,6 +58,7 @@ type HubTileId =
   | 'academic-reports'
   | 'open-lessons'
   | 'school-calendar'
+  | 'lighthouse'
   | `placeholder-${number}`;
 
 type HubTile = {
@@ -78,7 +79,7 @@ const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v4';
 function migrateSavedHubIds(savedIds: string[]): string[] {
   const out: string[] = [];
   for (const raw of savedIds) {
-    const id = raw === 'class-assistant' ? 'more-features' : raw === 'placeholder-1' ? 'school-calendar' : raw;
+    const id = raw === 'class-assistant' ? 'more-features' : raw === 'placeholder-1' ? 'school-calendar' : raw === 'placeholder-2' ? 'lighthouse' : raw;
     if (id === 'class-management') continue;
     if (!out.includes(id)) out.push(id);
   }
@@ -353,7 +354,7 @@ export default function CompassHub({
   onOpenInbox: () => void;
 }) {
   const { user } = useAuth();
-  const { language, setLanguage } = useLanguage();
+  const { language } = useLanguage();
   const isZh = language === 'zh';
   const isTeacher = user?.role === 'teacher';
   const isAdmin = user?.role === 'admin' || user?.role === 'system-admin';
@@ -552,7 +553,25 @@ export default function CompassHub({
           </span>
         ),
       },
-      { id: 'placeholder-2', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      {
+        id: 'lighthouse',
+        kind: 'app',
+        view: 'lighthouse',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(160deg, #24558f 0%, #163a66 52%, #0e243f 100%)',
+          boxShadow: '0 6px 16px -2px rgba(14, 36, 63, 0.45), inset 0 1px 0 rgba(255,255,255,0.18)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '协和' : 'Xiehe'}</span>
+            <span className={zh ? '' : 'text-[0.78em]'}>{zh ? '灯塔' : 'Lighthouse'}</span>
+          </span>
+        ),
+      },
       { id: 'placeholder-3', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
       {
         id: 'more-features',
@@ -690,18 +709,7 @@ export default function CompassHub({
       <AppTopBar
         title="SUIS Compass 智能教学中心"
         rightChildren={
-          <>
-            {user ? <CompassMailbox isZh={isZh} onOpenInbox={onOpenInbox} /> : null}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-              className="h-[var(--app-topbar-control)] rounded-lg px-3 min-w-[2.75rem] text-[0.9625rem]"
-              title={isZh ? 'Switch to English' : '切换到中文'}
-            >
-              {isZh ? 'EN' : '中'}
-            </Button>
-          </>
+          user ? <CompassMailbox isZh={isZh} onOpenInbox={onOpenInbox} /> : null
         }
       />
       <div

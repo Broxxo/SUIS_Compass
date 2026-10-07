@@ -14,7 +14,7 @@ const HEADER_FONT = 'FF000000';
 
 const COLUMNS = [
   { key: 'kind', zh: '类型', en: 'Type', width: 16 },
-  { key: 'group', zh: '组别', en: 'Group', width: 18 },
+  { key: 'subject', zh: '学科', en: 'Subject', width: 18 },
   { key: 'teacher', zh: '教师', en: 'Teacher', width: 14 },
   { key: 'class', zh: '班级', en: 'Class', width: 12 },
   { key: 'date', zh: '日期', en: 'Date', width: 14 },
@@ -33,6 +33,8 @@ for (const column of COLUMNS) {
 }
 HEADER_KEY[normHeader('年级-单元-课题')] = 'topic';
 HEADER_KEY[normHeader('Grade-Unit-Topic')] = 'topic';
+HEADER_KEY[normHeader('组别')] = 'subject';
+HEADER_KEY[normHeader('Group')] = 'subject';
 
 const KIND_LABEL: Record<OpenLessonKind, [string, string]> = {
   group: ['组内公开课', 'Group open lesson'],
@@ -196,8 +198,8 @@ export async function buildOpenLessonWorkbook(input: {
     excelRow.height = 22;
     const values: Record<ColumnKey, string> = {
       kind: personLabel(input.isZh, KIND_LABEL[lesson.lessonKind][0], KIND_LABEL[lesson.lessonKind][1]),
-      group: personLabel(input.isZh, lesson.groupNameZh, lesson.groupNameEn),
       teacher: personLabel(input.isZh, lesson.teacherNameZh, lesson.teacherNameEn),
+      subject: lesson.subject,
       class: lesson.className,
       date: lesson.lessonDate,
       time: lesson.timeText,
@@ -272,7 +274,7 @@ export async function parseOpenLessonWorkbook(
       const key = headerKeyFromCell(row.getCell(col).value);
       if (key && !found.has(key)) found.set(key, col);
     }
-    if (found.size >= 4 && found.has('group') && found.has('kind')) {
+    if (found.size >= 4 && found.has('subject') && found.has('kind')) {
       headerRow = rowNumber;
       found.forEach((col, key) => columnAt.set(key, col));
       break;
@@ -288,7 +290,7 @@ export async function parseOpenLessonWorkbook(
     const row = sheet.getRow(rowNumber);
     const read = (key: ColumnKey) => row.getCell(columnAt.get(key) ?? 1).value;
     const lessonKind = cellText(read('kind'));
-    const groupName = cellText(read('group'));
+    const subject = cellText(read('subject'));
     const teacherName = cellText(read('teacher'));
     const className = cellText(read('class'));
     const lessonDate = formatDateCell(read('date'));
@@ -296,13 +298,13 @@ export async function parseOpenLessonWorkbook(
     const gradeUnitTopic = cellText(read('topic'));
     const location = cellText(read('location'));
     const remarks = cellText(read('remarks'));
-    if (![lessonKind, groupName, teacherName, className, lessonDate, timeText, gradeUnitTopic, location, remarks].some(Boolean)) {
+    if (![lessonKind, subject, teacherName, className, lessonDate, timeText, gradeUnitTopic, location, remarks].some(Boolean)) {
       continue;
     }
     rows.push({
       row: rowNumber,
       lessonKind,
-      groupName,
+      subject,
       teacherName,
       className,
       lessonDate,

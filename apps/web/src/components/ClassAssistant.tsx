@@ -1,8 +1,9 @@
 import { MenuSelect } from './MenuSelect';
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import AppTopBar from './AppTopBar'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
+import { useAIContext } from '../contexts/AIContext'
 import { useClassAssistantData } from './class-assistant/useClassAssistantData'
 import { IndividualModeTab } from './class-assistant/IndividualModeTab'
 import { GroupModeTab } from './class-assistant/GroupModeTab'
@@ -13,12 +14,15 @@ import { CreateSchemeDialog } from './class-assistant/CreateSchemeDialog'
 
 interface ClassAssistantProps {
   onBackToHub?: () => void
+  isAIOpen?: boolean
+  onToggleAI?: () => void
 }
 
-export default function ClassAssistant({ onBackToHub }: ClassAssistantProps) {
+export default function ClassAssistant({ onBackToHub, isAIOpen, onToggleAI }: ClassAssistantProps) {
   const { user } = useAuth()
   const { language } = useLanguage()
   const isZh = language === 'zh'
+  const { setContextFromApp } = useAIContext()
 
   const data = useClassAssistantData(user, isZh)
   const {
@@ -49,6 +53,15 @@ export default function ClassAssistant({ onBackToHub }: ClassAssistantProps) {
   } = data
 
   const [tab, setTab] = useState<'students' | 'groups'>('students')
+
+  useEffect(() => {
+    if (!onToggleAI) return
+    const className = currentClass?.name ?? ''
+    const summary = isZh
+      ? `课堂助手 · ${className || '未选班级'} · ${tab === 'students' ? '个人' : '小组'}模式 · ${studentsInClass.length} 名学生`
+      : `Class Assistant · ${className || 'No class'} · ${tab === 'students' ? 'Individual' : 'Group'} · ${studentsInClass.length} students`
+    setContextFromApp('class-assistant', { view: 'class-assistant', summary })
+  }, [onToggleAI, setContextFromApp, currentClass, tab, studentsInClass.length, isZh])
 
   const [newGroupName, setNewGroupName] = useState('')
   const [createGroupOpen, setCreateGroupOpen] = useState(false)
@@ -92,11 +105,13 @@ export default function ClassAssistant({ onBackToHub }: ClassAssistantProps) {
   if (!user) return null
 
   return (
-    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-slate-50 pt-[var(--app-topbar-height)]">
+    <div className={`${onToggleAI ? 'h-full min-h-0 overflow-auto max-md:h-auto max-md:min-h-dvh' : 'min-h-dvh overflow-x-auto'} w-full max-w-[100%] bg-slate-50 pt-[var(--app-topbar-height)]`}>
       <AppTopBar
         title={isZh ? '课堂助手' : 'Class Assistant'}
         showBack={!!onBackToHub}
         onBack={onBackToHub}
+        onToggleAI={onToggleAI}
+        isAIOpen={isAIOpen}
       />
 
       <div className="border-b border-slate-200 bg-slate-50">

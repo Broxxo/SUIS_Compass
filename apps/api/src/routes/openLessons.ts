@@ -80,7 +80,7 @@ router.post('/import', async (req: ReqWithUserId, res: Response) => {
       return {
         row: Number.isFinite(rowNumber) && rowNumber > 0 ? rowNumber : index + 3,
         lessonKind: String(rec.lessonKind ?? ''),
-        groupName: String(rec.groupName ?? ''),
+        subject: String(rec.subject ?? rec.groupName ?? ''),
         teacherName: String(rec.teacherName ?? ''),
         className: String(rec.className ?? ''),
         lessonDate: String(rec.lessonDate ?? ''),

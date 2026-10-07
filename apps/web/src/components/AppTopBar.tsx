@@ -1,10 +1,10 @@
 /**
- * 统一顶部导航栏：左侧 logo + 用户（点击展开登出），中间当前功能名，右侧插槽（返回 + 语言 + 各应用按钮）
+ * 统一顶部导航栏：左侧 logo + 用户（点击展开登出），中间当前功能名，右侧内置语言切换 + 可选 AI 按钮 + 各应用自定义按钮
  */
 import { useState, useRef, useEffect, type ReactNode } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
-import { LogOut, ArrowLeft, User as UserIcon } from 'lucide-react';
+import { LogOut, ArrowLeft, User as UserIcon, Bot } from 'lucide-react';
 import { Button } from './ui/button';
 import type { User } from '../types';
 import { formatNavUserLabel } from '../lib/userDisplay';
@@ -18,8 +18,12 @@ interface AppTopBarProps {
   onBack?: () => void;
   /** 中间区域（如课程视图 Tab）：存在时与标题并排展示，标题缩至左侧辅助文案 */
   centerContent?: ReactNode;
-  /** 右侧区域：语言切换、添加课程、设置等 */
+  /** 右侧区域：各应用自定义按钮（语言切换与 AI 按钮已内置，放在自定义按钮之后） */
   rightChildren?: ReactNode;
+  /** 传入则显示 AI 按钮，点击切换侧边栏；不传则不显示（主页 / 更多 / SUIS AI 全屏不传） */
+  onToggleAI?: () => void;
+  /** AI 侧边栏是否打开，用于按钮高亮 */
+  isAIOpen?: boolean;
 }
 
 const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
@@ -29,9 +33,9 @@ const ROLE_LABELS: Record<User['role'], { zh: string; en: string }> = {
   student: { zh: '学生', en: 'Student' },
 };
 
-export default function AppTopBar({ title, showBack, onBack, centerContent, rightChildren }: AppTopBarProps) {
+export default function AppTopBar({ title, showBack, onBack, centerContent, rightChildren, onToggleAI, isAIOpen }: AppTopBarProps) {
   const { user, logout } = useAuth();
-  const { language } = useLanguage();
+  const { language, setLanguage } = useLanguage();
   const isZh = language === 'zh';
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -141,9 +145,30 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
           </h1>
         )}
 
-        {/* 右侧：各应用功能按钮（返回已在左侧替代 logo） */}
+        {/* 右侧：各应用功能按钮（返回已在左侧替代 logo）+ 内置 AI 按钮 + 内置语言切换 */}
         <div className="flex items-center gap-1.5 sm:gap-2 ml-auto min-w-0 shrink-0">
           {rightChildren}
+          {onToggleAI ? (
+            <Button
+              variant={isAIOpen ? 'default' : 'outline'}
+              size="icon"
+              onClick={onToggleAI}
+              className="h-[var(--app-topbar-control)] w-[var(--app-topbar-control)] flex-shrink-0 rounded-lg"
+              title="AI"
+              aria-label="AI"
+            >
+              <Bot className="h-4 w-4" />
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setLanguage(isZh ? 'en' : 'zh')}
+            className="h-[var(--app-topbar-control)] min-w-[2.75rem] rounded-lg px-3 text-[0.9625rem]"
+            title={isZh ? 'Switch to English' : '切换到中文'}
+          >
+            {isZh ? 'EN' : '中'}
+          </Button>
         </div>
       </div>
     </header>

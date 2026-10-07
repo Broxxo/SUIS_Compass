@@ -12,17 +12,10 @@ export interface AIModel {
 
 export const AI_MODELS: AIModel[] = [
   {
-    id: 'kimi-k26',
-    name: 'Kimi K2.6',
-    code: 'Pro/moonshotai/Kimi-K2.6',
-    description: 'Kimi 新一代通用对话模型',
-    kind: 'chat',
-  },
-  {
-    id: 'deepseek-r1',
-    name: 'DeepSeek R1',
-    code: 'Pro/deepseek-ai/DeepSeek-R1',
-    description: 'DeepSeek 推理模型（含思考过程）',
+    id: 'glm-5.3',
+    name: 'GLM 5.3',
+    code: 'zai-org/GLM-5.3',
+    description: '智谱 AI 通用模型',
     kind: 'chat',
   },
   {
@@ -33,10 +26,10 @@ export const AI_MODELS: AIModel[] = [
     kind: 'chat',
   },
   {
-    id: 'glm-5.1',
-    name: 'GLM 5.1',
-    code: 'Pro/zai-org/GLM-5.1',
-    description: '智谱 AI 通用模型',
+    id: 'deepseek-v4-pro',
+    name: 'DeepSeek V4 Pro',
+    code: 'deepseek-ai/DeepSeek-V4-Pro',
+    description: 'DeepSeek V4 增强对话模型',
     kind: 'chat',
   },
   {
@@ -51,10 +44,13 @@ export const AI_MODELS: AIModel[] = [
 export const DEFAULT_MODEL_ID = 'deepseek-v4-flash';
 
 const LEGACY_MODEL_ID_MAP: Record<string, string> = {
-  'glm-4.7': 'glm-5.1',
-  'glm-5': 'glm-5.1',
-  'kimi-k25': 'kimi-k26',
-  'kimi-k2-thinking': 'kimi-k26',
+  'glm-4.7': 'glm-5.3',
+  'glm-5': 'glm-5.3',
+  'glm-5.1': 'glm-5.3',
+  'kimi-k25': DEFAULT_MODEL_ID,
+  'kimi-k2-thinking': DEFAULT_MODEL_ID,
+  'kimi-k26': DEFAULT_MODEL_ID,
+  'deepseek-r1': DEFAULT_MODEL_ID,
 };
 
 // 从localStorage获取保存的模型ID（兼容旧版选型）

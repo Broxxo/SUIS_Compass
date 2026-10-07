@@ -887,6 +887,26 @@ export async function updateCalendarEvent(
   return { ok: true as const };
 }
 
+/** 只改完成状态。复盘上一周时，已经过去的事项也允许改状态，内容仍按原来的规则锁定。 */
+export async function setCalendarEventStatus(userId: string, id: string, status: CalendarEventStatus) {
+  await ensureSchoolCalendarTables();
+  if (status !== 'planned' && status !== 'done' && status !== 'cancelled') return { error: 'invalid_status' as const };
+  const existing = (
+    await pool.query(
+      `SELECT academic_year_id, module_id FROM school_calendar_events WHERE id = $1`,
+      [id],
+    )
+  ).rows[0] as { academic_year_id: string; module_id: string } | undefined;
+  if (!existing) return { error: 'not_found' as const };
+  const gate = await assertCanWriteModule(userId, existing.academic_year_id, existing.module_id, null);
+  if ('error' in gate) return gate;
+  await pool.query(
+    `UPDATE school_calendar_events SET status = $2, updated_by = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [id, status, userId],
+  );
+  return { ok: true as const };
+}
+
 export type CalendarImportIssue = {
   row: number;
   sheet: 'month' | 'week';
@@ -949,6 +969,7 @@ const STATUS_FROM_LABEL: Record<string, CalendarEventStatus> = {
   done: 'done',
   cancelled: 'cancelled',
   计划中: 'planned',
+  待完成: 'planned',
   已完成: 'done',
   已取消: 'cancelled',
 };

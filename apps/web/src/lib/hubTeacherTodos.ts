@@ -84,7 +84,7 @@ async function fetchNearbyOpenLessons(yearId: string, isZh: boolean): Promise<Hu
   return lessons.map((lesson) => {
     const teacher = (isZh ? lesson.teacherNameZh : lesson.teacherNameEn).trim() || lesson.teacherNameZh || lesson.teacherNameEn;
     const when = `${nearbyDayLabel(lesson.lessonDate, today, isZh)} ${lessonStartClock(lesson.timeText)}`.trim();
-    const subject = openLessonSubjectLabel(lesson.groupNameZh);
+    const subject = openLessonSubjectLabel(lesson.subject);
     const className = lesson.className.trim();
     const location = lesson.location.trim();
     const classPlace = className && location ? `${className}(${location})` : className || location;

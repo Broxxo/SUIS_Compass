@@ -5,6 +5,7 @@ import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAIContext } from '../contexts/AIContext';
 import type { Course, GradeConfigSegment, User } from '../types';
 import {
   staffingSubjectKeyFromCourse,
@@ -681,12 +682,15 @@ const PRESET_TARGET_DEFAULT_DIMENSION_COLS = 4;
 
 interface AdminPanelProps {
   onBackToHub: () => void;
+  isAIOpen?: boolean;
+  onToggleAI?: () => void;
 }
 
-export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
+export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminPanelProps) {
   const { user: currentUser } = useAuth();
   const { language } = useLanguage();
   const isZh = language === 'zh';
+  const { setContextFromApp } = useAIContext();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -5524,6 +5528,24 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
       },
     ];
   }, [isZh]);
+
+  useEffect(() => {
+    if (!onToggleAI) return;
+    const tabLabels: Record<string, { zh: string; en: string }> = {
+      users: { zh: '用户', en: 'Users' },
+      foundation: { zh: '基础设置', en: 'Foundation' },
+      classes: { zh: '班级', en: 'Classes' },
+      students: { zh: '学生', en: 'Students' },
+      courses: { zh: '课程', en: 'Courses' },
+      staffing: { zh: '岗位编制', en: 'Staffing' },
+      'report-settings': { zh: '学业报告', en: 'Report settings' },
+      'teacher-portrait-settings': { zh: '教师画像', en: 'Teacher portrait' },
+      database: { zh: '数据库', en: 'Database' },
+    };
+    const label = tabLabels[adminTab]?.[isZh ? 'zh' : 'en'] ?? adminTab;
+    setContextFromApp('admin', { view: 'admin', summary: isZh ? `后台管理 · ${label}` : `Admin · ${label}` });
+  }, [onToggleAI, setContextFromApp, adminTab, isZh]);
+
   /**
    * 除「课程管理」全宽外，各 tab 共用同一最大宽度。
    * 根布局为 flex-col 时，子项仅写 max-w + mx-auto 会在交叉轴上收缩为「内容宽度」；
@@ -5532,11 +5554,13 @@ export default function AdminPanel({ onBackToHub }: AdminPanelProps) {
   const adminContentFrameClass = 'w-full max-w-7xl mx-auto px-4 sm:px-6';
 
   return (
-    <div className={`${adminTab === 'courses' ? 'h-dvh overflow-hidden' : 'min-h-screen'} bg-slate-50 pt-[var(--app-topbar-height)] flex flex-col`}>
+    <div className={`${onToggleAI ? 'h-full min-h-0 overflow-auto max-md:h-auto max-md:min-h-dvh' : adminTab === 'courses' ? 'h-dvh overflow-hidden' : 'min-h-screen'} bg-slate-50 pt-[var(--app-topbar-height)] flex flex-col`}>
       <AppTopBar
         title={isZh ? '后台管理' : 'Admin'}
         showBack
         onBack={onBackToHub}
+        onToggleAI={onToggleAI}
+        isAIOpen={isAIOpen}
       />
       <div className="border-b border-slate-200 bg-white flex-shrink-0">
         <div className={`${adminContentFrameClass} flex gap-1 flex-wrap`}>

@@ -15,6 +15,7 @@ import classAssistantRoutes from './routes/classAssistant.js';
 import openLessonRoutes from './routes/openLessons.js';
 import schoolCalendarRoutes from './routes/schoolCalendar.js';
 import mailboxRoutes from './routes/mailbox.js';
+import lighthouseRoutes from './routes/lighthouse.js';
 import { requireValidUser } from './middleware/requireUser.js';
 import { forbidStudentAccounts } from './middleware/forbidStudent.js';
 
@@ -41,6 +42,7 @@ app.use('/api/classes/assistant', requireValidUser, forbidStudentAccounts, class
 app.use('/api/open-lessons', requireValidUser, forbidStudentAccounts, openLessonRoutes);
 app.use('/api/school-calendar', requireValidUser, forbidStudentAccounts, schoolCalendarRoutes);
 app.use('/api/mailbox', requireValidUser, forbidStudentAccounts, mailboxRoutes);
+app.use('/api/lighthouse', requireValidUser, forbidStudentAccounts, lighthouseRoutes);
 app.use('/api/classes', requireValidUser, classesRoutes);
 
 app.get('/health', (_, res) => {

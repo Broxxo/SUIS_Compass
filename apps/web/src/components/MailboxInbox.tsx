@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { SegmentTabButton, SegmentTabGroup } from './ui/segment-tab-button';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAIContext } from '../contexts/AIContext';
 import { formatNavUserLabel } from '../lib/userDisplay';
 import {
   createMailboxMessage,
@@ -358,7 +359,7 @@ function AdminMailbox({
   );
 }
 
-export default function MailboxInbox({ onBack }: { onBack: () => void }) {
+export default function MailboxInbox({ onBack, isAIOpen, onToggleAI }: { onBack: () => void; isAIOpen?: boolean; onToggleAI?: () => void }) {
   const { user } = useAuth();
   const { language } = useLanguage();
   const isZh = language === 'zh';
@@ -366,6 +367,7 @@ export default function MailboxInbox({ onBack }: { onBack: () => void }) {
   const [messages, setMessages] = useState<MailboxMessage[]>([]);
   const [error, setError] = useState('');
   const userName = user ? formatNavUserLabel(user) : '';
+  const { setContextFromApp } = useAIContext();
 
   useEffect(() => {
     let cancelled = false;
@@ -392,9 +394,18 @@ export default function MailboxInbox({ onBack }: { onBack: () => void }) {
     };
   }, [isZh]);
 
+  useEffect(() => {
+    if (!onToggleAI) return;
+    const pending = messages.filter((m) => m.status !== 'done').length;
+    const summary = isZh
+      ? `${viewerIsAdmin === false ? '教职工' : viewerIsAdmin === true ? '管理员' : ''}信箱 · 共 ${messages.length} 封 · 待处理 ${pending}`
+      : `${viewerIsAdmin === false ? 'Staff' : viewerIsAdmin === true ? 'Admin' : ''} mailbox · ${messages.length} messages · ${pending} pending`;
+    setContextFromApp('mailbox', { view: 'mailbox', summary });
+  }, [onToggleAI, setContextFromApp, messages, viewerIsAdmin, isZh]);
+
   return (
-    <div className="min-h-dvh w-full bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)] pb-8">
-      <AppTopBar title={isZh ? '信箱' : 'Mailbox'} showBack onBack={onBack} />
+    <div className={`${onToggleAI ? 'h-full min-h-0 overflow-auto max-md:h-auto max-md:min-h-dvh' : 'min-h-dvh overflow-x-auto'} w-full bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)] pb-8`}>
+      <AppTopBar title={isZh ? '信箱' : 'Mailbox'} showBack onBack={onBack} onToggleAI={onToggleAI} isAIOpen={isAIOpen} />
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
         {error ? <p className="mb-3 text-sm text-rose-600">{error}</p> : null}
         {viewerIsAdmin === null ? (

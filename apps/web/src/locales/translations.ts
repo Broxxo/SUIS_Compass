@@ -97,6 +97,12 @@ export type TranslationKey =
   | 'ai.panel.contextCurriculum'
   | 'ai.panel.contextStudent'
   | 'ai.panel.contextTeacher'
+  | 'ai.panel.contextCalendar'
+  | 'ai.panel.contextOpenLessons'
+  | 'ai.panel.contextLighthouse'
+  | 'ai.panel.contextMailbox'
+  | 'ai.panel.contextAdmin'
+  | 'ai.panel.contextClassAssistant'
   | 'ai.panel.back'
   | 'ai.panel.upload'
   | 'ai.panel.mode'
@@ -246,6 +252,12 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.contextCurriculum': '课程河流',
     'ai.panel.contextStudent': '学生中心',
     'ai.panel.contextTeacher': '教师中心',
+    'ai.panel.contextCalendar': '校历',
+    'ai.panel.contextOpenLessons': '公开课',
+    'ai.panel.contextLighthouse': '协和灯塔',
+    'ai.panel.contextMailbox': '信箱',
+    'ai.panel.contextAdmin': '后台管理',
+    'ai.panel.contextClassAssistant': '课堂助手',
     'ai.panel.back': '返回',
     'ai.panel.upload': '上传',
     'ai.panel.mode': '模式',
@@ -394,6 +406,12 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.contextCurriculum': 'Curriculum Roadmap',
     'ai.panel.contextStudent': 'Student Center',
     'ai.panel.contextTeacher': 'Teacher Center',
+    'ai.panel.contextCalendar': 'School Calendar',
+    'ai.panel.contextOpenLessons': 'Open Lessons',
+    'ai.panel.contextLighthouse': 'Xiehe Lighthouse',
+    'ai.panel.contextMailbox': 'Mailbox',
+    'ai.panel.contextAdmin': 'Admin Panel',
+    'ai.panel.contextClassAssistant': 'Class Assistant',
     'ai.panel.back': 'Back',
     'ai.panel.upload': 'Upload',
     'ai.panel.mode': 'Mode',

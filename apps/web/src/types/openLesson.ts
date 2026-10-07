@@ -31,9 +31,7 @@ export interface OpenLesson {
   academicYearId: string;
   term: Term;
   lessonKind: OpenLessonKind;
-  groupId: string;
-  groupNameZh: string;
-  groupNameEn: string;
+  subject: string;
   teacherId: string;
   teacherNameZh: string;
   teacherNameEn: string;
@@ -66,7 +64,7 @@ export interface OpenLessonInput {
   academicYearId: string;
   term: Term;
   lessonKind: OpenLessonKind;
-  groupId: string;
+  subject: string;
   teacherId: string;
   classId: string;
   lessonDate: string;
@@ -80,7 +78,7 @@ export interface OpenLessonInput {
 export interface OpenLessonImportRow {
   row: number;
   lessonKind: string;
-  groupName: string;
+  subject: string;
   teacherName: string;
   className: string;
   lessonDate: string;

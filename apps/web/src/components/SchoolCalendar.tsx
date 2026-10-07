@@ -2,11 +2,11 @@
  * 校历：月历看每周主题。周历只列出这一周真正上课的日子，和月历里的放假、调休对齐。
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
+import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core';
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
-import { ChevronLeft, ChevronRight, GripVertical, Plus, X } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, GripVertical, Plus, X } from 'lucide-react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from './ui/segment-tab-button';
@@ -15,6 +15,7 @@ import { Input } from './ui/input';
 import { MenuSelect } from './MenuSelect';
 import { AcademicYearSelect } from './academicPeriodSelectors';
 import { useAuth } from '../contexts/AuthContext';
+import { useAIContext } from '../contexts/AIContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { api } from '../lib/api';
 import { latestAcademicYear } from '../lib/academicPeriodDefault';
@@ -30,6 +31,7 @@ import {
   saveSchoolCalendarFocus,
   saveSchoolCalendarTheme,
   saveSchoolCalendarSettings,
+  setSchoolCalendarEventStatus,
   updateSchoolCalendarEvent,
   updateSchoolCalendarModule,
   type PublicHolidayDay,
@@ -39,6 +41,7 @@ import {
   type SchoolCalendarWeek,
 } from '../lib/schoolCalendarApi';
 import { downloadSchoolCalendarWorkbook, parseSchoolCalendarWorkbook, type SchoolCalendarImportIssue } from '../lib/schoolCalendarExcel';
+import type { SchoolCalendarAIPayload, SchoolCalendarAIWeekEvent } from '../lib/schoolCalendarAIContext';
 
 const WEEKDAY_ZH = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const WEEKDAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -82,7 +85,7 @@ function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): strin
     title_required: '请填写事项。',
     title_too_long: '事项太长了。',
     invalid_time: '结束时间要晚于开始时间。',
-    invalid_status: '状态只能是计划中、已完成或已取消。',
+    invalid_status: '状态只能是待完成、已完成或已取消。',
     theme_too_long: '周主题太长了。',
     focus_too_long: '关键工作太长了。',
     location_too_long: '地点太长了。',
@@ -105,7 +108,7 @@ function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): strin
     title_required: 'Enter a title.',
     title_too_long: 'The title is too long.',
     invalid_time: 'The end time has to be later than the start time.',
-    invalid_status: 'Status must be Planned, Done, or Cancelled.',
+    invalid_status: 'Status must be To do, Done, or Cancelled.',
     theme_too_long: 'The theme is too long.',
     focus_too_long: 'The key work is too long.',
     location_too_long: 'The location is too long.',
@@ -141,11 +144,27 @@ function mondayOnOrBefore(value: string): string {
   return addDays(value, -delta);
 }
 
+function shiftWeekendToMonday(value: string): string {
+  const day = weekday(value);
+  if (day === 6) return addDays(value, 2);
+  if (day === 0) return addDays(value, 1);
+  return value;
+}
+
+/** 下一学年默认 9 月 1 日开学，前一周的周一起算返岗，这一天起不再当暑假。 */
+function nextYearWorkStart(summerBreakStart: string): string {
+  const summerYear = Number(summerBreakStart.slice(0, 4));
+  const opening = shiftWeekendToMonday(`${summerYear}-09-01`);
+  return addDays(mondayOnOrBefore(opening), -7);
+}
+
 function isAutoOff(date: string, settings: SchoolCalendarBoard['settings']): boolean {
   const prepMonday = addDays(mondayOnOrBefore(settings.springTermStart), -7);
   const prepFriday = addDays(prepMonday, 4);
   if (date >= prepMonday && date <= prepFriday) return false;
-  return (date >= settings.winterBreakStart && date < settings.springTermStart) || date >= settings.summerBreakStart;
+  const summerOffEnd = nextYearWorkStart(settings.summerBreakStart);
+  return (date >= settings.winterBreakStart && date < settings.springTermStart)
+    || (date >= settings.summerBreakStart && date < summerOffEnd);
 }
 
 function isBreakPhase(phase: SchoolCalendarWeek['phase']): boolean {
@@ -199,6 +218,18 @@ function staffName(board: SchoolCalendarBoard, id: string | null, isZh: boolean)
   return isZh ? person.nameZh || person.nameEn : person.nameEn || person.nameZh;
 }
 
+function nextEventStatus(status: SchoolCalendarEvent['status']): SchoolCalendarEvent['status'] {
+  if (status === 'planned') return 'done';
+  if (status === 'done') return 'cancelled';
+  return 'planned';
+}
+
+function statusMarkLabel(status: SchoolCalendarEvent['status'], isZh: boolean): string {
+  if (status === 'done') return isZh ? '已完成' : 'Done';
+  if (status === 'cancelled') return isZh ? '已取消' : 'Cancelled';
+  return isZh ? '待完成' : 'To do';
+}
+
 function timesOverlap(a: SchoolCalendarEvent, b: SchoolCalendarEvent): boolean {
   return (
     a.id !== b.id &&
@@ -210,8 +241,121 @@ function timesOverlap(a: SchoolCalendarEvent, b: SchoolCalendarEvent): boolean {
   );
 }
 
-export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => void }) {
+function calendarAIPayload(input: {
+  board: SchoolCalendarBoard | null;
+  yearName: string;
+  mode: 'month' | 'week';
+  weekId: string;
+  modules: SchoolCalendarModule[];
+  holidayByDate: Map<string, PublicHolidayDay>;
+  moduleFilter: string;
+  isZh: boolean;
+}): SchoolCalendarAIPayload {
+  const { board, yearName, mode, weekId, modules, holidayByDate, moduleFilter, isZh } = input;
+  const filtered = moduleFilter === 'all' ? null : modules[0] ?? null;
+  const base = {
+    yearName,
+    today: board?.today ?? '',
+    visibleModules: modules.map((mod) => ({ nameZh: mod.nameZh, nameEn: mod.nameEn })),
+    filteredTo: filtered ? { nameZh: filtered.nameZh, nameEn: filtered.nameEn } : null,
+    settings: board?.settings ?? null,
+    showShared: modules.some((mod) => mod.segmentId),
+  };
+  if (!board || !base.settings) return { view: 'idle', ...base, settings: null };
+  if (mode === 'month') {
+    const groups = new Map<string, NonNullable<SchoolCalendarAIPayload['months']>[number]['weeks']>();
+    const months: NonNullable<SchoolCalendarAIPayload['months']> = [];
+    for (const item of board.weeks) {
+      const key = item.monday.slice(0, 7);
+      const days = [0, 1, 2, 3, 4, 5, 6].map((offset) => addDays(addDays(item.monday, -1), offset));
+      const week = {
+        label: weekLabel(item, isZh),
+        monday: item.monday,
+        current: board.today >= item.monday && board.today <= item.friday,
+        theme: item.theme,
+        sharedFocus: base.showShared ? item.sharedFocus : '',
+        days: days.map((date) => {
+          const mark = holidayByDate.get(date);
+          const rest = mark?.kind === 'off' || isAutoOff(date, board.settings);
+          const school = isSchoolWorkDay(date, board, holidayByDate);
+          return {
+            date,
+            weekdayIndex: weekday(date),
+            state: rest ? 'rest' as const : school ? 'school' as const : 'plain' as const,
+            mark: mark?.label ?? '',
+          };
+        }),
+        focuses: modules.map((mod) => ({
+          nameZh: mod.nameZh,
+          nameEn: mod.nameEn,
+          text: board.focuses.find((row) => row.weekId === item.id && row.moduleId === mod.id)?.focus ?? '',
+        })),
+      };
+      const list = groups.get(key) ?? [];
+      list.push(week);
+      groups.set(key, list);
+    }
+    for (const [key, weeks] of groups) months.push({ key, weeks });
+    return { view: 'month', ...base, months };
+  }
+  const selected = board.weeks.find((item) => item.id === weekId) ?? null;
+  const index = selected ? board.weeks.findIndex((item) => item.id === selected.id) : -1;
+  const visible = [index - 1, index, index + 1]
+    .filter((i) => i >= 0 && i < board.weeks.length)
+    .map((i) => board.weeks[i]);
+  const covered = new Set(visible.flatMap((item) => weekDays(item, board, holidayByDate)));
+  const events = board.events.filter((event) => modules.some((mod) => mod.id === event.moduleId) && covered.has(event.eventDate));
+  return {
+    view: 'week',
+    ...base,
+    weekBlocks: visible.map((item) => {
+      const days = weekDays(item, board, holidayByDate);
+      return {
+        label: weekLabel(item, isZh),
+        selected: item.id === weekId,
+        entirelyOff: days.length === 0,
+        days: days.map((date) => ({
+          date,
+          weekdayIndex: weekday(date),
+          off: dayIsOff(date, board),
+          makeup: holidayByDate.get(date)?.kind === 'work',
+          today: date === board.today,
+          events: events
+            .filter((event) => event.eventDate === date)
+            .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.moduleId.localeCompare(b.moduleId))
+            .map((event): SchoolCalendarAIWeekEvent => {
+              const mod = modules.find((item) => item.id === event.moduleId);
+              return {
+                nameZh: mod?.nameZh ?? '',
+                nameEn: mod?.nameEn ?? '',
+                startTime: event.startTime,
+                endTime: event.endTime,
+                title: event.title,
+                location: event.location,
+                owner: staffName(board, event.ownerUserId, isZh),
+                participants: event.participantIds.map((id) => staffName(board, id, isZh)).filter(Boolean).join(isZh ? '、' : ', '),
+                status: event.status,
+                note: event.note,
+                clash: events.some((other) => timesOverlap(event, other)),
+              };
+            }),
+        })),
+      };
+    }),
+  };
+}
+
+export default function SchoolCalendar({
+  onBackToHub,
+  isAIOpen = false,
+  onToggleAI,
+}: {
+  onBackToHub?: () => void;
+  isAIOpen?: boolean;
+  onToggleAI?: () => void;
+}) {
   const { user } = useAuth();
+  const { setContextFromApp } = useAIContext();
   const { language } = useLanguage();
   const isZh = language === 'zh';
   const canManageCalendar = user?.role === 'admin' || user?.role === 'system-admin';
@@ -224,7 +368,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
   const [weekId, setWeekId] = useState('');
   const [moduleFilter, setModuleFilter] = useState('all');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [focusEdit, setFocusEdit] = useState<{ weekId: string; moduleId: string } | null>(null);
+  const [focusEdit, setFocusEdit] = useState<{ weekId: string; moduleId: string; seedLocal?: boolean } | null>(null);
   const [themeEditWeekId, setThemeEditWeekId] = useState<string | null>(null);
   const [eventEdit, setEventEdit] = useState<SchoolCalendarEvent | 'new' | null>(null);
   const [eventDate, setEventDate] = useState('');
@@ -234,9 +378,9 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
   const [excelBusy, setExcelBusy] = useState<'export' | 'import' | null>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
 
-  const reload = async (nextYear = yearId) => {
+  const reload = async (nextYear = yearId, quiet = false) => {
     if (!nextYear) return;
-    setLoading(true);
+    if (!quiet) setLoading(true);
     setPageError('');
     try {
       const next = await fetchSchoolCalendar(nextYear);
@@ -251,7 +395,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
     } catch (error) {
       setPageError(errorText(error instanceof Error ? error.message : 'internal', isZh));
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   };
 
@@ -303,11 +447,54 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
     return [...groups.entries()];
   }, [board]);
 
+  const calendarForAI = useMemo(() => calendarAIPayload({
+    board,
+    yearName: years.find((year) => year.id === yearId)?.name ?? '',
+    mode,
+    weekId,
+    modules: visibleModules,
+    holidayByDate,
+    moduleFilter,
+    isZh,
+  }), [board, years, yearId, mode, weekId, visibleModules, holidayByDate, moduleFilter, isZh]);
+
+  useEffect(() => {
+    if (!onToggleAI) return;
+    setContextFromApp('school-calendar', calendarForAI);
+  }, [calendarForAI, setContextFromApp, onToggleAI, isAIOpen]);
+
   const canEditModule = (moduleId: string, boundaryDate: string) => {
     if (!board) return false;
     if (!board.editableModuleIds.includes(moduleId)) return false;
     if (boundaryDate < board.today) return board.isAdmin;
     return true;
+  };
+
+  const statusCache = useRef<{ events: SchoolCalendarEvent[]; map: Map<string, SchoolCalendarEvent['status']> } | null>(null);
+  const statusTicket = useRef(new Map<string, number>());
+  const cycleEventStatus = (event: SchoolCalendarEvent) => {
+    if (!board?.editableModuleIds.includes(event.moduleId)) return;
+    if (!statusCache.current || statusCache.current.events !== board.events) {
+      statusCache.current = {
+        events: board.events,
+        map: new Map(board.events.map((item) => [item.id, item.status])),
+      };
+    }
+    const current = statusCache.current.map.get(event.id) ?? event.status;
+    const next = nextEventStatus(current);
+    statusCache.current.map.set(event.id, next);
+    const ticket = (statusTicket.current.get(event.id) ?? 0) + 1;
+    statusTicket.current.set(event.id, ticket);
+    setBoard((prev) => (
+      prev
+        ? { ...prev, events: prev.events.map((item) => (item.id === event.id ? { ...item, status: next } : item)) }
+        : prev
+    ));
+    setSchoolCalendarEventStatus(event.id, next).catch((error: unknown) => {
+      if (statusTicket.current.get(event.id) !== ticket) return;
+      setPageError(errorText(error instanceof Error ? error.message : 'internal', isZh));
+      void reload(yearId, true);
+    });
   };
 
   const showImportProblems = (issues: SchoolCalendarImportIssue[]) => {
@@ -379,15 +566,21 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
     setPageError('');
     try {
       await task();
-      await reload();
+      await reload(yearId, true);
     } catch (error) {
       setPageError(errorText(error instanceof Error ? error.message : 'internal', isZh));
     }
   };
 
   return (
-    <div className="min-h-dvh w-full max-w-[100%] overflow-x-auto bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)]">
-      <AppTopBar title={isZh ? '校历' : 'School Calendar'} showBack={!!onBackToHub} onBack={onBackToHub} />
+    <div className={`${onToggleAI ? 'h-full min-h-0 overflow-auto max-md:h-auto max-md:min-h-dvh' : 'min-h-dvh overflow-x-auto'} w-full max-w-[100%] bg-slate-50 pt-[calc(var(--app-topbar-height)+0.5rem)]`}>
+      <AppTopBar
+        title={isZh ? '校历' : 'School Calendar'}
+        showBack={!!onBackToHub}
+        onBack={onBackToHub}
+        onToggleAI={onToggleAI}
+        isAIOpen={isAIOpen}
+      />
       <div className="mx-auto w-[85%] min-w-0 px-3 py-4 sm:px-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div className="flex flex-wrap items-end gap-2">
@@ -462,7 +655,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
               setMode('week');
             }}
             onTheme={(targetWeekId) => setThemeEditWeekId(targetWeekId)}
-            onFocus={(targetWeekId, moduleId) => setFocusEdit({ weekId: targetWeekId, moduleId })}
+            onFocus={(targetWeekId, moduleId, seedLocal) => setFocusEdit({ weekId: targetWeekId, moduleId, seedLocal })}
           />
         ) : week ? (
           <WeekBoard
@@ -494,6 +687,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
               setEventModuleId(event.moduleId);
               setEventEdit(event);
             }}
+            onCycleStatus={cycleEventStatus}
           />
         ) : null}
       </div>
@@ -503,7 +697,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
           board={board}
           isZh={isZh}
           onClose={() => setSettingsOpen(false)}
-          onSaved={() => void reload()}
+          onSaved={() => void reload(yearId, true)}
         />
       ) : null}
       {board && themeEditWeekId ? (
@@ -520,6 +714,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
           board={board}
           weekId={focusEdit.weekId}
           moduleId={focusEdit.moduleId}
+          seedLocal={focusEdit.seedLocal}
           isZh={isZh}
           onClose={() => setFocusEdit(null)}
           onSaved={() => void run(async () => setFocusEdit(null))}
@@ -529,7 +724,7 @@ export default function SchoolCalendar({ onBackToHub }: { onBackToHub?: () => vo
         <EventDialog
           board={board}
           week={(board.weeks.find((item) => item.id === eventWeekId) ?? week)!}
-          event={eventEdit === 'new' ? null : eventEdit}
+          event={eventEdit === 'new' ? null : (board.events.find((item) => item.id === eventEdit.id) ?? eventEdit)}
           initialModuleId={eventModuleId}
           initialDate={eventDate || week?.monday || ''}
           isZh={isZh}
@@ -558,7 +753,7 @@ function calendarDayText(iso: string, monthKey: string): string {
 
 const cellBorder = 'border border-slate-200 align-top';
 const cellHover = 'hover:shadow-[inset_0_0_0_999px_rgba(15,23,42,0.03)]';
-const headCell = `border border-slate-200 align-middle sticky top-[var(--app-topbar-height)] z-20 bg-slate-100 px-2 py-1.5 text-center text-base font-semibold text-slate-700`;
+const headCell = `border border-slate-200 align-middle bg-slate-100 px-2 py-1.5 text-center text-base font-semibold text-slate-700`;
 
 function MonthTable({
   board,
@@ -579,7 +774,7 @@ function MonthTable({
   holidayByDate: Map<string, PublicHolidayDay>;
   onOpenWeek: (weekId: string) => void;
   onTheme: (weekId: string) => void;
-  onFocus: (weekId: string, moduleId: string) => void;
+  onFocus: (weekId: string, moduleId: string, seedLocal?: boolean) => void;
 }) {
   const stripedWeek = new Map<string, boolean>();
   let rowOrdinal = 0;
@@ -630,7 +825,7 @@ function MonthTable({
               const themeNode = item.theme
                 ? board.isAdmin
                   ? (
-                    <button type="button" className="relative z-10 inline hover:underline" onClick={() => onTheme(item.id)}>
+                    <button type="button" className="pointer-events-auto relative z-10 inline hover:underline" onClick={() => onTheme(item.id)}>
                       ：<span className="text-slate-800">{item.theme}</span>
                     </button>
                   )
@@ -658,21 +853,21 @@ function MonthTable({
                       <td
                         key={date}
                         title={mark ? `${date} ${mark.title}` : date}
-                        className={`border border-slate-200 align-middle ${cellHover} p-0 text-center ${rest ? 'bg-rose-100' : school ? 'bg-emerald-100' : dateBg} ${today ? 'outline outline-1 -outline-offset-1 outline-sky-400' : ''}`}
+                        className={`border border-slate-200 align-middle ${cellHover} p-0 text-center ${rest ? 'bg-yellow-100' : school ? 'bg-emerald-100' : dateBg} ${today ? 'outline outline-1 -outline-offset-1 outline-sky-400' : ''}`}
                         style={{ verticalAlign: 'middle' }}
                       >
                         <div className="flex flex-col items-center justify-center px-0.5 py-1">
-                          <span className={`text-[11px] tabular-nums leading-none ${rest ? 'font-semibold text-rose-700' : weekend && !school ? 'text-slate-400' : 'text-slate-700'}`}>
+                          <span className={`text-[11px] tabular-nums leading-none ${rest ? 'font-semibold text-yellow-800' : weekend && !school ? 'text-slate-400' : 'text-slate-700'}`}>
                             {calendarDayText(date, key)}
                           </span>
                           {mark ? (
-                            <span className={`mt-0.5 text-[10px] leading-none ${rest ? 'text-rose-600' : 'text-emerald-800'}`}>{mark.label}</span>
+                            <span className={`mt-0.5 text-[10px] leading-none ${rest || mark.kind === 'festival' ? 'text-yellow-800' : 'text-emerald-800'}`}>{mark.label}</span>
                           ) : null}
                         </div>
                       </td>
                     );
                   })}
-                  <td className={`${cellBorder} ${cellHover} ${trackBg} relative overflow-hidden px-2 py-1.5 text-center`}>
+                  <td className={`${cellBorder} ${cellHover} ${trackBg} relative h-px overflow-hidden p-0 text-center`} style={{ verticalAlign: 'middle' }}>
                     {board.isAdmin && !item.theme ? (
                       <button
                         type="button"
@@ -681,9 +876,13 @@ function MonthTable({
                         onClick={() => onTheme(item.id)}
                       />
                     ) : null}
-                    <button type="button" className="relative z-10 inline break-words text-sm font-semibold leading-snug text-slate-900 hover:underline" onClick={() => onOpenWeek(item.id)}>{weekLabel(item, isZh)}</button>
-                    {themeNode}
-                    {current ? <span className="relative z-10 ml-1 text-[11px] font-medium text-sky-700">{isZh ? '本周' : 'Now'}</span> : null}
+                    <div className="pointer-events-none flex h-full w-full items-center justify-center px-2 py-1.5">
+                      <div className="min-w-0 max-w-full text-center">
+                        <button type="button" className="pointer-events-auto relative z-10 inline break-words text-sm font-semibold leading-snug text-slate-900 hover:underline" onClick={() => onOpenWeek(item.id)}>{weekLabel(item, isZh)}</button>
+                        {themeNode}
+                        {current ? <span className="relative z-10 ml-1 text-[11px] font-medium text-sky-700">{isZh ? '本周' : 'Now'}</span> : null}
+                      </div>
+                    </div>
                   </td>
                   {monthFocusCells({
                     modules,
@@ -692,7 +891,7 @@ function MonthTable({
                     surfaceClass: trackBg,
                     canEdit: (moduleId) => canEditModule(moduleId, item.friday),
                     focusOf: (moduleId) => board.focuses.find((row) => row.weekId === item.id && row.moduleId === moduleId)?.focus ?? '',
-                    onOpen: (moduleId) => onFocus(item.id, moduleId),
+                    onOpen: (moduleId, seedLocal) => onFocus(item.id, moduleId, seedLocal),
                   })}
                 </tr>
               );
@@ -703,7 +902,7 @@ function MonthTable({
       </div>
       <div className="mt-1.5 flex items-center gap-3 text-[11px] text-slate-500">
         <span className="inline-flex items-center gap-1">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-rose-100" />
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-yellow-100" />
           {isZh ? '寒暑假、法定放假' : 'Breaks and holidays'}
         </span>
         <span className="inline-flex items-center gap-1">
@@ -722,28 +921,65 @@ function focusText(raw: string): string {
 function FocusBlock({
   raw,
   editable,
-  isZh,
+  hint,
   onOpen,
   className = '',
 }: {
   raw: string;
   editable: boolean;
-  isZh: boolean;
+  hint: string;
   onOpen: () => void;
   className?: string;
 }) {
   return (
     <div className={`relative min-h-8 ${className}`}>
+      <div className="pointer-events-none relative z-0 min-h-8 whitespace-pre-wrap break-words px-2 py-1.5 text-sm leading-snug text-slate-800">
+        {focusText(raw)}
+      </div>
       <button
         type="button"
         disabled={!editable}
-        aria-label={isZh ? '编辑关键工作' : 'Edit key work'}
-        className="absolute inset-0 z-0 disabled:cursor-default enabled:cursor-pointer"
+        title={hint}
+        aria-label={hint}
+        className="absolute inset-0 z-10 disabled:cursor-default enabled:cursor-pointer enabled:hover:bg-slate-900/[0.04]"
         onClick={() => editable && onOpen()}
       />
-      <div className="pointer-events-none relative z-10 min-h-8 whitespace-pre-wrap break-words px-2 py-1.5 text-sm leading-snug text-slate-800">
+    </div>
+  );
+}
+
+function SharedHalfTargets({
+  raw,
+  isZh,
+  left,
+  right,
+  onOpen,
+  className = '',
+}: {
+  raw: string;
+  isZh: boolean;
+  left: { id: string; name: string; editable: boolean };
+  right: { id: string; name: string; editable: boolean };
+  onOpen: (moduleId: string) => void;
+  className?: string;
+}) {
+  const half = (side: { id: string; name: string; editable: boolean }, place: 'left' | 'right') => (
+    <button
+      type="button"
+      disabled={!side.editable}
+      title={isZh ? `全学部、${side.name}` : `Whole school, ${side.name}`}
+      aria-label={isZh ? `全学部、${side.name}` : `Whole school, ${side.name}`}
+      className={`absolute inset-y-0 z-10 w-1/2 enabled:cursor-pointer enabled:hover:bg-slate-900/[0.04] disabled:cursor-default ${place === 'left' ? 'left-0' : 'right-0'}`}
+      onClick={() => side.editable && onOpen(side.id)}
+    />
+  );
+  return (
+    <div className={`relative min-h-8 ${className}`}>
+      <div className="pointer-events-none min-h-8 whitespace-pre-wrap break-words px-2 py-1.5 text-sm leading-snug text-slate-800">
         {focusText(raw)}
       </div>
+      {half(left, 'left')}
+      {half(right, 'right')}
     </div>
   );
 }
@@ -763,7 +999,7 @@ function monthFocusCells({
   surfaceClass: string;
   canEdit: (moduleId: string) => boolean;
   focusOf: (moduleId: string) => string;
-  onOpen: (moduleId: string) => void;
+  onOpen: (moduleId: string, seedLocal?: boolean) => void;
 }) {
   const shared = (week.sharedFocus ?? '').trim();
   const nodes: ReactNode[] = [];
@@ -772,21 +1008,33 @@ function monthFocusCells({
     const mod = modules[index];
     const next = modules[index + 1];
     if (mod.segmentId && next?.segmentId && shared) {
-      const editableSide = [mod, next].find((item) => canEdit(item.id)) ?? mod;
       const split = Boolean(focusOf(mod.id).trim() || focusOf(next.id).trim());
       nodes.push(
         <td key={`${mod.id}-${next.id}`} colSpan={2} className={`${cellBorder} ${cellHover} ${surfaceClass} h-px p-0 align-top`}>
-          <FocusBlock className={split ? '' : 'h-full'} raw={shared} editable={canEdit(editableSide.id)} isZh={isZh} onOpen={() => onOpen(editableSide.id)} />
+          <SharedHalfTargets
+            className={split ? '' : 'h-full'}
+            raw={shared}
+            isZh={isZh}
+            left={{ id: mod.id, name: isZh ? mod.nameZh : mod.nameEn, editable: canEdit(mod.id) }}
+            right={{ id: next.id, name: isZh ? next.nameZh : next.nameEn, editable: canEdit(next.id) }}
+            onOpen={onOpen}
+          />
           {split ? (
             <div className="grid grid-cols-2 items-stretch border-t border-slate-200">
               <FocusBlock
                 className="h-full border-r border-slate-200"
                 raw={focusOf(mod.id)}
                 editable={canEdit(mod.id)}
-                isZh={isZh}
+                hint={isZh ? mod.nameZh : mod.nameEn}
                 onOpen={() => onOpen(mod.id)}
               />
-              <FocusBlock className="h-full" raw={focusOf(next.id)} editable={canEdit(next.id)} isZh={isZh} onOpen={() => onOpen(next.id)} />
+              <FocusBlock
+                className="h-full"
+                raw={focusOf(next.id)}
+                editable={canEdit(next.id)}
+                hint={isZh ? next.nameZh : next.nameEn}
+                onOpen={() => onOpen(next.id)}
+              />
             </div>
           ) : null}
         </td>,
@@ -801,13 +1049,19 @@ function monthFocusCells({
       <td key={mod.id} className={`${cellBorder} ${cellHover} ${surfaceClass} relative h-px p-0`}>
         {banner && local ? (
           <>
-            <FocusBlock raw={shared} editable={canEdit(mod.id)} isZh={isZh} onOpen={() => onOpen(mod.id)} />
+            <FocusBlock raw={shared} editable={canEdit(mod.id)} hint={isZh ? `全学部、${mod.nameZh}` : `Whole school, ${mod.nameEn}`} onOpen={() => onOpen(mod.id)} />
             <div className="border-t border-slate-200">
-              <FocusBlock className="h-full" raw={focusOf(mod.id)} editable={canEdit(mod.id)} isZh={isZh} onOpen={() => onOpen(mod.id)} />
+              <FocusBlock className="h-full" raw={focusOf(mod.id)} editable={canEdit(mod.id)} hint={isZh ? mod.nameZh : mod.nameEn} onOpen={() => onOpen(mod.id)} />
             </div>
           </>
         ) : (
-          <FocusBlock className="h-full" raw={banner ? shared : focusOf(mod.id)} editable={canEdit(mod.id)} isZh={isZh} onOpen={() => onOpen(mod.id)} />
+          <FocusBlock
+            className="h-full"
+            raw={banner ? shared : focusOf(mod.id)}
+            editable={canEdit(mod.id)}
+            hint={banner ? (isZh ? `全学部、${mod.nameZh}` : `Whole school, ${mod.nameEn}`) : (isZh ? mod.nameZh : mod.nameEn)}
+            onOpen={() => onOpen(mod.id)}
+          />
         )}
       </td>,
     );
@@ -827,6 +1081,7 @@ function WeekBoard({
   onNext,
   onAdd,
   onOpen,
+  onCycleStatus,
 }: {
   board: SchoolCalendarBoard;
   week: SchoolCalendarWeek;
@@ -838,6 +1093,7 @@ function WeekBoard({
   onNext: () => void;
   onAdd: (weekId: string, date: string, moduleId: string) => void;
   onOpen: (event: SchoolCalendarEvent) => void;
+  onCycleStatus: (event: SchoolCalendarEvent) => void;
 }) {
   const index = board.weeks.findIndex((item) => item.id === week.id);
   const visible = [index - 1, index, index + 1]
@@ -942,26 +1198,46 @@ function WeekBoard({
                           <div className="flex min-h-8 min-w-0 flex-col gap-1">
                             {dayEvents.map((event) => {
                               const clash = events.some((other) => timesOverlap(event, other));
+                              const canSetStatus = board.editableModuleIds.includes(event.moduleId);
+                              const mark = statusMarkLabel(event.status, isZh);
                               const parts = [
                                 { text: `${event.startTime}–${event.endTime}`, className: 'tabular-nums text-slate-500' },
                                 { text: event.title, className: 'text-slate-800' },
                                 { text: event.location, className: 'text-slate-500' },
                                 { text: staffName(board, event.ownerUserId, isZh), className: 'text-slate-600' },
                               ].filter((part) => part.text.trim());
+                              const markClass =
+                                event.status === 'done'
+                                  ? 'border-emerald-600 bg-emerald-600 text-white'
+                                  : event.status === 'cancelled'
+                                    ? 'border-slate-400 bg-white text-slate-500'
+                                    : 'border-slate-300 bg-white';
                               return (
-                                <button
-                                  key={event.id}
-                                  type="button"
-                                  className={`relative z-10 block w-full min-w-0 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-slate-50 ${clash ? 'bg-amber-50 hover:bg-amber-100/50' : ''} ${event.status === 'cancelled' ? 'opacity-50 line-through' : ''}`}
-                                  onClick={() => onOpen(event)}
-                                >
-                                  {parts.map((part, partIndex) => (
-                                    <span key={partIndex} className={part.className}>
-                                      {partIndex > 0 ? ' ' : ''}
-                                      {part.text}
-                                    </span>
-                                  ))}
-                                </button>
+                                <div key={event.id} className="relative z-10 flex min-w-0 items-start gap-0.5">
+                                  <button
+                                    type="button"
+                                    disabled={!canSetStatus}
+                                    title={mark}
+                                    aria-label={mark}
+                                    className={`mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border ${markClass} disabled:cursor-default`}
+                                    onClick={() => onCycleStatus(event)}
+                                  >
+                                    {event.status === 'done' ? <Check className="h-2.5 w-2.5" strokeWidth={3} /> : null}
+                                    {event.status === 'cancelled' ? <X className="h-2.5 w-2.5" strokeWidth={3} /> : null}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`block min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-slate-50 ${clash ? 'bg-amber-50 hover:bg-amber-100/50' : ''} ${event.status === 'cancelled' ? 'opacity-50 line-through' : ''}`}
+                                    onClick={() => onOpen(event)}
+                                  >
+                                    {parts.map((part, partIndex) => (
+                                      <span key={partIndex} className={part.className}>
+                                        {partIndex > 0 ? ' ' : ''}
+                                        {part.text}
+                                      </span>
+                                    ))}
+                                  </button>
+                                </div>
                               );
                             })}
                           </div>
@@ -1132,6 +1408,7 @@ function FocusDialog({
   board,
   weekId,
   moduleId,
+  seedLocal = false,
   isZh,
   onClose,
   onSaved,
@@ -1139,6 +1416,7 @@ function FocusDialog({
   board: SchoolCalendarBoard;
   weekId: string;
   moduleId: string;
+  seedLocal?: boolean;
   isZh: boolean;
   onClose: () => void;
   onSaved: () => void;
@@ -1147,10 +1425,12 @@ function FocusDialog({
   const mod = board.modules.find((item) => item.id === moduleId);
   const division = Boolean(mod?.segmentId);
   const week = board.weeks.find((item) => item.id === weekId);
+  const seedInputRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<FocusItem[]>(() => {
     const local = withShared(parseFocusItems(existing?.focus ?? ''), false);
     const shared = division ? withShared(parseFocusItems(week?.sharedFocus ?? ''), true) : [];
     const next = groupSharedFirst([...shared, ...local]);
+    if (seedLocal && division) return [...next, blankFocusItem()];
     return next.length > 0 ? next : [blankFocusItem()];
   });
   const [busy, setBusy] = useState(false);
@@ -1168,7 +1448,14 @@ function FocusDialog({
   };
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent
+        className="max-w-lg"
+        onOpenAutoFocus={(event) => {
+          if (!seedLocal) return;
+          event.preventDefault();
+          seedInputRef.current?.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{isZh ? `${mod?.nameZh ?? ''} 关键工作` : `${mod?.nameEn ?? ''} key work`}</DialogTitle>
         </DialogHeader>
@@ -1195,7 +1482,12 @@ function FocusDialog({
             <FocusDialogRow key={item.id} id={item.id} isZh={isZh}>
               <div className="flex items-center gap-2">
                 <span className="w-8 shrink-0 text-sm font-medium text-slate-500">{number}. </span>
-                <Input value={item.text} onChange={(e) => updateItem(item.id, e.target.value)} placeholder={isZh ? '项目' : 'Item'} />
+                <Input
+                  ref={seedLocal && index === items.length - 1 && !item.shared && !item.text ? seedInputRef : undefined}
+                  value={item.text}
+                  onChange={(e) => updateItem(item.id, e.target.value)}
+                  placeholder={isZh ? '项目' : 'Item'}
+                />
                 <div className="flex shrink-0 items-center gap-[0.425rem]">
                 <button
                   type="button"
@@ -1328,7 +1620,6 @@ function EventDialog({
   const [location, setLocation] = useState(event?.location ?? '');
   const [ownerUserId, setOwnerUserId] = useState(event?.ownerUserId ?? '');
   const [participantIds, setParticipantIds] = useState<string[]>(event?.participantIds ?? []);
-  const [status, setStatus] = useState<SchoolCalendarEvent['status']>(event?.status ?? 'planned');
   const [note, setNote] = useState(event?.note ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -1346,7 +1637,7 @@ function EventDialog({
       location,
       ownerUserId: ownerUserId || null,
       participantIds,
-      status,
+      status: event?.status ?? 'planned',
       note,
     };
     const task = event ? updateSchoolCalendarEvent(event.id, payload) : createSchoolCalendarEvent(board.academicYearId, payload);
@@ -1356,7 +1647,7 @@ function EventDialog({
       .finally(() => setBusy(false));
   };
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog modal={false} open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-md overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{event ? (isZh ? '事项' : 'Event') : isZh ? '添加事项' : 'Add event'}</DialogTitle>
@@ -1427,16 +1718,6 @@ function EventDialog({
               {participantIds.map((id) => staffName(board, id, isZh)).filter(Boolean).join('、') || (isZh ? '还没有参与人' : 'None')}
             </span>
           </label>
-          {event ? (
-            <label className="block text-slate-600">
-              {isZh ? '状态' : 'Status'}
-              <MenuSelect className="mt-1 w-full" value={status} disabled={locked} onChange={(e) => setStatus(e.target.value as SchoolCalendarEvent['status'])}>
-                <option value="planned">{isZh ? '计划中' : 'Planned'}</option>
-                <option value="done">{isZh ? '已完成' : 'Done'}</option>
-                <option value="cancelled">{isZh ? '已取消' : 'Cancelled'}</option>
-              </MenuSelect>
-            </label>
-          ) : null}
           <label className="block text-slate-600">
             {isZh ? '备注' : 'Note'}
             <textarea className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm" rows={3} value={note} disabled={locked} onChange={(e) => setNote(e.target.value)} />
@@ -1492,7 +1773,7 @@ function SettingsDialog({
     }
   };
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog modal={false} open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isZh ? '校历设置' : 'Calendar settings'}</DialogTitle>

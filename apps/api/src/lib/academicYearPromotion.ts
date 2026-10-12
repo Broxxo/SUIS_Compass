@@ -13,6 +13,7 @@ import {
 } from '@repo/shared';
 import { ensureClassArchiveColumns } from './classArchiveColumns.js';
 import { ensureClassTeacherAssignmentsTable } from './ensureClassTeacherAssignmentsTable.js';
+import { ensureDivisionCoordinatorPostsTable } from './divisionCoordinators.js';
 import { ensureFunctionalRoleAssignmentsTable } from './functionalRoleAssignments.js';
 import { ensureStaffingTables } from './ensureStaffingTables.js';
 import { copyElectivesToAcademicYear, ensureElectiveTables } from './electiveStaffing.js';
@@ -218,6 +219,8 @@ async function purgeAcademicYear(client: PoolClient, yearId: string): Promise<vo
   await client.query(`DELETE FROM elective_schedule_config WHERE academic_year_id = $1`, [yearId]);
   await client.query(`DELETE FROM class_subject_teacher_assignments WHERE academic_year_id = $1`, [yearId]);
   await client.query(`DELETE FROM functional_role_assignments WHERE academic_year_id = $1`, [yearId]);
+  await ensureDivisionCoordinatorPostsTable();
+  await client.query(`DELETE FROM division_coordinator_posts WHERE academic_year_id = $1`, [yearId]);
   await client.query(`DELETE FROM teaching_subject_group_members WHERE academic_year_id = $1`, [yearId]);
   await client.query(`DELETE FROM classes WHERE academic_year_id = $1`, [yearId]);
   await client.query(`DELETE FROM student_assignment_history WHERE academic_year_id = $1`, [yearId]);
@@ -539,6 +542,7 @@ export type AcademicYearPromotionPreview = {
     gradeHeadRelease: PromotionPreviewGradeHeadRelease[];
     subjectGroupHeadCopy: PromotionPreviewSubjectGroupHead[];
     subjectGroupMembersCopied: number;
+    coordinatorCopy: Array<{ title: string; teacherName: string }>;
   };
   unchanged: string[];
   warnings: string[];
@@ -614,6 +618,7 @@ export async function buildAcademicYearPromotionPreview(
         gradeHeadRelease: [],
         subjectGroupHeadCopy: [],
         subjectGroupMembersCopied: 0,
+        coordinatorCopy: [],
       },
       unchanged: [],
       warnings: ['源学年不存在'],
@@ -663,6 +668,14 @@ export async function buildAcademicYearPromotionPreview(
     subjectsByClass.set(r.class_id, list);
   }
 
+  await ensureDivisionCoordinatorPostsTable();
+  const coordinatorRows = (await pool.query(
+    `SELECT title, teacher_id
+     FROM division_coordinator_posts WHERE academic_year_id = $1
+     ORDER BY title ASC`,
+    [sourceYearId],
+  )).rows as Array<{ title: string; teacher_id: string | null }>;
+
   const roles = (await pool.query(
     `SELECT role_type, scope_key, scope_label, teacher_id
      FROM functional_role_assignments WHERE academic_year_id = $1`,
@@ -687,6 +700,7 @@ export async function buildAcademicYearPromotionPreview(
   for (const c of sourceClasses) if (c.teacher_id) teacherIds.push(c.teacher_id);
   for (const r of subjectRows) teacherIds.push(r.teacher_id);
   for (const r of roles) if (r.teacher_id) teacherIds.push(r.teacher_id);
+  for (const post of coordinatorRows) if (post.teacher_id) teacherIds.push(post.teacher_id);
   const teacherMap = await loadTeacherDisplayNameMap(teacherIds);
 
   const promote: PromotionPreviewClassPromote[] = [];
@@ -817,6 +831,12 @@ export async function buildAcademicYearPromotionPreview(
       gradeHeadRelease,
       subjectGroupHeadCopy,
       subjectGroupMembersCopied: memberCount,
+      coordinatorCopy: coordinatorRows.map((post) => ({
+        title: post.title,
+        teacherName: post.teacher_id
+          ? teacherName(teacherMap, post.teacher_id) ?? post.teacher_id
+          : '—',
+      })),
     },
     unchanged,
     warnings,
@@ -989,6 +1009,44 @@ async function copyFunctionalAndGroupMembers(
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (academic_year_id, group_id, teacher_id) DO NOTHING`,
       [createId('tsgm'), targetYearId, m.group_id, m.teacher_id],
+    );
+  }
+
+  await ensureDivisionCoordinatorPostsTable();
+  const coordinators = (await client.query(
+    `SELECT title, segment_ids, charge_modules, permissions, teacher_id, updated_by
+     FROM division_coordinator_posts WHERE academic_year_id = $1`,
+    [sourceYearId],
+  )).rows as Array<{
+    title: string;
+    segment_ids: string[];
+    charge_modules: string[];
+    permissions: string[];
+    teacher_id: string | null;
+    updated_by: string | null;
+  }>;
+  for (const post of coordinators) {
+    await client.query(
+      `INSERT INTO division_coordinator_posts
+         (id, academic_year_id, title, segment_ids, charge_modules, permissions, teacher_id, updated_by)
+       VALUES ($1, $2, $3, $4::text[], $5::text[], $6::text[], $7, $8)
+       ON CONFLICT (academic_year_id, title) DO UPDATE SET
+         segment_ids = EXCLUDED.segment_ids,
+         charge_modules = EXCLUDED.charge_modules,
+         permissions = EXCLUDED.permissions,
+         teacher_id = EXCLUDED.teacher_id,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        createId('dcp'),
+        targetYearId,
+        post.title,
+        post.segment_ids ?? [],
+        post.charge_modules ?? [],
+        post.permissions ?? [],
+        post.teacher_id,
+        post.updated_by,
+      ],
     );
   }
 }

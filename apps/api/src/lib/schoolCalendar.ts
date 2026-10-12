@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import pool from '../config/database.js';
-import { ensureFunctionalRoleAssignmentsTable } from './functionalRoleAssignments.js';
+import { getTeacherGradeHeadScopeKeys } from './gradeHeadAccess.js';
 import { loadSchoolGradeStructure, type GradeConfigSegment } from './schoolGradeStructure.js';
 
 export type CalendarPhase = 'autumn_prep' | 'autumn' | 'winter' | 'spring_prep' | 'spring' | 'summer';
@@ -302,6 +302,7 @@ export async function ensureSchoolCalendarTables(): Promise<void> {
     ALTER TABLE school_calendar_weeks ADD CONSTRAINT school_calendar_weeks_phase_check
       CHECK (phase IN ('autumn_prep', 'autumn', 'winter', 'spring_prep', 'spring', 'summer'));
     ALTER TABLE school_calendar_events ADD COLUMN IF NOT EXISTS location VARCHAR(200) NOT NULL DEFAULT '';
+    ALTER TABLE school_calendar_events ADD COLUMN IF NOT EXISTS shared BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE school_calendar_weeks ADD COLUMN IF NOT EXISTS theme VARCHAR(200) NOT NULL DEFAULT '';
     ALTER TABLE school_calendar_weeks ADD COLUMN IF NOT EXISTS shared_focus TEXT NOT NULL DEFAULT '';
     UPDATE school_calendar_weeks w
@@ -332,15 +333,7 @@ async function callerIsAdmin(userId: string): Promise<boolean> {
 
 async function editableModuleIdsFor(userId: string, academicYearId: string, modules: CalendarModule[]): Promise<string[]> {
   if (await callerIsAdmin(userId)) return modules.map((m) => m.id);
-  await ensureFunctionalRoleAssignmentsTable();
-  const scopeRows = (
-    await pool.query(
-      `SELECT scope_key FROM functional_role_assignments
-       WHERE academic_year_id = $1 AND role_type = 'grade-head' AND teacher_id = $2`,
-      [academicYearId, userId],
-    )
-  ).rows as Array<{ scope_key: string }>;
-  const scopes = new Set(scopeRows.map((r) => r.scope_key));
+  const scopes = await getTeacherGradeHeadScopeKeys(userId, academicYearId);
   if (scopes.size === 0) return [];
   const gradeConfig = await loadSchoolGradeStructure();
   const segments = gradeConfig.segments ?? [];
@@ -502,7 +495,7 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
   const events = (
     await pool.query(
       `SELECT id, module_id, week_id, event_date::text, start_time, end_time, title, location, owner_user_id,
-              participant_ids, status, note
+              participant_ids, status, note, shared
        FROM school_calendar_events WHERE academic_year_id = $1
        ORDER BY event_date ASC, start_time ASC`,
       [academicYearId],
@@ -520,6 +513,7 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
     participant_ids: unknown;
     status: CalendarEventStatus;
     note: string;
+    shared: boolean;
   }>;
   const overrides = (
     await pool.query(
@@ -565,6 +559,7 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
       participantIds: Array.isArray(row.participant_ids) ? row.participant_ids.map(String) : [],
       status: row.status,
       note: row.note,
+      shared: Boolean(row.shared),
     })),
     overrides: overrides.map((row) => ({ date: row.day, kind: row.kind })),
     staff: staff.map((row) => ({ id: row.id, nameZh: row.name_zh, nameEn: row.name_en })),
@@ -687,12 +682,25 @@ export async function deleteCalendarModule(userId: string, id: string) {
   return { ok: true as const };
 }
 
-async function assertCanWriteModule(userId: string, academicYearId: string, moduleId: string, eventDate: string | null) {
-  const modules = (
+async function calendarModules(): Promise<CalendarModule[]> {
+  return (
     await pool.query(`SELECT id, name_zh, name_en, color, sort_order, segment_id FROM school_calendar_modules`)
   ).rows.map((row) => mapModule(row as Parameters<typeof mapModule>[0]));
+}
+
+async function assertCanWriteModule(userId: string, academicYearId: string, moduleId: string, eventDate: string | null) {
+  const modules = await calendarModules();
   const editable = new Set(await editableModuleIdsFor(userId, academicYearId, modules));
   if (!editable.has(moduleId)) return { error: 'forbidden' as const };
+  if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  return { ok: true as const };
+}
+
+/** 全学部事项：能写小学部或中学部任一模块即可改。 */
+async function assertCanWriteAnyDivision(userId: string, academicYearId: string, eventDate: string | null) {
+  const modules = await calendarModules();
+  const editable = new Set(await editableModuleIdsFor(userId, academicYearId, modules));
+  if (!modules.some((mod) => mod.segmentId && editable.has(mod.id))) return { error: 'forbidden' as const };
   if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
   return { ok: true as const };
 }
@@ -758,6 +766,7 @@ export async function createCalendarEvent(
     ownerUserId: string | null;
     participantIds: string[];
     note: string;
+    shared?: boolean;
   },
 ) {
   await ensureSchoolCalendarTables();
@@ -766,7 +775,13 @@ export async function createCalendarEvent(
   }
   const title = input.title.trim();
   if (!title) return { error: 'title_required' as const };
-  const gate = await assertCanWriteModule(userId, academicYearId, input.moduleId, input.eventDate);
+  const shared = Boolean(input.shared);
+  const module = (await calendarModules()).find((item) => item.id === input.moduleId);
+  if (!module) return { error: 'not_found' as const };
+  if (shared && !module.segmentId) return { error: 'shared_module' as const };
+  const gate = shared
+    ? await assertCanWriteAnyDivision(userId, academicYearId, input.eventDate)
+    : await assertCanWriteModule(userId, academicYearId, input.moduleId, input.eventDate);
   if ('error' in gate) return gate;
   const weeks = (
     await pool.query(
@@ -788,8 +803,8 @@ export async function createCalendarEvent(
   const id = newId('sce');
   await pool.query(
     `INSERT INTO school_calendar_events
-       (id, academic_year_id, module_id, week_id, event_date, start_time, end_time, title, location, owner_user_id, participant_ids, note, created_by, updated_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$13)`,
+       (id, academic_year_id, module_id, week_id, event_date, start_time, end_time, title, location, owner_user_id, participant_ids, note, shared, created_by, updated_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$14)`,
     [
       id,
       academicYearId,
@@ -803,6 +818,7 @@ export async function createCalendarEvent(
       input.ownerUserId,
       JSON.stringify(input.participantIds),
       input.note.trim().slice(0, 2000),
+      shared,
       userId,
     ],
   );
@@ -823,6 +839,7 @@ export async function updateCalendarEvent(
     participantIds: string[];
     status: CalendarEventStatus;
     note: string;
+    shared?: boolean;
   },
 ) {
   await ensureSchoolCalendarTables();
@@ -841,7 +858,13 @@ export async function updateCalendarEvent(
   const today = todayShanghai();
   const isAdmin = await callerIsAdmin(userId);
   if ((existing.event_date < today || input.eventDate < today) && !isAdmin) return { error: 'past_locked' as const };
-  const gate = await assertCanWriteModule(userId, existing.academic_year_id, input.moduleId, null);
+  const shared = Boolean(input.shared);
+  const module = (await calendarModules()).find((item) => item.id === input.moduleId);
+  if (!module) return { error: 'not_found' as const };
+  if (shared && !module.segmentId) return { error: 'shared_module' as const };
+  const gate = shared
+    ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
+    : await assertCanWriteModule(userId, existing.academic_year_id, input.moduleId, null);
   if ('error' in gate) return gate;
   const weeks = (
     await pool.query(
@@ -865,8 +888,8 @@ export async function updateCalendarEvent(
   await pool.query(
     `UPDATE school_calendar_events SET
        module_id = $2, week_id = $3, event_date = $4, start_time = $5, end_time = $6, title = $7,
-       owner_user_id = $8, participant_ids = $9::jsonb, status = $10, note = $11, location = $12, updated_by = $13,
-       updated_at = CURRENT_TIMESTAMP
+       owner_user_id = $8, participant_ids = $9::jsonb, status = $10, note = $11, location = $12, shared = $13,
+       updated_by = $14, updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
     [
       id,
@@ -881,6 +904,7 @@ export async function updateCalendarEvent(
       input.status,
       input.note.trim().slice(0, 2000),
       input.location.trim().slice(0, 200),
+      shared,
       userId,
     ],
   );
@@ -893,12 +917,14 @@ export async function setCalendarEventStatus(userId: string, id: string, status:
   if (status !== 'planned' && status !== 'done' && status !== 'cancelled') return { error: 'invalid_status' as const };
   const existing = (
     await pool.query(
-      `SELECT academic_year_id, module_id FROM school_calendar_events WHERE id = $1`,
+      `SELECT academic_year_id, module_id, shared FROM school_calendar_events WHERE id = $1`,
       [id],
     )
-  ).rows[0] as { academic_year_id: string; module_id: string } | undefined;
+  ).rows[0] as { academic_year_id: string; module_id: string; shared: boolean } | undefined;
   if (!existing) return { error: 'not_found' as const };
-  const gate = await assertCanWriteModule(userId, existing.academic_year_id, existing.module_id, null);
+  const gate = existing.shared
+    ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
+    : await assertCanWriteModule(userId, existing.academic_year_id, existing.module_id, null);
   if ('error' in gate) return gate;
   await pool.query(
     `UPDATE school_calendar_events SET status = $2, updated_by = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -938,6 +964,18 @@ export type CalendarImportEvent = {
 
 function normName(value: string): string {
   return value.trim().replace(/\s+/g, '').toLowerCase();
+}
+
+function wholeSchoolName(value: string): boolean {
+  const key = normName(value);
+  return key === '全学部' || key === 'wholeschool' || key === 'both' || key === 'bothdivisions';
+}
+
+function anchorDivision(modules: CalendarModule[]): CalendarModule | undefined {
+  return (
+    modules.find((mod) => mod.segmentId && /小学|primary/i.test(`${mod.nameZh}${mod.nameEn}`)) ??
+    modules.find((mod) => mod.segmentId)
+  );
 }
 
 function matchModule(modules: CalendarModule[], header: string): { id: string } | { error: 'module_not_found' | 'module_ambiguous' } {
@@ -1042,6 +1080,7 @@ export async function importSchoolCalendar(
     participantIds: string[];
     status: CalendarEventStatus;
     note: string;
+    shared: boolean;
   }> = [];
   if (input.events) {
     for (const item of input.events) {
@@ -1051,7 +1090,13 @@ export async function importSchoolCalendar(
       }
       const week = board.weeks.find((entry) => item.eventDate >= entry.monday && item.eventDate <= addDays(entry.monday, 6));
       if (!week) issues.push({ row: item.row, sheet: 'week', code: 'invalid_date', detail: item.eventDate });
-      const matched = matchModule(board.modules, item.moduleName);
+      const shared = wholeSchoolName(item.moduleName);
+      const division = shared ? anchorDivision(board.modules) : undefined;
+      const matched = shared
+        ? division
+          ? { id: division.id }
+          : { error: 'module_not_found' as const }
+        : matchModule(board.modules, item.moduleName);
       if ('error' in matched) issues.push({ row: item.row, sheet: 'week', code: matched.error, detail: item.moduleName });
       const title = item.title.trim();
       if (!title) issues.push({ row: item.row, sheet: 'week', code: 'title_required' });
@@ -1101,6 +1146,7 @@ export async function importSchoolCalendar(
         participantIds,
         status,
         note: item.note.trim().slice(0, 2000),
+        shared,
       });
     }
   }
@@ -1142,8 +1188,8 @@ export async function importSchoolCalendar(
       for (const event of resolvedEvents) {
         await client.query(
           `INSERT INTO school_calendar_events
-             (id, academic_year_id, module_id, week_id, event_date, start_time, end_time, title, location, owner_user_id, participant_ids, status, note, created_by, updated_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$14)`,
+             (id, academic_year_id, module_id, week_id, event_date, start_time, end_time, title, location, owner_user_id, participant_ids, status, note, shared, created_by, updated_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$15)`,
           [
             newId('sce'),
             academicYearId,
@@ -1158,6 +1204,7 @@ export async function importSchoolCalendar(
             JSON.stringify(event.participantIds),
             event.status,
             event.note,
+            event.shared,
             userId,
           ],
         );

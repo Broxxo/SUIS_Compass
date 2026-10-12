@@ -1,12 +1,12 @@
 import type { ReactNode } from 'react';
 import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from '../ui/segment-tab-button';
 
-export type StaffingSubTab = 'grade-mgmt' | 'teaching-mgmt' | 'course' | 'self-study' | 'elective' | 'weekly-load';
+export type StaffingSubTab = 'division-mgmt' | 'grade-mgmt' | 'teaching-mgmt' | 'course' | 'self-study' | 'elective' | 'weekly-load';
 
 export type StaffingTabGroup = 'key-roles' | 'course-jobs' | 'weekly-load';
 
 export function staffingSubTabGroup(tab: StaffingSubTab): StaffingTabGroup {
-  if (tab === 'grade-mgmt' || tab === 'teaching-mgmt') return 'key-roles';
+  if (tab === 'division-mgmt' || tab === 'grade-mgmt' || tab === 'teaching-mgmt') return 'key-roles';
   if (tab === 'weekly-load') return 'weekly-load';
   return 'course-jobs';
 }
@@ -37,6 +37,9 @@ export default function StaffingSettingsPanel({
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <SegmentTabStrip aria-label={isZh ? '岗位安排' : 'Staffing'}>
           <SegmentTabGroup>
+            <SegmentTabButton grouped active={subTab === 'division-mgmt'} onClick={() => onSubTabChange('division-mgmt')}>
+              {isZh ? '学部管理' : 'Division management'}
+            </SegmentTabButton>
             <SegmentTabButton grouped active={subTab === 'grade-mgmt'} onClick={() => onSubTabChange('grade-mgmt')}>
               {isZh ? '年级管理' : 'Grade management'}
             </SegmentTabButton>

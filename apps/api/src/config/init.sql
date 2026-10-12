@@ -259,6 +259,25 @@ CREATE TABLE IF NOT EXISTS functional_role_assignments (
 CREATE INDEX IF NOT EXISTS idx_functional_role_assignments_year_type
   ON functional_role_assignments(academic_year_id, role_type);
 
+-- 学部管理：协调员岗位（分管项目 + 对齐年级组长/学科组长的管理权限）
+CREATE TABLE IF NOT EXISTS division_coordinator_posts (
+  id VARCHAR(100) PRIMARY KEY,
+  academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+  title VARCHAR(80) NOT NULL,
+  segment_ids TEXT[] NOT NULL DEFAULT '{}',
+  charge_modules TEXT[] NOT NULL DEFAULT '{}',
+  permissions TEXT[] NOT NULL DEFAULT '{}',
+  teacher_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (academic_year_id, title)
+);
+CREATE INDEX IF NOT EXISTS idx_division_coordinator_posts_year
+  ON division_coordinator_posts(academic_year_id);
+CREATE INDEX IF NOT EXISTS idx_division_coordinator_posts_teacher
+  ON division_coordinator_posts(academic_year_id, teacher_id);
+
 CREATE TABLE IF NOT EXISTS teaching_subject_group_members (
   id VARCHAR(100) PRIMARY KEY,
   academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
@@ -439,6 +458,8 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_student_term_reports_student_term_template_unique
   ON student_term_reports(student_id, academic_year_id, term, COALESCE(template_id, ''));
 CREATE INDEX IF NOT EXISTS idx_student_term_reports_student ON student_term_reports(student_id, academic_year_id, term, template_id);
+ALTER TABLE student_term_reports
+  ADD COLUMN IF NOT EXISTS snapshot_class_id VARCHAR(50) REFERENCES classes(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS student_term_subject_reports (
   id VARCHAR(100) PRIMARY KEY,
@@ -865,6 +886,7 @@ CREATE TABLE IF NOT EXISTS school_calendar_events (
   participant_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
   status VARCHAR(20) NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'done', 'cancelled')),
   note TEXT NOT NULL DEFAULT '',
+  shared BOOLEAN NOT NULL DEFAULT false,
   created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import pool from '../config/database.js';
+import { coordinatorGradeScopeKeys } from './divisionCoordinators.js';
 import { ensureFunctionalRoleAssignmentsTable } from './functionalRoleAssignments.js';
 import { getGradeCatalogIdForClass, loadSchoolGradeStructure } from './schoolGradeStructure.js';
 
@@ -17,7 +18,10 @@ export async function getTeacherGradeHeadScopeKeys(
       [academicYearId, teacherId],
     )
   ).rows as Array<{ scope_key: string }>;
-  return new Set(rows.map((r) => r.scope_key));
+  const scopes = new Set(rows.map((r) => r.scope_key));
+  const extra = await coordinatorGradeScopeKeys(teacherId, academicYearId, db);
+  for (const key of extra) scopes.add(key);
+  return scopes;
 }
 
 export async function getGradeHeadClassIdsForTeacher(

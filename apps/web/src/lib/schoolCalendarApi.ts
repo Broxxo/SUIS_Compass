@@ -62,6 +62,7 @@ export type SchoolCalendarEvent = {
   participantIds: string[];
   status: CalendarEventStatus;
   note: string;
+  shared: boolean;
 };
 
 export type SchoolCalendarBoard = {

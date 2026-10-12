@@ -272,6 +272,7 @@ function readEventBody(body: Record<string, unknown>) {
     participantIds: participants,
     status,
     note: String(body.note ?? ''),
+    shared: Boolean(body.shared),
   };
 }
 

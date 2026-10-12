@@ -45,6 +45,13 @@ import {
   type FunctionalRoleType,
 } from '../lib/functionalRoleAssignments.js';
 import {
+  COORDINATOR_PERMISSIONS,
+  deleteDivisionCoordinatorPost,
+  listDivisionCoordinatorPosts,
+  saveDivisionCoordinatorPost,
+  type CoordinatorPermission,
+} from '../lib/divisionCoordinators.js';
+import {
   listTeachingSubjectGroupMembers,
   replaceTeachingSubjectGroupMembers,
 } from '../lib/teachingSubjectGroupMembers.js';
@@ -2774,6 +2781,75 @@ router.put('/functional-roles', async (req: AuthedRequest, res: Response) => {
     return res.json({ success: true });
   } catch (error) {
     console.error('Upsert functional role error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/division-coordinators', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
+    if (!academicYearId) {
+      return res.status(400).json({ error: 'academicYearId is required' });
+    }
+    const posts = await listDivisionCoordinatorPosts(academicYearId);
+    return res.json({ posts });
+  } catch (error) {
+    console.error('List division coordinators error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/division-coordinators', async (req: AuthedRequest, res: Response) => {
+  try {
+    const academicYearId = String(req.body?.academicYearId ?? '').trim();
+    const id = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+    const title = String(req.body?.title ?? '').trim();
+    const segmentIds = Array.isArray(req.body?.segmentIds) ? req.body.segmentIds : [];
+    const chargeModules = Array.isArray(req.body?.chargeModules) ? req.body.chargeModules : [];
+    const permissions = (Array.isArray(req.body?.permissions) ? req.body.permissions : [])
+      .map((item: unknown) => String(item ?? '').trim())
+      .filter((item: string): item is CoordinatorPermission =>
+        (COORDINATOR_PERMISSIONS as readonly string[]).includes(item),
+      );
+    const teacherIdRaw = req.body?.teacherId;
+    const teacherId =
+      teacherIdRaw == null || String(teacherIdRaw).trim() === '' ? null : String(teacherIdRaw).trim();
+    if (teacherId) {
+      const okTeacher = await assertTeacherUser(teacherId);
+      if (!okTeacher) {
+        return res.status(400).json({ error: 'teacherId must reference an active teacher account' });
+      }
+    }
+    const post = await saveDivisionCoordinatorPost({
+      id: id || null,
+      academicYearId,
+      title,
+      segmentIds: segmentIds.map((item: unknown) => String(item ?? '')),
+      chargeModules: chargeModules.map((item: unknown) => String(item ?? '')),
+      permissions,
+      teacherId,
+      updatedBy: req.userId ?? null,
+    });
+    return res.json({ post });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message === 'title_required' || message === 'title_too_long' || message === 'segment_required' || message === 'charge_required' || message === 'permission_required' || message === 'title_taken') {
+      return res.status(400).json({ error: message });
+    }
+    console.error('Save division coordinator error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/division-coordinators/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const removed = await deleteDivisionCoordinatorPost(id);
+    if (!removed) return res.status(404).json({ error: 'not_found' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete division coordinator error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

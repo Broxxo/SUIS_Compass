@@ -296,6 +296,16 @@ export default function PromoteAcademicYearPreviewDialog({
                   ? `教学学科组成员：${preview.functionalRoles.subjectGroupMembersCopied} 人将复制至新学年。`
                   : `Teaching subject group members: ${preview.functionalRoles.subjectGroupMembersCopied} copied.`}
               </p>
+              {(preview.functionalRoles.coordinatorCopy ?? []).length > 0 ? (
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-800 mb-2">{isZh ? '协调员（原岗位复制）' : 'Coordinators (copied)'}</h4>
+                  <PreviewTable
+                    headers={isZh ? ['岗位', '协调员'] : ['Post', 'Coordinator']}
+                    rows={(preview.functionalRoles.coordinatorCopy ?? []).map((row) => [row.title, row.teacherName])}
+                    emptyText={isZh ? '无协调员岗位' : 'No coordinator posts'}
+                  />
+                </div>
+              ) : null}
             </div>
           )}
 

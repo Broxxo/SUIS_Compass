@@ -116,7 +116,7 @@ import {
   parseStudentImportWorkbook,
 } from '../lib/studentRosterExcel';
 import { courseAppliesToGrade, getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
-import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, FunctionalRoleAssignment, FunctionalRoleType, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term, AcademicYearPromotionPreview } from '../types/classManagement';
+import type { AcademicYear, Student, Enrollment, ClassItem, EvaluationTemplateSummary, FunctionalRoleAssignment, FunctionalRoleType, DivisionCoordinatorPost, HomeroomCommentMode, ReportExamConfigScope, ReportGrade, ReportTemplateProgress, ReportTemplateStatus, ReportYearDimensionPreset, ReportYearDimensionPresetSubject, StaffingAssignment, TargetLevel, Term, AcademicYearPromotionPreview } from '../types/classManagement';
 import CurriculumRoadmap from './CurriculumRoadmap';
 import ClassManagement from './ClassManagement';
 import CreateStudentDialog from './CreateStudentDialog';
@@ -134,6 +134,7 @@ import {
   loadDingTalkPreviewFromStorage,
   saveDingTalkPreviewToStorage,
 } from '../lib/dingtalkPreviewStorage';
+import DivisionManagementPanel from './admin/DivisionManagementPanel';
 import GradeManagementPanel from './admin/GradeManagementPanel';
 import TeachingManagementPanel from './admin/TeachingManagementPanel';
 import {
@@ -773,6 +774,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   const [editStatus, setEditStatus] = useState<Student['status']>('active');
   const [editStudentNumber, setEditStudentNumber] = useState('');
   const [editDateOfBirth, setEditDateOfBirth] = useState('');
+  const [editReturnClassId, setEditReturnClassId] = useState('');
   const [editSubmitLoading, setEditSubmitLoading] = useState(false);
   const [studentCurrentYearId, setStudentCurrentYearId] = useState<string | null>(null);
   const [studentRosterView, setStudentRosterView] = useState<'enrolled' | 'graduates'>('enrolled');
@@ -903,6 +905,8 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   /** 岗位管理内：职能岗位 | 课程岗位 | 周课时统计 */
   const [staffingSubTab, setStaffingSubTab] = useState<StaffingSubTab>('grade-mgmt');
   const [functionalRoleAssignments, setFunctionalRoleAssignments] = useState<FunctionalRoleAssignment[]>([]);
+  const [divisionCoordinators, setDivisionCoordinators] = useState<DivisionCoordinatorPost[]>([]);
+  const [divisionCoordinatorSaving, setDivisionCoordinatorSaving] = useState(false);
   const [functionalSavingKeys, setFunctionalSavingKeys] = useState<Set<string>>(new Set());
   const [teachingSubjectGroups, setTeachingSubjectGroups] = useState<TeachingSubjectGroup[]>([]);
   const [subjectGroupMembers, setSubjectGroupMembers] = useState<
@@ -1894,16 +1898,18 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
         const id = latestAcademicYear(yList)?.id || '';
         setStaffingYearId(id);
         if (id && USE_CLOUD_STORAGE) {
-          const [assignments, functionalRoles, members, selfStudyBundle, electiveBundle] = await Promise.all([
+          const [assignments, functionalRoles, members, coordinators, selfStudyBundle, electiveBundle] = await Promise.all([
             api.getAdminStaffingAssignments(id),
             api.getAdminFunctionalRoles(id),
             api.getAdminTeachingSubjectGroupMembers(id),
+            api.getAdminDivisionCoordinators(id),
             api.getAdminSelfStudyBundle(id),
             api.getAdminElectiveBundle(id),
           ]);
           setStaffingAssignments(assignments);
           setFunctionalRoleAssignments(functionalRoles);
           setSubjectGroupMembers(members);
+          setDivisionCoordinators(coordinators);
           setSelfStudyModules(selfStudyBundle.modules);
           setSelfStudyGradeConfigs(selfStudyBundle.gradeConfigs);
           setSelfStudySlots(selfStudyBundle.slots);
@@ -1911,6 +1917,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
         } else {
           setStaffingAssignments([]);
           setFunctionalRoleAssignments([]);
+          setDivisionCoordinators([]);
           setSubjectGroupMembers([]);
           setSelfStudyModules([]);
           setSelfStudyGradeConfigs([]);
@@ -1927,6 +1934,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     if (!USE_CLOUD_STORAGE || !staffingYearId) {
       setStaffingAssignments([]);
       setFunctionalRoleAssignments([]);
+      setDivisionCoordinators([]);
       setSubjectGroupMembers([]);
       setSelfStudyModules([]);
       setSelfStudyGradeConfigs([]);
@@ -1939,11 +1947,13 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
       api.getAdminStaffingAssignments(staffingYearId),
       api.getAdminFunctionalRoles(staffingYearId),
       api.getAdminTeachingSubjectGroupMembers(staffingYearId),
+      api.getAdminDivisionCoordinators(staffingYearId),
     ])
-      .then(([assignments, functionalRoles, members]) => {
+      .then(([assignments, functionalRoles, members, coordinators]) => {
         setStaffingAssignments(assignments);
         setFunctionalRoleAssignments(functionalRoles);
         setSubjectGroupMembers(members);
+        setDivisionCoordinators(coordinators);
       })
       .catch((e: unknown) => setError((e as Error)?.message || 'Failed to load staffing assignments'))
       .finally(() => setStaffingLoading(false));
@@ -2282,6 +2292,10 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     setEditStatus(s.status ?? 'active');
     setEditStudentNumber(s.studentNumber ?? '');
     setEditDateOfBirth(s.dateOfBirth ?? '');
+    const currentEnrollment = enrollments.find(
+      (enrollment) => enrollment.studentId === s.id && enrollment.academicYearId === studentCurrentYearId,
+    );
+    setEditReturnClassId(currentEnrollment?.classId ?? '');
   };
 
   const handleSaveStudent = async () => {
@@ -2324,6 +2338,86 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
       setEditStudent(null);
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Failed to update student');
+    } finally {
+      setEditSubmitLoading(false);
+    }
+  };
+
+  const handleMoveStudentToArchive = async () => {
+    if (!editStudent) return;
+    const label = editStudent.nameZh || editStudent.nameEn || editStudent.name;
+    const msg = isZh
+      ? `将「${label}」转入毕业生档案？\n\n学生会从在校生名单移到毕业生档案，并保留目前班级作为档案班级。已经保存的学业报告不会被改写或删除。`
+      : `Move "${label}" to the graduate archive?\n\nThey leave the enrolled roster. Saved academic reports stay as they are.`;
+    if (!window.confirm(msg)) return;
+    setEditSubmitLoading(true);
+    setError(null);
+    try {
+      await updateStudent(editStudent.id, { status: 'graduated' });
+      setStudents((prev) => prev.map((s) => (s.id === editStudent.id ? { ...s, status: 'graduated' } : s)));
+      setEditStudent(null);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || (isZh ? '转入毕业生档案失败' : 'Failed to archive student'));
+    } finally {
+      setEditSubmitLoading(false);
+    }
+  };
+
+  const handleReturnStudentToClass = async () => {
+    if (!editStudent) return;
+    if (!studentCurrentYearId) {
+      setError(isZh ? '请先选择学年。' : 'Select an academic year first.');
+      return;
+    }
+    const target = allClasses.find(
+      (cls) => cls.id === editReturnClassId && cls.academicYearId === studentCurrentYearId && !cls.archivedAt,
+    );
+    if (!target) {
+      setError(isZh ? '请选择要转回的班级。' : 'Choose a class to return to.');
+      return;
+    }
+    const label = editStudent.nameZh || editStudent.nameEn || editStudent.name;
+    const classLabel = `${getGradeLabelByLevel(studentGradeConfig, target.grade)} · ${target.name}`;
+    const msg = isZh
+      ? `将「${label}」转回「${classLabel}」并恢复为在读？\n\n已保存的学业报告仍保留。`
+      : `Return "${label}" to "${classLabel}" as an active student?\n\nSaved academic reports stay as they are.`;
+    if (!window.confirm(msg)) return;
+    setEditSubmitLoading(true);
+    setError(null);
+    try {
+      const currentEnrollments = loadEnrollmentsSync().filter(
+        (enrollment) => enrollment.studentId === editStudent.id && enrollment.academicYearId === studentCurrentYearId,
+      );
+      const alreadyInClass = currentEnrollments.some((enrollment) => enrollment.classId === target.id);
+      if (!alreadyInClass) {
+        for (const enrollment of currentEnrollments) {
+          await removeEnrollment(enrollment.id);
+        }
+        const enrollmentId =
+          typeof crypto !== 'undefined' && crypto.randomUUID
+            ? `enr-${crypto.randomUUID()}`
+            : `enr-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+        await addEnrollment({
+          id: enrollmentId,
+          studentId: editStudent.id,
+          classId: target.id,
+          academicYearId: studentCurrentYearId,
+        });
+      }
+      await updateStudent(editStudent.id, {
+        status: 'active',
+        currentClassId: target.id,
+        currentGrade: target.grade,
+      });
+      setStudents((prev) => prev.map((s) => (
+        s.id === editStudent.id
+          ? { ...s, status: 'active', currentClassId: target.id, currentGrade: target.grade }
+          : s
+      )));
+      setEnrollments(loadEnrollmentsSync());
+      setEditStudent(null);
+    } catch (e: unknown) {
+      setError((e as Error)?.message || (isZh ? '转回班级失败' : 'Failed to return student'));
     } finally {
       setEditSubmitLoading(false);
     }
@@ -4554,6 +4648,53 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     }
   };
 
+  const coordinatorErrorText = (message: string) => {
+    if (message === 'title_required') return isZh ? '请填写协调员岗位名称。' : 'Enter a coordinator title.';
+    if (message === 'title_too_long') return isZh ? '岗位名称太长。' : 'Title is too long.';
+    if (message === 'title_taken') return isZh ? '这个学年已经有同名协调员岗位。' : 'A coordinator post with this title already exists.';
+    if (message === 'segment_required') return isZh ? '请选择学部。' : 'Select a division.';
+    if (message === 'charge_required') return isZh ? '请填写至少一个分管模块。' : 'Add at least one module.';
+    if (message === 'permission_required') return isZh ? '请选择管理权限。' : 'Select a permission set.';
+    return message;
+  };
+
+  const saveDivisionCoordinator = async (input: {
+    id?: string;
+    title: string;
+    segmentIds: string[];
+    chargeModules: string[];
+    permissions: DivisionCoordinatorPost['permissions'];
+    teacherId: string | null;
+  }) => {
+    if (!staffingYearId) return;
+    setDivisionCoordinatorSaving(true);
+    setError(null);
+    try {
+      await api.saveAdminDivisionCoordinator({ ...input, academicYearId: staffingYearId });
+      setDivisionCoordinators(await api.getAdminDivisionCoordinators(staffingYearId));
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Failed to save coordinator';
+      setError(coordinatorErrorText(message));
+      throw e;
+    } finally {
+      setDivisionCoordinatorSaving(false);
+    }
+  };
+
+  const deleteDivisionCoordinator = async (post: DivisionCoordinatorPost) => {
+    if (!staffingYearId) return;
+    setDivisionCoordinatorSaving(true);
+    setError(null);
+    try {
+      await api.deleteAdminDivisionCoordinator(post.id);
+      setDivisionCoordinators(await api.getAdminDivisionCoordinators(staffingYearId));
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'Failed to delete coordinator');
+    } finally {
+      setDivisionCoordinatorSaving(false);
+    }
+  };
+
   const handleCreateSelfStudyModule = async (input: {
     name: string;
     gradeConfigs: Array<{ grade: number; sessionsPerWeek: number }>;
@@ -6298,6 +6439,21 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
               </>
             }
           >
+                {staffingSubTab === 'division-mgmt' && (
+                  <DivisionManagementPanel
+                    isZh={isZh}
+                    posts={divisionCoordinators}
+                    segments={getRoadmapSegmentsInDisplayOrder(normalizeGradeConfig(loadGradeConfigSync())).map((segment) => ({
+                      id: segment.id,
+                      label: segment.label,
+                    }))}
+                    teachers={staffingTeachers}
+                    saving={divisionCoordinatorSaving}
+                    onSave={saveDivisionCoordinator}
+                    onDelete={deleteDivisionCoordinator}
+                  />
+                )}
+
                 {staffingSubTab === 'grade-mgmt' && (
                   <GradeManagementPanel
                     isZh={isZh}
@@ -9171,14 +9327,23 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
         }}
       />
 
-      <Dialog open={!!editStudent} onOpenChange={(open) => !open && setEditStudent(null)}>
-        <DialogContent className="sm:max-w-[400px]">
-          <DialogHeader>
-            <DialogTitle>{isZh ? '编辑学生' : 'Edit student'}</DialogTitle>
-            <DialogDescription>
-              {editStudent && (isZh ? `修改「${editStudent.nameZh || editStudent.nameEn || editStudent.name}」的信息` : `Edit "${editStudent.nameZh || editStudent.nameEn || editStudent.name}"`)}
-            </DialogDescription>
-          </DialogHeader>
+      {editStudent ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div
+            role="dialog"
+            aria-labelledby="edit-student-title"
+            className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl border bg-white p-6 shadow-lg"
+          >
+          <div className="flex flex-col space-y-1.5 text-left">
+            <h2 id="edit-student-title" className="text-lg font-semibold leading-none tracking-tight">
+              {isZh ? '编辑学生' : 'Edit student'}
+            </h2>
+            <p className="text-sm text-slate-500">
+              {isZh
+                ? `修改「${editStudent.nameZh || editStudent.nameEn || editStudent.name}」的信息`
+                : `Edit "${editStudent.nameZh || editStudent.nameEn || editStudent.name}"`}
+            </p>
+          </div>
           <div className="space-y-3 py-2">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -9224,7 +9389,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
             </div>
             <div>
               <label className="block text-xs text-slate-500 mb-1">{isZh ? '性别' : 'Gender'}</label>
-              <MenuSelect
+              <select
                 value={editGender}
                 onChange={(e) => setEditGender(e.target.value as Student['gender'])}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -9232,7 +9397,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                 <option value="male">{isZh ? '男' : 'Male'}</option>
                 <option value="female">{isZh ? '女' : 'Female'}</option>
                 <option value="other">{isZh ? '其他' : 'Other'}</option>
-              </MenuSelect>
+              </select>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -9246,7 +9411,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
               </div>
               <div>
                 <label className="block text-xs text-slate-500 mb-1">{isZh ? '在读状态' : 'Status'}</label>
-                <MenuSelect
+                <select
                   value={editStatus || 'active'}
                   onChange={(e) => setEditStatus(e.target.value as Student['status'])}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
@@ -9255,7 +9420,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                   <option value="leave">{isZh ? '休学' : 'Leave'}</option>
                   <option value="graduated">{isZh ? '毕业' : 'Graduated'}</option>
                   <option value="withdrawn">{isZh ? '离校' : 'Withdrawn'}</option>
-                </MenuSelect>
+                </select>
               </div>
             </div>
             <div>
@@ -9275,31 +9440,81 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+              <p className="text-xs font-medium text-slate-700">{isZh ? '毕业生档案' : 'Graduate archive'}</p>
+              <p className="text-xs text-slate-500">
+                {isZh
+                  ? '转入后出现在「毕业生档案」，并保留目前班级。已保存的学业报告不会被改写。转回时选择当前学年的班级，学生恢复为在读。'
+                  : 'Archiving keeps the current class on the record and does not rewrite saved academic reports. Returning places the student in a class for the selected year.'}
+              </p>
+              {(editStudent.status ?? 'active') === 'graduated' ? (
+                <div className="space-y-2">
+                  <label className="block text-xs text-slate-500">{isZh ? '转回班级' : 'Return to class'}</label>
+                  <MenuSelect
+                    searchable
+                    value={editReturnClassId}
+                    onChange={(e) => setEditReturnClassId(e.target.value)}
+                    disabled={!studentCurrentYearId || editSubmitLoading}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                  >
+                    <option value="">{isZh ? '选择班级' : 'Choose a class'}</option>
+                    {allClasses
+                      .filter((cls) => cls.academicYearId === studentCurrentYearId && !cls.archivedAt)
+                      .slice()
+                      .sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, undefined, { numeric: true }))
+                      .map((cls) => (
+                        <option key={cls.id} value={cls.id}>
+                          {getGradeLabelByLevel(studentGradeConfig, cls.grade)} · {cls.name}
+                        </option>
+                      ))}
+                  </MenuSelect>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleReturnStudentToClass()}
+                    disabled={editSubmitLoading || !editReturnClassId}
+                  >
+                    {isZh ? '转回该班' : 'Return to this class'}
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleMoveStudentToArchive()}
+                  disabled={editSubmitLoading}
+                >
+                  {isZh ? '转入毕业生档案' : 'Move to graduate archive'}
+                </Button>
+              )}
+            </div>
           </div>
-          <DialogFooter className="flex justify-between sm:justify-between">
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
             {isSystemAdmin ? (
               <Button
                 variant="destructive"
                 size="sm"
                 onClick={handleDeleteStudentInAdmin}
                 disabled={editSubmitLoading}
-                className="mr-auto"
               >
                 <Trash2 className="h-4 w-4 mr-1" />
                 {isZh ? '删除学生' : 'Delete'}
               </Button>
             ) : (
-              <span className="mr-auto" />
+              <span />
             )}
-            <div className="flex gap-2">
+            <div className="flex gap-2 sm:justify-end">
               <Button variant="outline" onClick={() => setEditStudent(null)}>{isZh ? '取消' : 'Cancel'}</Button>
               <Button onClick={handleSaveStudent} disabled={(!editNameZh.trim() && !editNameEn.trim()) || editSubmitLoading}>
                 {editSubmitLoading ? (isZh ? '保存中…' : 'Saving…') : isZh ? '保存' : 'Save'}
               </Button>
             </div>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* 删除确认：需输入账户名一致才可确认 */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && closeDeleteConfirm()}>

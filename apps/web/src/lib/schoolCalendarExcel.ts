@@ -2,7 +2,7 @@
  * 校历 Excel：版式跟公开课表一致。第一行是学校和学年标题，蓝底白字，中英两行。
  * 第二行表头中英两行，淡灰底黑字。一份工作簿里有月历和周历两张表。
  */
-import type { SchoolCalendarBoard } from './schoolCalendarApi';
+import type { SchoolCalendarBoard, SchoolCalendarWeek } from './schoolCalendarApi';
 
 export const SCHOOL_CALENDAR_TITLE = '合肥市包河区协和双语学校';
 
@@ -231,7 +231,7 @@ function writeBodyCell(cell: {
   cell.border = thinBorder;
 }
 
-function sheetByName(sheets: Array<{ name: string }>, names: string[]) {
+function sheetByName<T extends { name: string }>(sheets: T[], names: string[]): T | undefined {
   const wanted = new Set(names.map((name) => name.toLowerCase()));
   return sheets.find((sheet) => wanted.has(sheet.name.trim().toLowerCase()));
 }
@@ -310,7 +310,7 @@ export async function buildSchoolCalendarWorkbook(input: {
     const status = STATUS_LABEL[event.status] ?? STATUS_LABEL.planned;
     const values = [
       event.eventDate,
-      mod ? personLabel(input.isZh, mod.nameZh, mod.nameEn) : '',
+      event.shared ? (input.isZh ? '全学部' : 'Whole school') : mod ? personLabel(input.isZh, mod.nameZh, mod.nameEn) : '',
       event.startTime,
       event.endTime,
       event.title,
@@ -331,6 +331,137 @@ export async function buildSchoolCalendarWorkbook(input: {
   weekSheet.views = [{ state: 'frozen', ySplit: 2 }];
   const buf = await workbook.xlsx.writeBuffer();
   return buf as ArrayBuffer;
+}
+
+const BRIEFING_COLUMNS = [
+  { key: 'date', zh: '日期', en: 'Date', width: 26 },
+  { key: 'time', zh: '时间', en: 'Time', width: 16 },
+  { key: 'title', zh: '事项', en: 'Events', width: 36 },
+  { key: 'location', zh: '地点', en: 'Place', width: 18 },
+  { key: 'owner', zh: '责任人', en: 'Owner', width: 16 },
+] as const;
+
+const BRIEFING_WEEKDAY_ZH = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const BRIEFING_WEEKDAY_EN = ['Sun.', 'Mon.', 'Tue.', 'Wed.', 'Thu.', 'Fri.', 'Sat.'];
+
+function slashDate(iso: string): string {
+  const [year, month, day] = iso.split('-');
+  return `${year}/${month}/${day}`;
+}
+
+function briefingWeekday(iso: string): number {
+  const [year, month, day] = iso.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+}
+
+function briefingDate(iso: string): string {
+  const day = briefingWeekday(iso);
+  return `${slashDate(iso)} ${BRIEFING_WEEKDAY_ZH[day]} ${BRIEFING_WEEKDAY_EN[day]}`;
+}
+
+function briefingClock(value: string): string {
+  return value.replace(/^0(\d):/, '$1:');
+}
+
+function briefingRange(days: string[]): string {
+  if (days.length === 0) return '';
+  const start = slashDate(days[0]);
+  const end = slashDate(days[days.length - 1]);
+  return start === end ? start : `${start}-${end}`;
+}
+
+const briefingBorder = {
+  top: { style: 'thin' as const, color: { argb: 'FF000000' } },
+  left: { style: 'thin' as const, color: { argb: 'FF000000' } },
+  bottom: { style: 'thin' as const, color: { argb: 'FF000000' } },
+  right: { style: 'thin' as const, color: { argb: 'FF000000' } },
+};
+
+export async function buildWeekBriefingWorkbook(input: {
+  board: SchoolCalendarBoard;
+  week: SchoolCalendarWeek;
+  schoolDays: string[];
+  isZh: boolean;
+}): Promise<ArrayBuffer> {
+  const ExcelJS = await loadExcel();
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = SCHOOL_CALENDAR_TITLE;
+  const days = input.schoolDays.length > 0 ? input.schoolDays : [input.week.monday, input.week.friday];
+  const range = briefingRange(days);
+  const title = {
+    zh: `本周工作提示 ${range}`,
+    en: `Weekly briefing ${range}`,
+  };
+  const daySet = new Set(input.schoolDays);
+  const staffAt = new Map(input.board.staff.map((person) => [person.id, person]));
+  const events = input.board.events
+    .filter((event) => daySet.has(event.eventDate) && event.status !== 'cancelled')
+    .sort((a, b) => a.eventDate.localeCompare(b.eventDate) || a.startTime.localeCompare(b.startTime) || a.title.localeCompare(b.title, 'zh'));
+
+  const sheet = workbook.addWorksheet('本周工作提示');
+  sheet.columns = BRIEFING_COLUMNS.map((column) => ({ width: column.width }));
+  sheet.mergeCells(1, 1, 1, BRIEFING_COLUMNS.length);
+  sheet.getRow(1).height = 48;
+  for (let col = 1; col <= BRIEFING_COLUMNS.length; col += 1) {
+    paintTitle(sheet.getCell(1, col), col === 1 ? title : null);
+  }
+  sheet.getRow(2).height = 36;
+  BRIEFING_COLUMNS.forEach((column, index) => paintHeader(sheet.getCell(2, index + 1), column));
+  events.forEach((event, index) => {
+    const excelRow = sheet.getRow(index + 3);
+    excelRow.height = 22;
+    const owner = event.ownerUserId ? staffAt.get(event.ownerUserId) : undefined;
+    const values = [
+      briefingDate(event.eventDate),
+      `${briefingClock(event.startTime)}-${briefingClock(event.endTime)}`,
+      event.title,
+      event.location,
+      owner ? personLabel(input.isZh, owner.nameZh, owner.nameEn) : '',
+    ];
+    values.forEach((value, colIndex) => writeBodyCell(excelRow.getCell(colIndex + 1), value, colIndex <= 1 ? 'center' : 'left'));
+  });
+  let groupStart = 0;
+  while (groupStart < events.length) {
+    let groupEnd = groupStart;
+    while (groupEnd + 1 < events.length && events[groupEnd + 1].eventDate === events[groupStart].eventDate) groupEnd += 1;
+    if (groupEnd > groupStart) {
+      const firstRow = groupStart + 3;
+      const lastRow = groupEnd + 3;
+      sheet.mergeCells(firstRow, 1, lastRow, 1);
+      const master = sheet.getCell(firstRow, 1);
+      master.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    }
+    groupStart = groupEnd + 1;
+  }
+  const lastRow = Math.max(2, events.length + 2);
+  for (let row = 1; row <= lastRow; row += 1) {
+    for (let col = 1; col <= BRIEFING_COLUMNS.length; col += 1) {
+      sheet.getCell(row, col).border = briefingBorder;
+    }
+  }
+  sheet.views = [{ state: 'frozen', ySplit: 2 }];
+  const buf = await workbook.xlsx.writeBuffer();
+  return buf as ArrayBuffer;
+}
+
+export async function downloadWeekBriefingWorkbook(input: {
+  board: SchoolCalendarBoard;
+  week: SchoolCalendarWeek;
+  schoolDays: string[];
+  isZh: boolean;
+}): Promise<void> {
+  const buf = await buildWeekBriefingWorkbook(input);
+  const blob = new Blob([buf], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const days = input.schoolDays.length > 0 ? input.schoolDays : [input.week.monday];
+  const name = `本周工作提示-${days[0]}.xlsx`;
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export async function downloadSchoolCalendarWorkbook(input: {

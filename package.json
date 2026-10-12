@@ -1,7 +1,7 @@
 {
   "name": "curriculum-roadmap",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.7.2",
   "type": "module",
   "engines": {
     "node": "20"
@@ -37,5 +37,8 @@
   ],
   "devDependencies": {
     "concurrently": "^9.1.0"
+  },
+  "overrides": {
+    "@radix-ui/react-presence": "1.1.11"
   }
 }

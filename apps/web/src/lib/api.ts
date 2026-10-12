@@ -36,6 +36,8 @@ import type {
   StaffingAssignment,
   FunctionalRoleAssignment,
   FunctionalRoleType,
+  CoordinatorPermission,
+  DivisionCoordinatorPost,
   OrgDepartment,
   ReportTemplateStatus,
   HomeroomCommentMode,
@@ -1242,6 +1244,31 @@ export const api = {
     return (data.templates ?? []) as ReportTemplate[];
   },
 
+  async exportAcademicReport(templateId: string): Promise<import('./academicReportExcel').AcademicReportExchangePayload> {
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}/exchange`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) throw new Error('Failed to export academic report');
+    return response.json();
+  },
+
+  async importAcademicReport(
+    templateId: string,
+    payload: import('./academicReportExcel').AcademicReportExchangePayload,
+  ): Promise<{ importedStudents: number; warnings: string[] }> {
+    const response = await fetch(
+      apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}/exchange`),
+      {
+        method: 'POST',
+        headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!response.ok) throw new Error('Failed to import academic report');
+    return response.json();
+  },
+
   async getReportTemplateById(templateId: string): Promise<ReportTemplate> {
     const response = await fetch(
       apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}`),
@@ -1915,6 +1942,52 @@ export const api = {
     }
     const data = await readJsonOrThrow(response, 'Failed to fetch functional roles');
     return (data.assignments ?? []) as FunctionalRoleAssignment[];
+  },
+
+  async getAdminDivisionCoordinators(academicYearId: string): Promise<DivisionCoordinatorPost[]> {
+    const response = await fetch(
+      apiUrl(`/api/admin/division-coordinators?academicYearId=${encodeURIComponent(academicYearId)}`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to fetch division coordinators');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch division coordinators');
+    return (data.posts ?? []) as DivisionCoordinatorPost[];
+  },
+
+  async saveAdminDivisionCoordinator(input: {
+    id?: string;
+    academicYearId: string;
+    title: string;
+    segmentIds: string[];
+    chargeModules: string[];
+    permissions: CoordinatorPermission[];
+    teacherId: string | null;
+  }): Promise<DivisionCoordinatorPost> {
+    const response = await fetch(apiUrl('/api/admin/division-coordinators'), {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to save division coordinator');
+    }
+    const data = await readJsonOrThrow(response, 'Failed to save division coordinator');
+    return (data as { post: DivisionCoordinatorPost }).post;
+  },
+
+  async deleteAdminDivisionCoordinator(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/division-coordinators/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to delete division coordinator');
+    }
   },
 
   async upsertAdminFunctionalRole(input: {

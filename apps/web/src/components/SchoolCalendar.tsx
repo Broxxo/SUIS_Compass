@@ -40,7 +40,7 @@ import {
   type SchoolCalendarModule,
   type SchoolCalendarWeek,
 } from '../lib/schoolCalendarApi';
-import { downloadSchoolCalendarWorkbook, parseSchoolCalendarWorkbook, type SchoolCalendarImportIssue } from '../lib/schoolCalendarExcel';
+import { downloadSchoolCalendarWorkbook, downloadWeekBriefingWorkbook, parseSchoolCalendarWorkbook, type SchoolCalendarImportIssue } from '../lib/schoolCalendarExcel';
 import type { SchoolCalendarAIPayload, SchoolCalendarAIWeekEvent } from '../lib/schoolCalendarAIContext';
 
 const WEEKDAY_ZH = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -133,8 +133,10 @@ function errorText(code: string, isZh: boolean): string {
     last_module: '至少保留一个模块。',
     name_required: '请填写模块名称。',
     internal: '保存没有成功，请稍后再试。',
+    shared_module: '全学部只用于小学部和中学部。',
   };
   if (isZh) return zh[code] ?? zh.internal;
+  if (code === 'shared_module') return 'Whole-school events belong on a division module.';
   return code;
 }
 
@@ -230,6 +232,11 @@ function statusMarkLabel(status: SchoolCalendarEvent['status'], isZh: boolean): 
   return isZh ? '待完成' : 'To do';
 }
 
+function eventInModules(event: SchoolCalendarEvent, modules: SchoolCalendarModule[]): boolean {
+  if (event.shared) return modules.some((mod) => mod.segmentId);
+  return modules.some((mod) => mod.id === event.moduleId);
+}
+
 function timesOverlap(a: SchoolCalendarEvent, b: SchoolCalendarEvent): boolean {
   return (
     a.id !== b.id &&
@@ -304,7 +311,7 @@ function calendarAIPayload(input: {
     .filter((i) => i >= 0 && i < board.weeks.length)
     .map((i) => board.weeks[i]);
   const covered = new Set(visible.flatMap((item) => weekDays(item, board, holidayByDate)));
-  const events = board.events.filter((event) => modules.some((mod) => mod.id === event.moduleId) && covered.has(event.eventDate));
+  const events = board.events.filter((event) => eventInModules(event, modules) && covered.has(event.eventDate));
   return {
     view: 'week',
     ...base,
@@ -326,8 +333,8 @@ function calendarAIPayload(input: {
             .map((event): SchoolCalendarAIWeekEvent => {
               const mod = modules.find((item) => item.id === event.moduleId);
               return {
-                nameZh: mod?.nameZh ?? '',
-                nameEn: mod?.nameEn ?? '',
+                nameZh: event.shared ? '全学部' : mod?.nameZh ?? '',
+                nameEn: event.shared ? 'Whole school' : mod?.nameEn ?? '',
                 startTime: event.startTime,
                 endTime: event.endTime,
                 title: event.title,
@@ -375,7 +382,7 @@ export default function SchoolCalendar({
   const [eventWeekId, setEventWeekId] = useState('');
   const [eventModuleId, setEventModuleId] = useState('');
   const [holidayDays, setHolidayDays] = useState<PublicHolidayDay[]>([]);
-  const [excelBusy, setExcelBusy] = useState<'export' | 'import' | null>(null);
+  const [excelBusy, setExcelBusy] = useState<'export' | 'import' | 'briefing' | null>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
 
   const reload = async (nextYear = yearId, quiet = false) => {
@@ -473,7 +480,7 @@ export default function SchoolCalendar({
   const statusCache = useRef<{ events: SchoolCalendarEvent[]; map: Map<string, SchoolCalendarEvent['status']> } | null>(null);
   const statusTicket = useRef(new Map<string, number>());
   const cycleEventStatus = (event: SchoolCalendarEvent) => {
-    if (!board?.editableModuleIds.includes(event.moduleId)) return;
+    if (!board || !canSetEventStatus(board, event)) return;
     if (!statusCache.current || statusCache.current.events !== board.events) {
       statusCache.current = {
         events: board.events,
@@ -503,6 +510,24 @@ export default function SchoolCalendar({
     const text = lines.join('\n');
     setPageError(text);
     window.alert(text);
+  };
+
+  const exportWeekBriefing = async () => {
+    if (!board || !week || excelBusy) return;
+    setExcelBusy('briefing');
+    setPageError('');
+    try {
+      await downloadWeekBriefingWorkbook({
+        board,
+        week,
+        schoolDays: weekDays(week, board, holidayByDate),
+        isZh,
+      });
+    } catch (error) {
+      setPageError(errorText(error instanceof Error ? error.message : 'internal', isZh));
+    } finally {
+      setExcelBusy(null);
+    }
   };
 
   const exportExcel = async () => {
@@ -632,6 +657,9 @@ export default function SchoolCalendar({
               <Button type="button" variant="outline" size="sm" disabled={excelBusy !== null} onClick={() => excelInputRef.current?.click()}>
                 {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
               </Button>
+              <Button type="button" variant="outline" size="sm" disabled={excelBusy !== null || !week} onClick={() => void exportWeekBriefing()}>
+                {excelBusy === 'briefing' ? (isZh ? '生成中…' : 'Preparing…') : isZh ? '本周工作提示' : 'Week briefing'}
+              </Button>
               <Button type="button" variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
                 {isZh ? '校历设置' : 'Calendar settings'}
               </Button>
@@ -751,6 +779,7 @@ function calendarDayText(iso: string, monthKey: string): string {
   return `${Number(month)}/${Number(day)}`;
 }
 
+const WHOLE_SCHOOL_CHOICE = '__whole-school__';
 const cellBorder = 'border border-slate-200 align-top';
 const cellHover = 'hover:shadow-[inset_0_0_0_999px_rgba(15,23,42,0.03)]';
 const headCell = `border border-slate-200 align-middle bg-slate-100 px-2 py-1.5 text-center text-base font-semibold text-slate-700`;
@@ -1070,6 +1099,236 @@ function monthFocusCells({
   return nodes;
 }
 
+function canSetEventStatus(board: SchoolCalendarBoard, event: SchoolCalendarEvent): boolean {
+  if (event.shared) return board.modules.some((mod) => mod.segmentId && board.editableModuleIds.includes(mod.id));
+  return board.editableModuleIds.includes(event.moduleId);
+}
+
+function WeekEventLine({
+  event,
+  board,
+  isZh,
+  clash,
+  onOpen,
+  onCycleStatus,
+}: {
+  event: SchoolCalendarEvent;
+  board: SchoolCalendarBoard;
+  isZh: boolean;
+  clash: boolean;
+  onOpen: (event: SchoolCalendarEvent) => void;
+  onCycleStatus: (event: SchoolCalendarEvent) => void;
+}) {
+  const canSetStatus = canSetEventStatus(board, event);
+  const mark = statusMarkLabel(event.status, isZh);
+  const parts = [
+    { text: `${event.startTime}–${event.endTime}`, className: 'tabular-nums text-slate-500' },
+    { text: event.title, className: 'text-slate-800' },
+    { text: event.location, className: 'text-slate-500' },
+    { text: staffName(board, event.ownerUserId, isZh), className: 'text-slate-600' },
+  ].filter((part) => part.text.trim());
+  const markClass =
+    event.status === 'done'
+      ? 'border-emerald-600 bg-emerald-600 text-white'
+      : event.status === 'cancelled'
+        ? 'border-slate-400 bg-white text-slate-500'
+        : 'border-slate-300 bg-white';
+  return (
+    <div className="relative z-10 flex min-w-0 items-start gap-0.5">
+      <button
+        type="button"
+        disabled={!canSetStatus}
+        title={mark}
+        aria-label={mark}
+        className={`mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border ${markClass} disabled:cursor-default`}
+        onClick={() => onCycleStatus(event)}
+      >
+        {event.status === 'done' ? <Check className="h-2.5 w-2.5" strokeWidth={3} /> : null}
+        {event.status === 'cancelled' ? <X className="h-2.5 w-2.5" strokeWidth={3} /> : null}
+      </button>
+      <button
+        type="button"
+        className={`block min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-slate-50 ${clash ? 'bg-amber-50 hover:bg-amber-100/50' : ''} ${event.status === 'cancelled' ? 'opacity-50 line-through' : ''}`}
+        onClick={() => onOpen(event)}
+      >
+        {parts.map((part, partIndex) => (
+          <span key={partIndex} className={part.className}>
+            {partIndex > 0 ? ' ' : ''}
+            {part.text}
+          </span>
+        ))}
+      </button>
+    </div>
+  );
+}
+
+function WeekModuleSlot({
+  dayEvents,
+  events,
+  board,
+  isZh,
+  canAdd,
+  onAdd,
+  onOpen,
+  onCycleStatus,
+}: {
+  dayEvents: SchoolCalendarEvent[];
+  events: SchoolCalendarEvent[];
+  board: SchoolCalendarBoard;
+  isZh: boolean;
+  canAdd: boolean;
+  onAdd: () => void;
+  onOpen: (event: SchoolCalendarEvent) => void;
+  onCycleStatus: (event: SchoolCalendarEvent) => void;
+}) {
+  return (
+    <div className={`group/cell relative h-full min-h-8 min-w-0 p-1 ${cellHover}`}>
+      <div className="flex min-w-0 flex-col gap-1">
+        {dayEvents.map((event) => (
+          <WeekEventLine
+            key={event.id}
+            event={event}
+            board={board}
+            isZh={isZh}
+            clash={events.some((other) => timesOverlap(event, other))}
+            onOpen={onOpen}
+            onCycleStatus={onCycleStatus}
+          />
+        ))}
+      </div>
+      {canAdd && dayEvents.length === 0 ? (
+        <button type="button" aria-label={isZh ? '添加事项' : 'Add event'} className="absolute inset-0" onClick={onAdd}>
+          <Plus className="pointer-events-none absolute left-1/2 top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/cell:opacity-100" />
+        </button>
+      ) : null}
+      {canAdd && dayEvents.length > 0 ? (
+        <button
+          type="button"
+          aria-label={isZh ? '添加事项' : 'Add event'}
+          className="pointer-events-none absolute right-0.5 top-0.5 z-20 flex h-5 w-5 items-center justify-center rounded bg-white/90 text-slate-400 opacity-0 shadow-sm hover:text-slate-700 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/cell:pointer-events-auto group-hover/cell:opacity-100"
+          onClick={onAdd}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function weekDayModuleCells({
+  modules,
+  events,
+  date,
+  surface,
+  board,
+  isZh,
+  canEditModule,
+  onAdd,
+  onOpen,
+  onCycleStatus,
+}: {
+  modules: SchoolCalendarModule[];
+  events: SchoolCalendarEvent[];
+  date: string;
+  surface: string;
+  board: SchoolCalendarBoard;
+  isZh: boolean;
+  canEditModule: (moduleId: string, boundaryDate: string) => boolean;
+  onAdd: (moduleId: string) => void;
+  onOpen: (event: SchoolCalendarEvent) => void;
+  onCycleStatus: (event: SchoolCalendarEvent) => void;
+}): ReactNode[] {
+  const byTime = (list: SchoolCalendarEvent[]) => [...list].sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const sharedEvents = byTime(events.filter((event) => event.eventDate === date && event.shared));
+  const localEvents = (moduleId: string) =>
+    byTime(events.filter((event) => event.eventDate === date && !event.shared && event.moduleId === moduleId));
+  const nodes: ReactNode[] = [];
+  let index = 0;
+  while (index < modules.length) {
+    const mod = modules[index];
+    if (!mod.segmentId) {
+      nodes.push(
+        <td key={mod.id} className={`${cellBorder} ${cellHover} overflow-hidden ${surface} p-0`}>
+          <WeekModuleSlot
+            dayEvents={localEvents(mod.id)}
+            events={events}
+            board={board}
+            isZh={isZh}
+            canAdd={canEditModule(mod.id, date)}
+            onAdd={() => onAdd(mod.id)}
+            onOpen={onOpen}
+            onCycleStatus={onCycleStatus}
+          />
+        </td>,
+      );
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < modules.length && modules[end].segmentId) end += 1;
+    const run = modules.slice(index, end);
+    nodes.push(
+      <td key={run.map((item) => item.id).join('-')} colSpan={run.length} className={`${cellBorder} h-px overflow-hidden ${surface} p-0`}>
+        <div className="flex h-full min-h-full flex-col">
+          {sharedEvents.length > 0 && run.length > 1 ? (
+            <div className="border-b border-slate-200 p-1">
+              <div className="flex min-w-0 flex-col gap-1">
+                {sharedEvents.map((event) => (
+                  <WeekEventLine
+                    key={event.id}
+                    event={event}
+                    board={board}
+                    isZh={isZh}
+                    clash={events.some((other) => timesOverlap(event, other))}
+                    onOpen={onOpen}
+                    onCycleStatus={onCycleStatus}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="grid min-h-8 flex-1" style={{ gridTemplateColumns: `repeat(${run.length}, minmax(0, 1fr))` }}>
+            {run.map((item, itemIndex) => (
+              <div key={item.id} className={`flex h-full min-h-8 flex-col ${itemIndex > 0 ? 'border-l border-slate-200' : ''}`}>
+                {sharedEvents.length > 0 && run.length === 1 ? (
+                  <div className="border-b border-slate-200 p-1">
+                    <p className="px-1 pb-0.5 text-[10px] leading-none text-slate-400">{isZh ? '全学部' : 'Whole school'}</p>
+                    <div className="flex min-w-0 flex-col gap-1">
+                      {sharedEvents.map((event) => (
+                        <WeekEventLine
+                          key={event.id}
+                          event={event}
+                          board={board}
+                          isZh={isZh}
+                          clash={events.some((other) => timesOverlap(event, other))}
+                          onOpen={onOpen}
+                          onCycleStatus={onCycleStatus}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                <WeekModuleSlot
+                  dayEvents={localEvents(item.id)}
+                  events={events}
+                  board={board}
+                  isZh={isZh}
+                  canAdd={canEditModule(item.id, date)}
+                  onAdd={() => onAdd(item.id)}
+                  onOpen={onOpen}
+                  onCycleStatus={onCycleStatus}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </td>,
+    );
+    index = end;
+  }
+  return nodes;
+}
+
 function WeekBoard({
   board,
   week,
@@ -1102,7 +1361,7 @@ function WeekBoard({
   const coveredDates = new Set(visible.flatMap((item) => weekDays(item, board, holidayByDate)));
   const selectedSpan = formatDaySpan(weekDays(week, board, holidayByDate));
   const events = board.events.filter(
-    (event) => modules.some((mod) => mod.id === event.moduleId) && coveredDates.has(event.eventDate),
+    (event) => eventInModules(event, modules) && coveredDates.has(event.eventDate),
   );
   return (
     <div className="mt-4">
@@ -1188,81 +1447,17 @@ function WeekBoard({
                       {off ? <span className="block text-[11px] text-slate-400">{isZh ? '放假' : 'Off'}</span> : null}
                       {makeup ? <span className="block text-[11px] text-slate-400">{isZh ? '补班' : 'Makeup'}</span> : null}
                     </td>
-                    {modules.map((mod) => {
-                      const dayEvents = events
-                        .filter((event) => event.eventDate === date && event.moduleId === mod.id)
-                        .sort((a, b) => a.startTime.localeCompare(b.startTime));
-                      const canAdd = canEditModule(mod.id, date);
-                      return (
-                        <td key={mod.id} className={`group/cell relative ${cellBorder} ${cellHover} overflow-hidden ${off ? 'bg-slate-50/80' : rowBg} p-1`}>
-                          <div className="flex min-h-8 min-w-0 flex-col gap-1">
-                            {dayEvents.map((event) => {
-                              const clash = events.some((other) => timesOverlap(event, other));
-                              const canSetStatus = board.editableModuleIds.includes(event.moduleId);
-                              const mark = statusMarkLabel(event.status, isZh);
-                              const parts = [
-                                { text: `${event.startTime}–${event.endTime}`, className: 'tabular-nums text-slate-500' },
-                                { text: event.title, className: 'text-slate-800' },
-                                { text: event.location, className: 'text-slate-500' },
-                                { text: staffName(board, event.ownerUserId, isZh), className: 'text-slate-600' },
-                              ].filter((part) => part.text.trim());
-                              const markClass =
-                                event.status === 'done'
-                                  ? 'border-emerald-600 bg-emerald-600 text-white'
-                                  : event.status === 'cancelled'
-                                    ? 'border-slate-400 bg-white text-slate-500'
-                                    : 'border-slate-300 bg-white';
-                              return (
-                                <div key={event.id} className="relative z-10 flex min-w-0 items-start gap-0.5">
-                                  <button
-                                    type="button"
-                                    disabled={!canSetStatus}
-                                    title={mark}
-                                    aria-label={mark}
-                                    className={`mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border ${markClass} disabled:cursor-default`}
-                                    onClick={() => onCycleStatus(event)}
-                                  >
-                                    {event.status === 'done' ? <Check className="h-2.5 w-2.5" strokeWidth={3} /> : null}
-                                    {event.status === 'cancelled' ? <X className="h-2.5 w-2.5" strokeWidth={3} /> : null}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`block min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-slate-50 ${clash ? 'bg-amber-50 hover:bg-amber-100/50' : ''} ${event.status === 'cancelled' ? 'opacity-50 line-through' : ''}`}
-                                    onClick={() => onOpen(event)}
-                                  >
-                                    {parts.map((part, partIndex) => (
-                                      <span key={partIndex} className={part.className}>
-                                        {partIndex > 0 ? ' ' : ''}
-                                        {part.text}
-                                      </span>
-                                    ))}
-                                  </button>
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {canAdd && dayEvents.length === 0 ? (
-                            <button
-                              type="button"
-                              aria-label={isZh ? '添加事项' : 'Add event'}
-                              className="absolute inset-0"
-                              onClick={() => onAdd(item.id, date, mod.id)}
-                            >
-                              <Plus className="pointer-events-none absolute left-1/2 top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/cell:opacity-100" />
-                            </button>
-                          ) : null}
-                          {canAdd && dayEvents.length > 0 ? (
-                            <button
-                              type="button"
-                              aria-label={isZh ? '添加事项' : 'Add event'}
-                              className="pointer-events-none absolute right-0.5 top-0.5 z-20 flex h-5 w-5 items-center justify-center rounded bg-white/90 text-slate-400 opacity-0 shadow-sm hover:text-slate-700 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/cell:pointer-events-auto group-hover/cell:opacity-100"
-                              onClick={() => onAdd(item.id, date, mod.id)}
-                            >
-                              <Plus className="h-3.5 w-3.5" />
-                            </button>
-                          ) : null}
-                        </td>
-                      );
+                    {weekDayModuleCells({
+                      modules,
+                      events,
+                      date,
+                      surface: off ? 'bg-slate-50/80' : rowBg,
+                      board,
+                      isZh,
+                      canEditModule,
+                      onAdd: (moduleId) => onAdd(item.id, date, moduleId),
+                      onOpen,
+                      onCycleStatus,
                     })}
                   </tr>
                 );
@@ -1612,7 +1807,9 @@ function EventDialog({
   onSaved: () => void;
 }) {
   const editableModules = board.modules.filter((mod) => board.editableModuleIds.includes(mod.id));
-  const [moduleId, setModuleId] = useState(event?.moduleId ?? (initialModuleId || editableModules[0]?.id || ''));
+  const [moduleChoice, setModuleChoice] = useState(
+    event?.shared ? WHOLE_SCHOOL_CHOICE : (event?.moduleId ?? (initialModuleId || editableModules[0]?.id || '')),
+  );
   const [date, setDate] = useState(event?.eventDate ?? initialDate);
   const [startTime, setStartTime] = useState(event?.startTime ?? '08:00');
   const [endTime, setEndTime] = useState(event?.endTime ?? '09:00');
@@ -1623,13 +1820,33 @@ function EventDialog({
   const [note, setNote] = useState(event?.note ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const locked = event ? !canEditModule(event.moduleId, event.eventDate) : !canEditModule(moduleId, date);
+  const shared = moduleChoice === WHOLE_SCHOOL_CHOICE;
+  const canEditShared = (boundaryDate: string) =>
+    board.modules.some((mod) => mod.segmentId && canEditModule(mod.id, boundaryDate));
+  const locked = shared
+    ? !canEditShared(event?.eventDate ?? date) || !canEditShared(date)
+    : event && !event.shared
+      ? !canEditModule(event.moduleId, event.eventDate)
+      : !canEditModule(moduleChoice, date);
+  const divisionAnchor = board.modules.find((mod) => mod.segmentId && mod.id === event?.moduleId)?.id
+    ?? board.modules.find((mod) => mod.segmentId)?.id
+    ?? '';
+  let wholeSchoolPlaced = false;
+  const moduleOptions = board.modules.flatMap((mod, index) => {
+    const option = { value: mod.id, label: isZh ? mod.nameZh : mod.nameEn };
+    const next = board.modules[index + 1];
+    if (!wholeSchoolPlaced && mod.segmentId && !next?.segmentId) {
+      wholeSchoolPlaced = true;
+      return [option, { value: WHOLE_SCHOOL_CHOICE, label: isZh ? '全学部' : 'Whole school' }];
+    }
+    return [option];
+  });
   const workDays = weekDays(week, board, holidayByDate);
   const days = date && !workDays.includes(date) ? [...workDays, date].sort() : workDays;
   const save = () => {
     setBusy(true);
     const payload = {
-      moduleId,
+      moduleId: shared ? divisionAnchor : moduleChoice,
       eventDate: date,
       startTime,
       endTime,
@@ -1639,6 +1856,7 @@ function EventDialog({
       participantIds,
       status: event?.status ?? 'planned',
       note,
+      shared,
     };
     const task = event ? updateSchoolCalendarEvent(event.id, payload) : createSchoolCalendarEvent(board.academicYearId, payload);
     task
@@ -1655,9 +1873,14 @@ function EventDialog({
         <div className="space-y-3 text-sm">
           <label className="block text-slate-600">
             {isZh ? '模块' : 'Module'}
-            <MenuSelect className="mt-1 w-full" value={moduleId} disabled={locked} onChange={(e) => setModuleId(e.target.value)}>
-              {board.modules.map((mod) => (
-                <option key={mod.id} value={mod.id}>{isZh ? mod.nameZh : mod.nameEn}</option>
+            <MenuSelect
+              className="mt-1 w-full"
+              value={moduleChoice}
+              disabled={locked}
+              onChange={(e) => setModuleChoice(e.target.value)}
+            >
+              {moduleOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </MenuSelect>
           </label>
@@ -1728,7 +1951,7 @@ function EventDialog({
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>{isZh ? '关闭' : 'Close'}</Button>
           {!locked ? (
-            <Button type="button" disabled={busy || !title.trim()} onClick={save}>{isZh ? '保存' : 'Save'}</Button>
+            <Button type="button" disabled={busy || !title.trim() || (shared && !divisionAnchor)} onClick={save}>{isZh ? '保存' : 'Save'}</Button>
           ) : null}
         </DialogFooter>
       </DialogContent>

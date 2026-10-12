@@ -23,6 +23,7 @@ import type {
 import { loadAcademicYears, loadAllClasses, loadStudents, loadEnrollments } from '../lib/classStorage';
 import { latestAcademicYear, useTermForYear } from '../lib/academicPeriodDefault';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
+import { downloadAcademicReportWorkbook, parseAcademicReportWorkbook } from '../lib/academicReportExcel';
 import { fullUnifiedLevelTextFromPreset } from '../lib/reportPresetUnifiedLevels';
 import {
   reportLetterGradeFromScore,
@@ -1220,6 +1221,9 @@ export default function StudentPortrait({
   const [workbenchStudentAnalysisRows, setWorkbenchStudentAnalysisRows] = useState<StudentAnalysisRowDraft[]>([]);
   const [workbenchSaving, setWorkbenchSaving] = useState(false);
   const [workbenchPdfExporting, setWorkbenchPdfExporting] = useState(false);
+  const [reportExchangeBusy, setReportExchangeBusy] = useState(false);
+  const [reportDataVersion, setReportDataVersion] = useState(0);
+  const reportExchangeInputRef = useRef<HTMLInputElement>(null);
   const [studentReportPdfExporting, setStudentReportPdfExporting] = useState(false);
   const [classReportOptions, setClassReportOptions] = useState<ReleasedClassReportOption[]>([]);
   const [selectedClassReportKey, setSelectedClassReportKey] = useState('');
@@ -1417,11 +1421,72 @@ export default function StudentPortrait({
   }, [activeEnrollments]);
   const workbenchClassStudents = useMemo(() => {
     if (!workbenchClassId) return [] as Student[];
+    const roster = workbenchProgress?.classes.find((cls) => cls.classId === workbenchClassId)?.roster;
+    if (roster && roster.length > 0) {
+      return roster.map((row) => studentMap.get(row.studentId) ?? {
+        id: row.studentId,
+        name: row.studentName,
+        nameZh: row.studentName,
+        gender: 'other' as const,
+      });
+    }
     const ids = studentIdsByClass.get(workbenchClassId) ?? [];
     return ids.map((id) => studentMap.get(id)).filter((s): s is Student => !!s);
-  }, [workbenchClassId, studentIdsByClass, studentMap]);
+  }, [workbenchClassId, studentIdsByClass, studentMap, workbenchProgress]);
 
   const isAdminRole = user?.role === 'admin' || user?.role === 'system-admin';
+
+  const exportCurrentAcademicReport = async () => {
+    if (!workbenchTemplateId) return;
+    setReportExchangeBusy(true);
+    setWorkbenchError(null);
+    try {
+      const payload = await api.exportAcademicReport(workbenchTemplateId);
+      downloadAcademicReportWorkbook(payload);
+    } catch (e: unknown) {
+      setWorkbenchError((e as Error)?.message || (isZh ? '导出学业报告失败' : 'Failed to export the report'));
+    } finally {
+      setReportExchangeBusy(false);
+    }
+  };
+
+  const importCurrentAcademicReport = async (file: File) => {
+    if (!workbenchTemplateId) return;
+    setReportExchangeBusy(true);
+    setWorkbenchError(null);
+    setWorkbenchSaveHint(null);
+    try {
+      const parsed = parseAcademicReportWorkbook(await file.arrayBuffer());
+      if (!parsed.payload || parsed.errors.length > 0) {
+        alert((isZh ? '导入失败：\n' : 'Import failed:\n') + parsed.errors.join('\n'));
+        return;
+      }
+      const selected = workbenchTemplates.find((tpl) => tpl.id === workbenchTemplateId);
+      const fileTitle = parsed.payload.meta.templateTitle.trim();
+      const selectedTitle = (selected?.title ?? '').trim();
+      if (fileTitle && selectedTitle && fileTitle !== selectedTitle) {
+        const ok = window.confirm(
+          isZh
+            ? `文件中的报告是「${fileTitle}」，将写入当前选中的「${selectedTitle}」。已有同学的这份报告会被文件中的内容更新，不会删除文件里没有的学生。继续？`
+            : `The file is "${fileTitle}" and will be written into "${selectedTitle}". Existing rows for students in the file are updated. Students absent from the file are kept. Continue?`,
+        );
+        if (!ok) return;
+      }
+      const result = await api.importAcademicReport(workbenchTemplateId, parsed.payload);
+      setReportDataVersion((version) => version + 1);
+      const warningText = result.warnings.slice(0, 8).join('\n');
+      setWorkbenchSaveHint(
+        isZh
+          ? `已导入 ${result.importedStudents} 名学生的学业报告。${result.warnings.length ? `有 ${result.warnings.length} 条提示。` : ''}`
+          : `Imported ${result.importedStudents} students.${result.warnings.length ? ` ${result.warnings.length} notices.` : ''}`,
+      );
+      if (warningText) alert((isZh ? '导入完成，但有提示：\n' : 'Imported with notices:\n') + warningText);
+    } catch (e: unknown) {
+      setWorkbenchError((e as Error)?.message || (isZh ? '导入学业报告失败' : 'Failed to import the report'));
+    } finally {
+      setReportExchangeBusy(false);
+    }
+  };
   const canUseTeacherWorkbench = !isStudentSelf && user?.role === 'teacher';
   const canAdminViewTeacherReports = !isStudentSelf && isAdminRole;
   const canAccessAcademicReportsTab = canUseTeacherWorkbench || canAdminViewTeacherReports;
@@ -2081,6 +2146,7 @@ export default function StudentPortrait({
     user?.role,
     workbenchAdminViewing,
     academicReportsVisitSeq,
+    reportDataVersion,
   ]);
 
   useEffect(() => {
@@ -3998,73 +4064,108 @@ export default function StudentPortrait({
                     ? '选择教师后，可只读查看其负责的班级学业报告、学业质量评价、班级整体分析与个别学生分析完成情况。'
                     : 'Select a teacher to view assigned classes, quality evaluation, class analysis, individual student notes, and completion (read-only).'
                   : isZh
-                    ? '先选择本次学业报告，再查看你需要完成的班级与实时进度。'
-                    : 'Select a report first, then work through your assigned classes with live progress.'}
+                    ? '先选择本次学业报告，再查看你需要完成的班级与实时进度。已经保存的内容固定在当时的班级，学生后来转班或归档不会改写这份报告。'
+                    : 'Select a report first, then work through your assigned classes with live progress. Saved entries stay with the class they were written for.'}
               </div>
-              <FilterToolbar>
-                <AcademicYearSelect
-                  isZh={isZh}
-                  years={years}
-                  value={currentYearId || ''}
-                  onChange={(id) => {
-                    workbenchManualPickRef.current = false;
-                    setCurrentYearId(id || null);
-                  }}
-                  allowEmpty
-                  emptyLabel={isZh ? '选择学年' : 'Select year'}
-                />
-                <TermSelect
-                  isZh={isZh}
-                  value={reportTerm}
-                  onChange={(next) => {
-                    workbenchManualPickRef.current = false;
-                    setReportTerm(next);
-                  }}
-                />
-                <FilterSelect
-                  width="report"
-                  value={workbenchTemplateId}
-                  onChange={(e) => {
-                    workbenchManualPickRef.current = true;
-                    setWorkbenchTemplateId(e.target.value);
-                  }}
-                >
-                  <option value="">{isZh ? '选择学业报告' : 'Select report'}</option>
-                  {workbenchTemplates
-                    .filter((tpl) => !!tpl.id)
-                    .map((tpl) => (
-                      <option key={tpl.id as string} value={tpl.id as string}>
-                        {tpl.title || (isZh ? '未命名评价' : 'Untitled evaluation')}
-                      </option>
-                    ))}
-                </FilterSelect>
-                {workbenchAdminViewing ? (
+              <div className="flex w-full flex-wrap items-end gap-2 sm:gap-3">
+                <FilterToolbar>
+                  <AcademicYearSelect
+                    isZh={isZh}
+                    years={years}
+                    value={currentYearId || ''}
+                    onChange={(id) => {
+                      workbenchManualPickRef.current = false;
+                      setCurrentYearId(id || null);
+                    }}
+                    allowEmpty
+                    emptyLabel={isZh ? '选择学年' : 'Select year'}
+                  />
+                  <TermSelect
+                    isZh={isZh}
+                    value={reportTerm}
+                    onChange={(next) => {
+                      workbenchManualPickRef.current = false;
+                      setReportTerm(next);
+                    }}
+                  />
                   <FilterSelect
-                    width="teacher"
-                    value={adminViewTeacherId}
-                    onChange={(e) => setAdminViewTeacherId(e.target.value)}
-                    disabled={!workbenchTemplateId || adminViewTeachers.length === 0}
+                    width="report"
+                    value={workbenchTemplateId}
+                    onChange={(e) => {
+                      workbenchManualPickRef.current = true;
+                      setWorkbenchTemplateId(e.target.value);
+                    }}
                   >
-                    <option value="">{isZh ? '选择教师' : 'Select teacher'}</option>
-                    {adminViewTeachers.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
+                    <option value="">{isZh ? '选择学业报告' : 'Select report'}</option>
+                    {workbenchTemplates
+                      .filter((tpl) => !!tpl.id)
+                      .map((tpl) => (
+                        <option key={tpl.id as string} value={tpl.id as string}>
+                          {tpl.title || (isZh ? '未命名评价' : 'Untitled evaluation')}
+                        </option>
+                      ))}
                   </FilterSelect>
+                  {workbenchAdminViewing ? (
+                    <FilterSelect
+                      width="teacher"
+                      value={adminViewTeacherId}
+                      onChange={(e) => setAdminViewTeacherId(e.target.value)}
+                      disabled={!workbenchTemplateId || adminViewTeachers.length === 0}
+                    >
+                      <option value="">{isZh ? '选择教师' : 'Select teacher'}</option>
+                      {adminViewTeachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </FilterSelect>
+                  ) : null}
+                  {workbenchReadOnly ? (
+                    <span className="inline-flex h-10 items-center rounded-full border border-amber-300 bg-amber-50 px-3 text-xs font-medium text-amber-800">
+                      {workbenchAdminViewing
+                        ? isZh
+                          ? '管理员只读查看'
+                          : 'Admin read-only view'
+                        : isZh
+                          ? '当前为只读模式（已停发）'
+                          : 'Read-only mode (stopped)'}
+                    </span>
+                  ) : null}
+                </FilterToolbar>
+                {isAdminRole ? (
+                  <div className="ml-auto flex items-center gap-2">
+                    <input
+                      ref={reportExchangeInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = '';
+                        if (file) void importCurrentAcademicReport(file);
+                      }}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10"
+                      disabled={!workbenchTemplateId || reportExchangeBusy}
+                      onClick={() => void exportCurrentAcademicReport()}
+                    >
+                      {reportExchangeBusy ? (isZh ? '处理中…' : 'Working…') : isZh ? '导出报告' : 'Export report'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10"
+                      disabled={!workbenchTemplateId || reportExchangeBusy}
+                      onClick={() => reportExchangeInputRef.current?.click()}
+                    >
+                      {isZh ? '导入报告' : 'Import report'}
+                    </Button>
+                  </div>
                 ) : null}
-                {workbenchReadOnly ? (
-                  <span className="inline-flex h-10 items-center rounded-full border border-amber-300 bg-amber-50 px-3 text-xs font-medium text-amber-800">
-                    {workbenchAdminViewing
-                      ? isZh
-                        ? '管理员只读查看'
-                        : 'Admin read-only view'
-                      : isZh
-                        ? '当前为只读模式（已停发）'
-                        : 'Read-only mode (stopped)'}
-                  </span>
-                ) : null}
-              </FilterToolbar>
+              </div>
               {workbenchError && (
                 <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
                   {workbenchError}

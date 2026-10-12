@@ -67,6 +67,7 @@ export interface AcademicYearPromotionPreview {
     gradeHeadRelease: Array<{ scopeLabel: string; teacherName: string }>;
     subjectGroupHeadCopy: Array<{ scopeLabel: string; teacherName: string }>;
     subjectGroupMembersCopied: number;
+    coordinatorCopy?: Array<{ title: string; teacherName: string }>;
   };
   unchanged: string[];
   warnings: string[];
@@ -485,6 +486,8 @@ export interface TeacherReportTemplateClassProgress {
   subjectCompletedStudents?: number;
   /** 本班在班主任综合评价开启时，已填写班主任评语的学生数 */
   homeroomCompletedStudents?: number;
+  /** 本班这份报告的学生：已填写过的学生固定在当时班级，不再跟着后来的转班走 */
+  roster?: Array<{ studentId: string; studentName: string }>;
 }
 
 export interface TeacherReportTemplateProgress {
@@ -565,6 +568,19 @@ export interface StaffingAssignment {
 }
 
 export type FunctionalRoleType = 'grade-head' | 'subject-group-head';
+
+export type CoordinatorPermission = 'grade-management' | 'teaching-management';
+
+export interface DivisionCoordinatorPost {
+  id: string;
+  academicYearId: string;
+  title: string;
+  segmentIds: string[];
+  chargeModules: string[];
+  permissions: CoordinatorPermission[];
+  teacherId: string | null;
+  teacherName: string | null;
+}
 
 export interface FunctionalRoleAssignment {
   id: string;

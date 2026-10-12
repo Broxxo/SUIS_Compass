@@ -1,6 +1,7 @@
 import { STAFFING_HOMEROOM_SUBJECT_KEY, type TeachingSubjectGroup } from '@repo/shared';
 import pool from '../config/database.js';
 import { ensureStaffingTables } from './ensureStaffingTables.js';
+import { coordinatorLedGroupIds } from './divisionCoordinators.js';
 import { listFunctionalRoleAssignments } from './functionalRoleAssignments.js';
 import { loadSchoolTeachingSubjectGroups } from './schoolTeachingSubjectGroups.js';
 import {
@@ -306,6 +307,8 @@ export async function listHeadedSubjectGroupIds(
       ids.add(r.scopeKey);
     }
   }
+  const extra = await coordinatorLedGroupIds(teacherId, academicYearId);
+  for (const id of extra) ids.add(id);
   return ids;
 }
 

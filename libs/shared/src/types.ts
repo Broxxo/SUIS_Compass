@@ -81,4 +81,6 @@ export type User = {
   nameEn?: string | null;
   /** 学籍 students.id，仅学生登录账号有值，用于画像等自有数据接口 */
   studentId?: string | null;
+  /** 模块额外授权（不跟学年），如 open-lessons、admin */
+  moduleGrants?: string[];
 };

@@ -123,6 +123,8 @@ import CreateStudentDialog from './CreateStudentDialog';
 import FoundationSettingsPanel, { type FoundationSubTab } from './admin/FoundationSettingsPanel';
 import PromoteAcademicYearPreviewDialog from './admin/PromoteAcademicYearPreviewDialog';
 import StaffingSettingsPanel, { staffingSubTabGroup, type StaffingSubTab } from './admin/StaffingSettingsPanel';
+import PermissionSettingsPanel from './admin/PermissionSettingsPanel';
+import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from './ui/segment-tab-button';
 import SelfStudyStaffingPanel from './admin/SelfStudyStaffingPanel';
 import ElectiveStaffingPanel from './admin/ElectiveStaffingPanel';
 import DatabaseSettingsPanel, { type DatabaseSubTab } from './admin/DatabaseSettingsPanel';
@@ -904,6 +906,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   const [staffingCategoryOrderNonce, setStaffingCategoryOrderNonce] = useState(0);
   /** 岗位管理内：职能岗位 | 课程岗位 | 周课时统计 */
   const [staffingSubTab, setStaffingSubTab] = useState<StaffingSubTab>('grade-mgmt');
+  const [usersSubTab, setUsersSubTab] = useState<'all-users' | 'permissions'>('all-users');
   const [functionalRoleAssignments, setFunctionalRoleAssignments] = useState<FunctionalRoleAssignment[]>([]);
   const [divisionCoordinators, setDivisionCoordinators] = useState<DivisionCoordinatorPost[]>([]);
   const [divisionCoordinatorSaving, setDivisionCoordinatorSaving] = useState(false);
@@ -946,16 +949,18 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   const isSystemAdmin = currentUser?.role === 'system-admin';
   const staffingDataTabActive = adminTab === 'staffing';
 
-  /** 当前用户可创建的权限类型：系统管理员可创建管理员+教师，管理员只能创建教师 */
+  /** 当前用户可创建的权限类型：系统管理员可创建系统管理员/管理员/教师，管理员只能创建教师 */
   const assignableRoles = useMemo((): User['role'][] => {
-    if (currentUser?.role === 'system-admin') return ['admin', 'teacher'];
+    if (currentUser?.role === 'system-admin') return ['system-admin', 'admin', 'teacher'];
     if (currentUser?.role === 'admin') return ['teacher'];
     return [];
   }, [currentUser?.role]);
 
   /** 列表展示：按当前登录身份过滤教职工 */
   const displayedUsers = useMemo(() => {
-    if (currentUser?.role === 'system-admin') return users.filter((u) => u.role === 'admin' || u.role === 'teacher');
+    if (currentUser?.role === 'system-admin') {
+      return users.filter((u) => u.role === 'system-admin' || u.role === 'admin' || u.role === 'teacher');
+    }
     if (currentUser?.role === 'admin') return users.filter((u) => u.role === 'teacher');
     return users;
   }, [users, currentUser?.role]);
@@ -963,7 +968,6 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   /** 当前用户可否编辑该行（权限、部门等）：学生账号不可在此编辑 */
   const canEditUser = (u: AdminUser) => {
     if (u.role === 'student') return false;
-    if (u.role === 'system-admin') return false;
     if (currentUser?.role === 'system-admin') return true;
     if (currentUser?.role === 'admin' && u.role === 'teacher') return true;
     return false;
@@ -2594,9 +2598,13 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   };
 
   const makeEmptyStaffDraft = (): StaffCreateDraftRow => {
-    const first = assignableRoles[0];
-    const role: 'admin' | 'teacher' =
-      first === 'admin' ? 'admin' : first === 'teacher' ? 'teacher' : 'teacher';
+    const role: StaffCreateDraftRow['role'] = assignableRoles.includes('teacher')
+      ? 'teacher'
+      : assignableRoles.includes('admin')
+        ? 'admin'
+        : assignableRoles.includes('system-admin')
+          ? 'system-admin'
+          : 'teacher';
     const id =
       typeof crypto !== 'undefined' && crypto.randomUUID
         ? crypto.randomUUID()
@@ -2644,7 +2652,10 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     setError(null);
     try {
       const buf = await file.arrayBuffer();
-      const allowed = assignableRoles.filter((x): x is 'admin' | 'teacher' => x === 'admin' || x === 'teacher');
+      const allowed = assignableRoles.filter(
+        (x): x is StaffCreateDraftRow['role'] =>
+          x === 'system-admin' || x === 'admin' || x === 'teacher',
+      );
       const parsed = parseStaffImportWorkbook(buf, allowed.length > 0 ? allowed : ['teacher']);
       if (parsed.length === 0) {
         setError(
@@ -2821,8 +2832,12 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     }
   };
 
-  const handleRoleChange = async (user: AdminUser, newRole: 'admin' | 'teacher') => {
+  const handleRoleChange = async (user: AdminUser, newRole: 'system-admin' | 'admin' | 'teacher') => {
     if (user.role === newRole) return;
+    if (user.id === currentUser?.id) {
+      setError(isZh ? '不能修改自己的权限。' : 'You cannot change your own role.');
+      return;
+    }
     try {
       await updateUserRole(user.id, newRole);
       setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, role: newRole } : u)));
@@ -5625,51 +5640,6 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     return rows;
   }, [staffingLoadGrandRowsBase, staffingLoadGrandFilterPrimary, staffingLoadGrandSort]);
 
-  const permissionMatrix = useMemo(() => {
-    const L = (zh: string, en: string) => (isZh ? zh : en);
-    return [
-      {
-        role: 'system-admin' as const,
-        panel: true,
-        users: L('全管', 'Full'),
-        foundation: L('全管', 'Full'),
-        classes: L('全管', 'Full'),
-        courses: L('新建/维护', 'Create/edit'),
-        staffing: L('全管（含周课时统计）', 'Full incl. weekly load'),
-        students: L('增删改', 'Full'),
-        portrait: L('创建与管理', 'Create & manage'),
-        teacherPortrait: L('创建与管理', 'Create & manage'),
-        database: L('只读', 'Read'),
-      },
-      {
-        role: 'admin' as const,
-        panel: true,
-        users: L('可管教师', 'Manage teachers'),
-        foundation: L('学年只读；学段/组织可编', 'Years view; stages & org edit'),
-        classes: L('可编', 'Edit'),
-        courses: L('无新建；可编单元', 'No new course; units'),
-        staffing: L('全管（含周课时统计）', 'Full incl. weekly load'),
-        students: L('可增不可删', 'Add, not delete'),
-        portrait: L('创建与管理', 'Create & manage'),
-        teacherPortrait: L('创建与管理', 'Create & manage'),
-        database: L('—', '—'),
-      },
-      {
-        role: 'teacher' as const,
-        panel: false,
-        users: L('—', '—'),
-        foundation: L('—', '—'),
-        classes: L('仅查看', 'View'),
-        courses: L('—', '—'),
-        staffing: L('—', '—'),
-        students: L('关联班级', 'Linked classes'),
-        portrait: L('任课范围', 'Teaching scope'),
-        teacherPortrait: L('—', '—'),
-        database: L('—', '—'),
-      },
-    ];
-  }, [isZh]);
-
   useEffect(() => {
     if (!onToggleAI) return;
     const tabLabels: Record<string, { zh: string; en: string }> = {
@@ -5796,48 +5766,23 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
         )}
         {adminTab === 'users' && (
         <>
-        <section className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6">
-          <h2 className="text-base sm:text-lg font-semibold text-slate-800 mb-3">
-            {isZh ? '权限说明' : 'Permission reference'}
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-[920px] w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
-              <thead>
-                <tr className="bg-slate-100 text-left text-xs text-slate-600">
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '权限' : 'Access level'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '后台' : 'Panel'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '用户管理' : 'Users'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学校设置' : 'School settings'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '班级管理' : 'Classes'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生管理' : 'Students'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '课程管理' : 'Courses'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '岗位安排' : 'Staffing'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '学生画像' : 'Student portrait'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '教师画像' : 'Teacher portrait'}</th>
-                  <th className="py-2 px-2 font-medium whitespace-nowrap">{isZh ? '数据库' : 'Database'}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {permissionMatrix.map((row) => (
-                  <tr key={row.role} className="border-t border-slate-100">
-                    <td className="py-2 px-2 font-medium text-slate-800 whitespace-nowrap">{ROLE_LABELS[row.role][isZh ? 'zh' : 'en']}</td>
-                    <td className="py-2 px-2 whitespace-nowrap">{row.panel ? (isZh ? '✓' : 'Yes') : '—'}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.users}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.foundation}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.classes}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.students}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[7rem]">{row.courses}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.staffing}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.portrait}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[6rem]">{row.teacherPortrait}</td>
-                    <td className="py-2 px-2 text-slate-600 min-w-[5rem]">{row.database}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <SegmentTabStrip aria-label={isZh ? '用户管理' : 'Users'}>
+          <SegmentTabGroup>
+            <SegmentTabButton grouped active={usersSubTab === 'all-users'} onClick={() => setUsersSubTab('all-users')}>
+              {isZh ? '所有用户' : 'All users'}
+            </SegmentTabButton>
+            <SegmentTabButton grouped active={usersSubTab === 'permissions'} onClick={() => setUsersSubTab('permissions')}>
+              {isZh ? '权限设置' : 'Permissions'}
+            </SegmentTabButton>
+          </SegmentTabGroup>
+        </SegmentTabStrip>
 
+        {usersSubTab === 'permissions' ? (
+          <PermissionSettingsPanel isZh={isZh} teachers={users} />
+        ) : null}
+
+        {usersSubTab === 'all-users' ? (
+        <>
         <Dialog
           open={createUserDialogOpen}
           onOpenChange={(open) => {
@@ -5928,12 +5873,17 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                         <MenuSelect
                           value={row.role}
                           onChange={(e) =>
-                            updateStaffDraftRow(row.id, { role: e.target.value as 'admin' | 'teacher' })
+                            updateStaffDraftRow(row.id, {
+                              role: e.target.value as StaffCreateDraftRow['role'],
+                            })
                           }
                           className="rounded border border-slate-300 px-1 py-1 text-xs bg-white"
                         >
                           {assignableRoles
-                            .filter((r): r is 'admin' | 'teacher' => r === 'admin' || r === 'teacher')
+                            .filter(
+                              (r): r is StaffCreateDraftRow['role'] =>
+                                r === 'system-admin' || r === 'admin' || r === 'teacher',
+                            )
                             .map((r) => (
                               <option key={r} value={r}>
                                 {ROLE_LABELS[r][isZh ? 'zh' : 'en']}
@@ -6230,12 +6180,17 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                           )}
                         </td>
                         <td className="py-2 pr-4">
-                          {currentUser?.role === 'system-admin' && u.role !== 'system-admin' && u.role !== 'student' ? (
+                          {currentUser?.role === 'system-admin' &&
+                          u.role !== 'student' &&
+                          u.id !== currentUser.id ? (
                             <MenuSelect
                               value={u.role}
-                              onChange={(e) => handleRoleChange(u, e.target.value as 'admin' | 'teacher')}
+                              onChange={(e) =>
+                                handleRoleChange(u, e.target.value as 'system-admin' | 'admin' | 'teacher')
+                              }
                               className="text-sm rounded border border-slate-300 px-2 py-1 bg-white min-w-[100px]"
                             >
+                              <option value="system-admin">{ROLE_LABELS['system-admin'][isZh ? 'zh' : 'en']}</option>
                               <option value="admin">{ROLE_LABELS.admin[isZh ? 'zh' : 'en']}</option>
                               <option value="teacher">{ROLE_LABELS.teacher[isZh ? 'zh' : 'en']}</option>
                             </MenuSelect>
@@ -6312,6 +6267,8 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
             </div>
           )}
         </section>
+        </>
+        ) : null}
         </>
         )}
 

@@ -69,7 +69,12 @@ export type SchoolCalendarBoard = {
   academicYearId: string;
   today: string;
   isAdmin: boolean;
+  /** 可改周主题与全部月历焦点（管理员或月历额外授权） */
+  canManageMonth?: boolean;
+  /** 周历事项可写的模块 */
   editableModuleIds: string[];
+  /** 月历焦点可写的模块 */
+  editableFocusModuleIds?: string[];
   settings: {
     firstSchoolDate: string;
     winterBreakStart: string;
@@ -255,6 +260,14 @@ export async function setSchoolCalendarEventStatus(id: string, status: CalendarE
     method: 'PATCH',
     headers: getHeaders(),
     body: JSON.stringify({ status }),
+  });
+  if (!response.ok) await readError(response);
+}
+
+export async function deleteSchoolCalendarEvent(id: string): Promise<void> {
+  const response = await fetch(apiUrl(`/api/school-calendar/events/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: getHeaders(),
   });
   if (!response.ok) await readError(response);
 }

@@ -1,7 +1,10 @@
 import crypto from 'crypto';
 import pool from '../config/database.js';
 import { getTeacherGradeHeadScopeKeys } from './gradeHeadAccess.js';
+import { userHasModuleGrant } from './modulePermissionGrants.js';
 import { loadSchoolGradeStructure, type GradeConfigSegment } from './schoolGradeStructure.js';
+import { loadSchoolTeachingSubjectGroups } from './schoolTeachingSubjectGroups.js';
+import { listHeadedSubjectGroupIds } from './subjectGroupPortraitDashboard.js';
 
 export type CalendarPhase = 'autumn_prep' | 'autumn' | 'winter' | 'spring_prep' | 'spring' | 'summer';
 export type DayOverrideKind = 'makeup' | 'off';
@@ -331,8 +334,11 @@ async function callerIsAdmin(userId: string): Promise<boolean> {
   return row?.role === 'admin' || row?.role === 'system-admin';
 }
 
-async function editableModuleIdsFor(userId: string, academicYearId: string, modules: CalendarModule[]): Promise<string[]> {
-  if (await callerIsAdmin(userId)) return modules.map((m) => m.id);
+async function gradeHeadEditableModuleIds(
+  userId: string,
+  academicYearId: string,
+  modules: CalendarModule[],
+): Promise<string[]> {
   const scopes = await getTeacherGradeHeadScopeKeys(userId, academicYearId);
   if (scopes.size === 0) return [];
   const gradeConfig = await loadSchoolGradeStructure();
@@ -345,6 +351,54 @@ async function editableModuleIdsFor(userId: string, academicYearId: string, modu
       return !!segment && segment.gradeIds.some((id) => scopes.has(id));
     })
     .map((m) => m.id);
+}
+
+/** 周历事项：学科组长 / 教学管理协调员 → 其学科组覆盖学部的模块 */
+async function subjectLeadEditableModuleIds(
+  userId: string,
+  academicYearId: string,
+  modules: CalendarModule[],
+): Promise<string[]> {
+  const headed = await listHeadedSubjectGroupIds(academicYearId, userId);
+  if (headed.size === 0) return [];
+  const groups = await loadSchoolTeachingSubjectGroups();
+  const segmentIds = new Set<string>();
+  let coversAll = false;
+  for (const group of groups) {
+    if (!headed.has(group.id)) continue;
+    if (group.segmentIds.length === 0) {
+      coversAll = true;
+      break;
+    }
+    for (const segmentId of group.segmentIds) segmentIds.add(segmentId);
+  }
+  if (coversAll) return modules.map((m) => m.id);
+  if (segmentIds.size === 0) return [];
+  return modules.filter((mod) => !!mod.segmentId && segmentIds.has(mod.segmentId)).map((m) => m.id);
+}
+
+/** 周历事项：管理员 / 周历额外授权 / 年级组长与年级协调员 / 学科组长与教学协调员 */
+async function editableEventModuleIdsFor(
+  userId: string,
+  academicYearId: string,
+  modules: CalendarModule[],
+): Promise<string[]> {
+  if (await callerIsAdmin(userId)) return modules.map((m) => m.id);
+  if (await userHasModuleGrant(userId, 'calendar-week')) return modules.map((m) => m.id);
+  const fromGrade = await gradeHeadEditableModuleIds(userId, academicYearId, modules);
+  const fromSubject = await subjectLeadEditableModuleIds(userId, academicYearId, modules);
+  return [...new Set([...fromGrade, ...fromSubject])];
+}
+
+/** 月历焦点：仅管理员 / 月历额外授权可改 */
+async function editableFocusModuleIdsFor(
+  userId: string,
+  _academicYearId: string,
+  modules: CalendarModule[],
+): Promise<string[]> {
+  if (await callerIsAdmin(userId)) return modules.map((m) => m.id);
+  if (await userHasModuleGrant(userId, 'calendar-month')) return modules.map((m) => m.id);
+  return [];
 }
 
 async function seedModules(segments: GradeConfigSegment[]): Promise<void> {
@@ -529,12 +583,16 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
     )
   ).rows as Array<{ id: string; name_zh: string; name_en: string }>;
   const isAdmin = await callerIsAdmin(userId);
-  const editableModuleIds = await editableModuleIdsFor(userId, academicYearId, modules);
+  const canManageMonth = isAdmin || (await userHasModuleGrant(userId, 'calendar-month'));
+  const editableModuleIds = await editableEventModuleIdsFor(userId, academicYearId, modules);
+  const editableFocusModuleIds = await editableFocusModuleIdsFor(userId, academicYearId, modules);
   return {
     academicYearId,
     today: todayShanghai(),
     isAdmin,
+    canManageMonth,
     editableModuleIds,
+    editableFocusModuleIds,
     settings,
     segments,
     modules,
@@ -688,9 +746,27 @@ async function calendarModules(): Promise<CalendarModule[]> {
   ).rows.map((row) => mapModule(row as Parameters<typeof mapModule>[0]));
 }
 
-async function assertCanWriteModule(userId: string, academicYearId: string, moduleId: string, eventDate: string | null) {
+async function assertCanWriteEventModule(
+  userId: string,
+  academicYearId: string,
+  moduleId: string,
+  eventDate: string | null,
+) {
   const modules = await calendarModules();
-  const editable = new Set(await editableModuleIdsFor(userId, academicYearId, modules));
+  const editable = new Set(await editableEventModuleIdsFor(userId, academicYearId, modules));
+  if (!editable.has(moduleId)) return { error: 'forbidden' as const };
+  if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  return { ok: true as const };
+}
+
+async function assertCanWriteFocusModule(
+  userId: string,
+  academicYearId: string,
+  moduleId: string,
+  eventDate: string | null,
+) {
+  const modules = await calendarModules();
+  const editable = new Set(await editableFocusModuleIdsFor(userId, academicYearId, modules));
   if (!editable.has(moduleId)) return { error: 'forbidden' as const };
   if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
   return { ok: true as const };
@@ -699,7 +775,7 @@ async function assertCanWriteModule(userId: string, academicYearId: string, modu
 /** 全学部事项：能写小学部或中学部任一模块即可改。 */
 async function assertCanWriteAnyDivision(userId: string, academicYearId: string, eventDate: string | null) {
   const modules = await calendarModules();
-  const editable = new Set(await editableModuleIdsFor(userId, academicYearId, modules));
+  const editable = new Set(await editableEventModuleIdsFor(userId, academicYearId, modules));
   if (!modules.some((mod) => mod.segmentId && editable.has(mod.id))) return { error: 'forbidden' as const };
   if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
   return { ok: true as const };
@@ -707,7 +783,9 @@ async function assertCanWriteAnyDivision(userId: string, academicYearId: string,
 
 export async function saveWeekTheme(userId: string, input: { weekId: string; theme: string }) {
   await ensureSchoolCalendarTables();
-  if (!(await callerIsAdmin(userId))) return { error: 'forbidden' as const };
+  const allowed =
+    (await callerIsAdmin(userId)) || (await userHasModuleGrant(userId, 'calendar-month'));
+  if (!allowed) return { error: 'forbidden' as const };
   const theme = input.theme.trim().slice(0, 200);
   const result = await pool.query(`UPDATE school_calendar_weeks SET theme = $2 WHERE id = $1`, [input.weekId, theme]);
   if (result.rowCount === 0) return { error: 'not_found' as const };
@@ -729,7 +807,7 @@ export async function saveWeekFocus(
     )
   ).rows[0] as { academic_year_id: string; friday: string; segment_id: string | null } | undefined;
   if (!week) return { error: 'not_found' as const };
-  const gate = await assertCanWriteModule(userId, week.academic_year_id, input.moduleId, week.friday);
+  const gate = await assertCanWriteFocusModule(userId, week.academic_year_id, input.moduleId, week.friday);
   if ('error' in gate) return gate;
   const focus = input.focus.trim().slice(0, 2000);
   await pool.query(
@@ -781,7 +859,7 @@ export async function createCalendarEvent(
   if (shared && !module.segmentId) return { error: 'shared_module' as const };
   const gate = shared
     ? await assertCanWriteAnyDivision(userId, academicYearId, input.eventDate)
-    : await assertCanWriteModule(userId, academicYearId, input.moduleId, input.eventDate);
+    : await assertCanWriteEventModule(userId, academicYearId, input.moduleId, input.eventDate);
   if ('error' in gate) return gate;
   const weeks = (
     await pool.query(
@@ -864,7 +942,7 @@ export async function updateCalendarEvent(
   if (shared && !module.segmentId) return { error: 'shared_module' as const };
   const gate = shared
     ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
-    : await assertCanWriteModule(userId, existing.academic_year_id, input.moduleId, null);
+    : await assertCanWriteEventModule(userId, existing.academic_year_id, input.moduleId, null);
   if ('error' in gate) return gate;
   const weeks = (
     await pool.query(
@@ -911,6 +989,24 @@ export async function updateCalendarEvent(
   return { ok: true as const };
 }
 
+export async function deleteCalendarEvent(userId: string, id: string) {
+  await ensureSchoolCalendarTables();
+  const existing = (
+    await pool.query(
+      `SELECT academic_year_id, module_id, event_date::text, shared FROM school_calendar_events WHERE id = $1`,
+      [id],
+    )
+  ).rows[0] as { academic_year_id: string; module_id: string; event_date: string; shared: boolean } | undefined;
+  if (!existing) return { error: 'not_found' as const };
+  if (existing.event_date < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  const gate = existing.shared
+    ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
+    : await assertCanWriteEventModule(userId, existing.academic_year_id, existing.module_id, null);
+  if ('error' in gate) return gate;
+  await pool.query(`DELETE FROM school_calendar_events WHERE id = $1`, [id]);
+  return { ok: true as const };
+}
+
 /** 只改完成状态。复盘上一周时，已经过去的事项也允许改状态，内容仍按原来的规则锁定。 */
 export async function setCalendarEventStatus(userId: string, id: string, status: CalendarEventStatus) {
   await ensureSchoolCalendarTables();
@@ -924,7 +1020,7 @@ export async function setCalendarEventStatus(userId: string, id: string, status:
   if (!existing) return { error: 'not_found' as const };
   const gate = existing.shared
     ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
-    : await assertCanWriteModule(userId, existing.academic_year_id, existing.module_id, null);
+    : await assertCanWriteEventModule(userId, existing.academic_year_id, existing.module_id, null);
   if ('error' in gate) return gate;
   await pool.query(
     `UPDATE school_calendar_events SET status = $2, updated_by = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,

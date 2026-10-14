@@ -553,6 +553,31 @@ async function isAdmin(req: ReqWithUserId): Promise<boolean> {
   return role === 'system-admin' || role === 'admin';
 }
 
+async function hasElevatedModule(
+  userId: string | undefined,
+  moduleKey: 'student-center' | 'teacher-center',
+): Promise<boolean> {
+  if (!userId) return false;
+  const { userHasModuleGrant } = await import('../lib/modulePermissionGrants.js');
+  return userHasModuleGrant(userId, moduleKey);
+}
+
+async function isAdminOrStudentCenter(
+  role: string | null,
+  userId: string | undefined,
+): Promise<boolean> {
+  if (role === 'system-admin' || role === 'admin') return true;
+  return hasElevatedModule(userId, 'student-center');
+}
+
+async function isAdminOrTeacherCenter(
+  role: string | null,
+  userId: string | undefined,
+): Promise<boolean> {
+  if (role === 'system-admin' || role === 'admin') return true;
+  return hasElevatedModule(userId, 'teacher-center');
+}
+
 async function isSystemAdmin(req: ReqWithUserId): Promise<boolean> {
   const role = await getUserRole(req);
   return role === 'system-admin';
@@ -2463,9 +2488,9 @@ router.get('/reports/templates/:templateId/my-progress', async (req: ReqWithUser
       return;
     }
 
-    const isAdminRole = role === 'system-admin' || role === 'admin';
+    const isAdminRole = await isAdminOrStudentCenter(role, userId);
     const viewAsTeacherId = String(req.query.teacherId ?? '').trim();
-    let scopeTeacherId: string | null = role === 'teacher' ? userId : null;
+    let scopeTeacherId: string | null = role === 'teacher' && !isAdminRole ? userId : null;
     let viewingTeacherName: string | null = null;
 
     if (isAdminRole) {
@@ -3003,7 +3028,7 @@ router.get('/reports/templates/:templateId/classes/:classId/class-insights-summa
       res.status(404).json({ error: 'Class not found in selected academic year' });
       return;
     }
-    const isAdminRole = role === 'system-admin' || role === 'admin';
+    const isAdminRole = await isAdminOrStudentCenter(role, req.userId);
     if (!isAdminRole && role === 'teacher') {
       const canHomeroom = await teacherIsHomeroomOfClass(req.userId, classId);
       const canGradeHead = await teacherIsGradeHeadOfClass(req.userId, classId, template.academicYearId);
@@ -3166,7 +3191,7 @@ router.get('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
       res.status(404).json({ error: 'Class not found in selected academic year' });
       return;
     }
-    const isAdminRole = role === 'system-admin' || role === 'admin';
+    const isAdminRole = await isAdminOrStudentCenter(role, req.userId);
     if (!isAdminRole && role === 'teacher') {
       const segmentId = String(template.schoolSegmentId ?? '').trim();
       const inclusionCtx = await loadReportYearInclusionContext(template.academicYearId);
@@ -3239,7 +3264,7 @@ router.put('/reports/templates/:templateId/classes/:classId/subjects/:subjectKey
       res.status(404).json({ error: 'Template not found' });
       return;
     }
-    const isAdminRole = role === 'system-admin' || role === 'admin';
+    const isAdminRole = await isAdminOrStudentCenter(role, req.userId);
     if (!isAdminRole && template.status !== 'published') {
       res.status(403).json({ error: 'Report template is not published for teacher editing' });
       return;
@@ -3825,7 +3850,7 @@ router.put('/reports/students/:studentId/terms/:academicYearId/:term/templates/:
       res.status(409).json({ error: 'No report template configured for this term' });
       return;
     }
-    const isAdminRole = role === 'system-admin' || role === 'admin';
+    const isAdminRole = await isAdminOrStudentCenter(role, req.userId);
     if (!isAdminRole && template.status !== 'published') {
       res.status(403).json({ error: 'Report template is not published for teacher editing' });
       return;
@@ -4394,7 +4419,7 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
     const yearId = typeof req.query.academicYearId === 'string' ? req.query.academicYearId.trim() : '';
     const term = req.query.term === 'Semester 1' || req.query.term === 'Semester 2' ? req.query.term : null;
     const role = await getUserRole(req);
-    const isAdmin = role === 'system-admin' || role === 'admin';
+    const isAdmin = await isAdminOrTeacherCenter(role, req.userId);
     const where: string[] = [];
     const values: unknown[] = [];
     if (!isAdmin) {
@@ -4485,7 +4510,7 @@ router.get('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
     const role = await getUserRole(req);
     const template = await getTeacherPortraitTemplateById(templateId);
     if (!template) return res.status(404).json({ error: 'Template not found' });
-    const isAdmin = role === 'system-admin' || role === 'admin';
+    const isAdmin = await isAdminOrTeacherCenter(role, req.userId);
     if (!isAdmin && template.status === 'draft') {
       return res.status(404).json({ error: 'Template not found' });
     }
@@ -4595,7 +4620,7 @@ router.get('/teacher-portrait/subject-groups', async (req: ReqWithUserId, res: R
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
-    const isAdmin = role === 'system-admin' || role === 'admin';
+    const isAdmin = await isAdminOrTeacherCenter(role, req.userId);
     const groups = await listPortraitSubjectGroups(academicYearId, req.userId, isAdmin);
     res.json({ groups, isAdmin });
   } catch (e) {
@@ -4624,7 +4649,7 @@ router.get('/teacher-portrait/subject-groups/:groupId/dashboard', async (req: Re
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
-    const isAdmin = role === 'system-admin' || role === 'admin';
+    const isAdmin = await isAdminOrTeacherCenter(role, req.userId);
     const dashboard = await buildSubjectGroupPortraitDashboard({
       groupId,
       academicYearId,

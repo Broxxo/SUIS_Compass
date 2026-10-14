@@ -22,6 +22,7 @@ function toUser(r: {
   nameZh?: string | null;
   nameEn?: string | null;
   studentId?: string | null;
+  moduleGrants?: string[] | null;
 }): User {
   return {
     id: r.id,
@@ -31,6 +32,7 @@ function toUser(r: {
     nameZh: r.nameZh ?? null,
     nameEn: r.nameEn ?? null,
     studentId: r.studentId ?? null,
+    moduleGrants: Array.isArray(r.moduleGrants) ? r.moduleGrants.filter((k) => typeof k === 'string') : [],
   };
 }
 
@@ -105,6 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             nameZh?: string | null;
             nameEn?: string | null;
             studentId?: string | null;
+            moduleGrants?: string[] | null;
           };
         };
         if (data.success && data.token && data.user) {

@@ -43,7 +43,7 @@ async function resolveUserId(req: Request): Promise<string | null> {
   return legacy ?? null;
 }
 
-function toUserRow(row: {
+async function toUserRow(row: {
   id: string;
   username: string;
   role: string;
@@ -53,6 +53,13 @@ function toUserRow(row: {
   student_id?: string | null;
 }) {
   const displayName = resolveUserDisplayLabel(row);
+  let moduleGrants: string[] = [];
+  try {
+    const { listModuleGrantsForUser } = await import('../lib/modulePermissionGrants.js');
+    moduleGrants = await listModuleGrantsForUser(row.id);
+  } catch {
+    moduleGrants = [];
+  }
   return {
     id: row.id,
     username: row.username,
@@ -61,6 +68,7 @@ function toUserRow(row: {
     nameZh: (row.name_zh ?? '').toString().trim() || null,
     nameEn: (row.name_en ?? '').toString().trim() || null,
     studentId: row.student_id ?? null,
+    moduleGrants,
   };
 }
 
@@ -113,7 +121,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const user = toUserRow(row);
+    const user = await toUserRow(row);
     if (!JWT_SECRET) {
       return res.status(500).json({ error: 'Server auth not configured (JWT_SECRET)' });
     }
@@ -156,7 +164,7 @@ router.get('/user', async (req, res) => {
       name_en: string | null;
       student_id: string | null;
     };
-    res.json({ user: toUserRow(row) });
+    res.json({ user: await toUserRow(row) });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Internal server error' });

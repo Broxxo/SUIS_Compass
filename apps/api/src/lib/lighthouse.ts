@@ -116,7 +116,9 @@ export async function loadLighthouseBoard(): Promise<LighthouseBoard> {
 export async function saveLighthouseBoard(userId: string, input: unknown): Promise<LighthouseBoard> {
   await ensureTable();
   const role = await pool.query(`SELECT role FROM users WHERE id = $1`, [userId]);
-  if (role.rows[0]?.role !== 'system-admin') {
+  const isSystemAdmin = role.rows[0]?.role === 'system-admin';
+  const { userHasModuleGrant } = await import('./modulePermissionGrants.js');
+  if (!isSystemAdmin && !(await userHasModuleGrant(userId, 'lighthouse'))) {
     const error = new Error('forbidden') as Error & { status?: number };
     error.status = 403;
     throw error;

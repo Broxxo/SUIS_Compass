@@ -23,6 +23,7 @@ import type { AcademicYear } from '../types/classManagement';
 import {
   createSchoolCalendarEvent,
   createSchoolCalendarModule,
+  deleteSchoolCalendarEvent,
   deleteSchoolCalendarModule,
   fetchPublicHolidays,
   fetchSchoolCalendar,
@@ -470,6 +471,14 @@ export default function SchoolCalendar({
     setContextFromApp('school-calendar', calendarForAI);
   }, [calendarForAI, setContextFromApp, onToggleAI, isAIOpen]);
 
+  const canManageMonth = Boolean(board?.isAdmin || board?.canManageMonth);
+  const focusModuleIds = board?.editableFocusModuleIds ?? board?.editableModuleIds ?? [];
+  const canEditFocus = (moduleId: string, boundaryDate: string) => {
+    if (!board) return false;
+    if (!focusModuleIds.includes(moduleId)) return false;
+    if (boundaryDate < board.today) return board.isAdmin;
+    return true;
+  };
   const canEditModule = (moduleId: string, boundaryDate: string) => {
     if (!board) return false;
     if (!board.editableModuleIds.includes(moduleId)) return false;
@@ -676,7 +685,8 @@ export default function SchoolCalendar({
             months={months}
             modules={visibleModules}
             isZh={isZh}
-            canEditModule={canEditModule}
+            canEditModule={canEditFocus}
+            canManageMonth={canManageMonth}
             holidayByDate={holidayByDate}
             onOpenWeek={(id) => {
               setWeekId(id);
@@ -790,6 +800,7 @@ function MonthTable({
   modules,
   isZh,
   canEditModule,
+  canManageMonth,
   holidayByDate,
   onOpenWeek,
   onTheme,
@@ -800,6 +811,7 @@ function MonthTable({
   modules: SchoolCalendarModule[];
   isZh: boolean;
   canEditModule: (moduleId: string, boundaryDate: string) => boolean;
+  canManageMonth: boolean;
   holidayByDate: Map<string, PublicHolidayDay>;
   onOpenWeek: (weekId: string) => void;
   onTheme: (weekId: string) => void;
@@ -852,7 +864,7 @@ function MonthTable({
               const dateBg = breakWeek ? 'bg-sky-100' : current ? 'bg-sky-50' : 'bg-white';
               const { year, month } = yearMonthParts(key);
               const themeNode = item.theme
-                ? board.isAdmin
+                ? canManageMonth
                   ? (
                     <button type="button" className="pointer-events-auto relative z-10 inline hover:underline" onClick={() => onTheme(item.id)}>
                       ：<span className="text-slate-800">{item.theme}</span>
@@ -897,7 +909,7 @@ function MonthTable({
                     );
                   })}
                   <td className={`${cellBorder} ${cellHover} ${trackBg} relative h-px overflow-hidden p-0 text-center`} style={{ verticalAlign: 'middle' }}>
-                    {board.isAdmin && !item.theme ? (
+                    {canManageMonth && !item.theme ? (
                       <button
                         type="button"
                         className="absolute inset-0"
@@ -1864,6 +1876,14 @@ function EventDialog({
       .catch((err: unknown) => setError(errorText(err instanceof Error ? err.message : 'internal', isZh)))
       .finally(() => setBusy(false));
   };
+  const remove = () => {
+    if (!event) return;
+    setBusy(true);
+    deleteSchoolCalendarEvent(event.id)
+      .then(onSaved)
+      .catch((err: unknown) => setError(errorText(err instanceof Error ? err.message : 'internal', isZh)))
+      .finally(() => setBusy(false));
+  };
   return (
     <Dialog modal={false} open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-md overflow-y-auto">
@@ -1949,6 +1969,11 @@ function EventDialog({
         {locked ? <p className="text-xs text-slate-500">{isZh ? '已经过去的事项只有管理员可以改。' : 'Past events can only be changed by an admin.'}</p> : null}
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
         <DialogFooter>
+          {event && !locked ? (
+            <Button type="button" variant="outline" className="text-red-600 hover:text-red-700 sm:mr-auto" disabled={busy} onClick={remove}>
+              {isZh ? '删除' : 'Delete'}
+            </Button>
+          ) : null}
           <Button type="button" variant="outline" onClick={onClose}>{isZh ? '关闭' : 'Close'}</Button>
           {!locked ? (
             <Button type="button" disabled={busy || !title.trim() || (shared && !divisionAnchor)} onClick={save}>{isZh ? '保存' : 'Save'}</Button>

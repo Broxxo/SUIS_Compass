@@ -92,7 +92,9 @@ async function viewerIsAdmin(userId: string): Promise<boolean> {
   const row = (await pool.query(`SELECT role FROM users WHERE id = $1`, [userId])).rows[0] as
     | { role: string }
     | undefined;
-  return row?.role === 'admin' || row?.role === 'system-admin';
+  if (row?.role === 'admin' || row?.role === 'system-admin') return true;
+  const { userHasModuleGrant } = await import('./modulePermissionGrants.js');
+  return userHasModuleGrant(userId, 'mailbox');
 }
 
 type NameRow = {

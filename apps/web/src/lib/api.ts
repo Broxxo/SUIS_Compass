@@ -665,7 +665,7 @@ export const api = {
     return this.patchUserStaffFields(userId, { department });
   },
 
-  async updateUserRole(userId: string, role: 'admin' | 'teacher'): Promise<void> {
+  async updateUserRole(userId: string, role: 'system-admin' | 'admin' | 'teacher'): Promise<void> {
     const response = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(userId)}/role`), {
       method: 'PUT',
       headers: getHeaders(),
@@ -1987,6 +1987,40 @@ export const api = {
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error((data as { error?: string }).error || 'Failed to delete division coordinator');
+    }
+  },
+
+  async getModulePermissionOverview(): Promise<{ modules: unknown[] }> {
+    const response = await fetch(apiUrl('/api/admin/module-permissions'), { headers: getHeaders() });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error || 'Failed to load module permissions');
+    }
+    return (await readJsonOrThrow(response, 'Failed to load module permissions')) as {
+      modules: unknown[];
+    };
+  },
+
+  async addModulePermissionGrant(moduleKey: string, userId: string): Promise<void> {
+    const response = await fetch(apiUrl('/api/admin/module-permissions'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ moduleKey, userId }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to grant module permission');
+    }
+  },
+
+  async deleteModulePermissionGrant(id: string): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/module-permissions/${encodeURIComponent(id)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to revoke module permission');
     }
   },
 

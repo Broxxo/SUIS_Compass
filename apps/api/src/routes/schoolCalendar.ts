@@ -3,6 +3,7 @@ import { getCnHolidayFeed } from '../lib/cnHolidayFeed.js';
 import {
   createCalendarEvent,
   createCalendarModule,
+  deleteCalendarEvent,
   deleteCalendarModule,
   getSchoolCalendarBoard,
   importSchoolCalendar,
@@ -304,6 +305,19 @@ router.patch('/events/:id/status', async (req: ReqWithUserId, res: Response) => 
     return res.json(updated);
   } catch (error) {
     console.error('school calendar event status', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+router.delete('/events/:id', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const removed = await deleteCalendarEvent(userId, req.params.id);
+    if (reject(res, removed)) return;
+    return res.json(removed);
+  } catch (error) {
+    console.error('school calendar event delete', error);
     return fail(res, 500, 'internal');
   }
 });

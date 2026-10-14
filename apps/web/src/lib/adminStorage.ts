@@ -222,20 +222,22 @@ export async function updateUserStaffNameFields(
   }
 }
 
-/** 更新用户角色（仅系统管理员可改）：教师↔管理员 */
-export async function updateUserRole(userId: string, role: 'admin' | 'teacher'): Promise<void> {
+/** 更新用户角色（仅系统管理员可改）：系统管理员 / 管理员 / 教师 */
+export async function updateUserRole(
+  userId: string,
+  role: 'system-admin' | 'admin' | 'teacher',
+): Promise<void> {
   const users = loadFromLocal();
   const idx = users.findIndex((u) => u.id === userId);
   if (idx === -1) return;
-  const u = users[idx];
-  if (u.role === 'system-admin') return;
-  users[idx] = { ...u, role };
+  users[idx] = { ...users[idx], role };
   saveToLocal(users);
   if (USE_CLOUD_STORAGE && getCurrentUserId()) {
     try {
       await api.updateUserRole(userId, role);
     } catch (e) {
       logError('updateUserRole to cloud', e);
+      throw e;
     }
   }
 }

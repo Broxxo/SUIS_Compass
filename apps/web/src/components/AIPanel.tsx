@@ -836,9 +836,6 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
                             <button type="button" onClick={() => handleContextSelect('lighthouse')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'lighthouse' ? '✓ ' : ''}{t('ai.panel.contextLighthouse')}
                             </button>
-                            <button type="button" onClick={() => handleContextSelect('mailbox')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
-                              {screenId === 'mailbox' ? '✓ ' : ''}{t('ai.panel.contextMailbox')}
-                            </button>
                             <button type="button" onClick={() => handleContextSelect('admin')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'admin' ? '✓ ' : ''}{t('ai.panel.contextAdmin')}
                             </button>
@@ -998,9 +995,6 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
                             </button>
                             <button type="button" onClick={() => handleContextSelect('lighthouse')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'lighthouse' ? '✓ ' : ''}{t('ai.panel.contextLighthouse')}
-                            </button>
-                            <button type="button" onClick={() => handleContextSelect('mailbox')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
-                              {screenId === 'mailbox' ? '✓ ' : ''}{t('ai.panel.contextMailbox')}
                             </button>
                             <button type="button" onClick={() => handleContextSelect('admin')} className="w-full px-3 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2">
                               {screenId === 'admin' ? '✓ ' : ''}{t('ai.panel.contextAdmin')}

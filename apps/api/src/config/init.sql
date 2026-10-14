@@ -278,6 +278,21 @@ CREATE INDEX IF NOT EXISTS idx_division_coordinator_posts_year
 CREATE INDEX IF NOT EXISTS idx_division_coordinator_posts_teacher
   ON division_coordinator_posts(academic_year_id, teacher_id);
 
+-- 模块额外授权（不跟学年；一档 = 该模块管理/填写权限）
+CREATE TABLE IF NOT EXISTS module_permission_grants (
+  id VARCHAR(100) PRIMARY KEY,
+  module_key VARCHAR(40) NOT NULL,
+  user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  granted_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (module_key, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_module_permission_grants_user
+  ON module_permission_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_module_permission_grants_module
+  ON module_permission_grants(module_key);
+
 CREATE TABLE IF NOT EXISTS teaching_subject_group_members (
   id VARCHAR(100) PRIMARY KEY,
   academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,

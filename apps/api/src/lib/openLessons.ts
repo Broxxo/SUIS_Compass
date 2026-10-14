@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import pool from '../config/database.js';
 import { coordinatorLedGroupIds } from './divisionCoordinators.js';
+import { userHasModuleGrant } from './modulePermissionGrants.js';
 import { ensureFunctionalRoleAssignmentsTable } from './functionalRoleAssignments.js';
 import { loadSchoolTeachingSubjectGroups } from './schoolTeachingSubjectGroups.js';
 import { ensureTeachingSubjectGroupMembersTable } from './teachingSubjectGroupMembers.js';
@@ -247,6 +248,11 @@ async function loadAccess(viewerId: string, academicYearId: string): Promise<Acc
   const ledGroupIds = leadRows.map((r) => r.scope_key).filter((id) => groupIds.has(id));
   for (const groupId of await coordinatorLedGroupIds(viewerId, academicYearId)) {
     if (groupIds.has(groupId) && !ledGroupIds.includes(groupId)) ledGroupIds.push(groupId);
+  }
+  if (await userHasModuleGrant(viewerId, 'open-lessons')) {
+    for (const groupId of groupIds) {
+      if (!ledGroupIds.includes(groupId)) ledGroupIds.push(groupId);
+    }
   }
 
   const memberRows = (

@@ -713,17 +713,21 @@ function randomSixDigitPassword(): string {
   return String(crypto.randomInt(100000, 1000000));
 }
 
-// 仅允许 system-admin 或 admin 访问本路由
+// 仅允许 system-admin、admin，或持有后台入口额外授权的用户
 async function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
     const role = await getCallerRole(req.userId);
     if (!role) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    if (role !== 'system-admin' && role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: admin panel access required' });
+    if (role === 'system-admin' || role === 'admin') {
+      return next();
     }
-    return next();
+    const { userHasModuleGrant } = await import('../lib/modulePermissionGrants.js');
+    if (req.userId && (await userHasModuleGrant(req.userId, 'admin'))) {
+      return next();
+    }
+    return res.status(403).json({ error: 'Forbidden: admin panel access required' });
   } catch (error) {
     console.error('requireAdmin error:', error);
     return res.status(500).json({ error: 'Internal server error' });
@@ -977,7 +981,7 @@ router.get('/users', async (req: AuthedRequest, res: Response) => {
     let result;
     if (callerRole === 'system-admin') {
       result = await pool.query(
-        "SELECT id, username, role, display_name, name_zh, name_en, password, department, primary_subject, created_at FROM users WHERE role IN ('admin', 'teacher') ORDER BY created_at DESC, username ASC",
+        "SELECT id, username, role, display_name, name_zh, name_en, password, department, primary_subject, created_at FROM users WHERE role IN ('system-admin', 'admin', 'teacher') ORDER BY created_at DESC, username ASC",
       );
     } else {
       result = await pool.query(
@@ -1093,7 +1097,7 @@ router.post('/users/import-student-accounts', async (req: AuthedRequest, res: Re
   }
 });
 
-// 创建新用户：system-admin 可创建管理员或教师，admin 仅可创建教师
+// 创建新用户：system-admin 可创建系统管理员/管理员/教师，admin 仅可创建教师
 router.post('/users', async (req: AuthedRequest, res: Response) => {
   try {
     await ensureUsersPrimarySubjectColumn();
@@ -1132,11 +1136,11 @@ router.post('/users', async (req: AuthedRequest, res: Response) => {
     const nameZhDb = nameZhVal.length > 0 ? nameZhVal : null;
     const nameEnDb = nameEnVal.length > 0 ? nameEnVal : null;
 
-    if (!VALID_ROLES.includes(role as any)) {
+    if (!VALID_ROLES.includes(role as (typeof VALID_ROLES)[number])) {
       return res.status(400).json({ error: 'Invalid role' });
     }
-    if (callerRole === 'system-admin' && role === 'system-admin') {
-      return res.status(403).json({ error: 'Cannot create system-admin via panel' });
+    if (callerRole !== 'system-admin' && role === 'system-admin') {
+      return res.status(403).json({ error: 'Only system-admin can create system-admin accounts' });
     }
     if (callerRole === 'admin' && role !== 'teacher') {
       return res.status(403).json({ error: 'Admin can only create teacher accounts' });
@@ -1376,7 +1380,7 @@ router.patch('/users/:id', async (req: AuthedRequest, res: Response) => {
   }
 });
 
-// 更新用户角色：仅系统管理员可操作，可将管理员与教师互改
+// 更新用户角色：仅系统管理员可操作；可在 system-admin / admin / teacher 间调整（不可改自己；不可降级最后一位系统管理员）
 router.put('/users/:id/role', async (req: AuthedRequest, res: Response) => {
   try {
     const callerId = req.userId!;
@@ -1388,8 +1392,11 @@ router.put('/users/:id/role', async (req: AuthedRequest, res: Response) => {
 
     const { id } = req.params;
     const { role: newRole } = req.body as { role?: string };
-    if (!newRole || !['admin', 'teacher'].includes(newRole)) {
-      return res.status(400).json({ error: 'role must be admin or teacher' });
+    if (!newRole || !VALID_ROLES.includes(newRole as (typeof VALID_ROLES)[number])) {
+      return res.status(400).json({ error: 'role must be system-admin, admin or teacher' });
+    }
+    if (id === callerId) {
+      return res.status(403).json({ error: 'Cannot change your own role' });
     }
 
     const targetResult = await pool.query('SELECT role FROM users WHERE id = $1', [id]);
@@ -1397,11 +1404,17 @@ router.put('/users/:id/role', async (req: AuthedRequest, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
     const targetRole = targetResult.rows[0].role as string;
-    if (targetRole === 'system-admin') {
-      return res.status(403).json({ error: 'Cannot change system-admin role' });
-    }
     if (targetRole === 'student') {
       return res.status(403).json({ error: 'Cannot change student role via this endpoint' });
+    }
+    if (targetRole === 'system-admin' && newRole !== 'system-admin') {
+      const countResult = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM users WHERE role = 'system-admin'`,
+      );
+      const n = (countResult.rows[0] as { n: number }).n;
+      if (n <= 1) {
+        return res.status(403).json({ error: 'Cannot demote the last system-admin' });
+      }
     }
 
     await pool.query('UPDATE users SET role = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newRole, id]);
@@ -2850,6 +2863,56 @@ router.delete('/division-coordinators/:id', async (req: AuthedRequest, res: Resp
     return res.json({ success: true });
   } catch (error) {
     console.error('Delete division coordinator error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/module-permissions', async (_req: AuthedRequest, res: Response) => {
+  try {
+    const { getModulePermissionOverview } = await import('../lib/modulePermissionGrants.js');
+    const modules = await getModulePermissionOverview();
+    return res.json({ modules });
+  } catch (error) {
+    console.error('List module permissions error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/module-permissions', async (req: AuthedRequest, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { moduleKey?: string; userId?: string };
+    const { addModulePermissionGrant } = await import('../lib/modulePermissionGrants.js');
+    const grant = await addModulePermissionGrant({
+      moduleKey: String(body.moduleKey ?? ''),
+      userId: String(body.userId ?? ''),
+      grantedBy: req.userId ?? null,
+    });
+    return res.json({ grant });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (
+      message === 'invalid_module' ||
+      message === 'user_required' ||
+      message === 'user_not_found' ||
+      message === 'student_forbidden'
+    ) {
+      return res.status(400).json({ error: message });
+    }
+    console.error('Add module permission error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/module-permissions/:id', async (req: AuthedRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const { deleteModulePermissionGrant } = await import('../lib/modulePermissionGrants.js');
+    const removed = await deleteModulePermissionGrant(id);
+    if (!removed) return res.status(404).json({ error: 'not_found' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete module permission error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

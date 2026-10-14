@@ -61,12 +61,16 @@ function AppContent() {
     return () => mql.removeEventListener('change', update);
   }, []);
 
-  // 提供给顶栏用户菜单调用的全局入口（仅 admin 会看到）
+  const canOpenAdminPanel =
+    user?.role === 'admin' ||
+    user?.role === 'system-admin' ||
+    (user?.moduleGrants?.includes('admin') ?? false);
+
+  // 提供给顶栏用户菜单调用的全局入口（管理员或持有后台入口授权）
   useEffect(() => {
     const win = window as any;
     const handler = () => {
-      // 只有管理员和系统管理员可以打开后台管理
-      if (user?.role === 'admin' || user?.role === 'system-admin') {
+      if (canOpenAdminPanel) {
         setView('admin');
       }
     };
@@ -76,7 +80,7 @@ function AppContent() {
         delete win.__openAdminPanel;
       }
     };
-  }, [user?.role]);
+  }, [canOpenAdminPanel]);
 
   // 登录 / 注销 或角色变化时，重置视图，防止教师继承上一次的 admin 视图
   useEffect(() => {
@@ -85,10 +89,10 @@ function AppContent() {
       setAiOverlayOpen(false);
       return;
     }
-    if (view === 'admin' && user && user.role !== 'admin' && user.role !== 'system-admin') {
+    if (view === 'admin' && user && !canOpenAdminPanel) {
       setView('hub');
     }
-  }, [isAuthenticated, user?.role, view]);
+  }, [isAuthenticated, canOpenAdminPanel, user, view]);
 
   useEffect(() => {
     if (import.meta.env.DEV) {

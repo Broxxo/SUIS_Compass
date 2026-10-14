@@ -7,12 +7,14 @@ import { pinyin } from 'pinyin-pro';
 /** 含中日韩及兼容扩展汉字 */
 const CJK_RE = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/;
 
+export type StaffAssignableRole = 'system-admin' | 'admin' | 'teacher';
+
 export type StaffCreateDraftRow = {
   id: string;
   nameZh: string;
   nameEn: string;
   username: string;
-  role: 'admin' | 'teacher';
+  role: StaffAssignableRole;
   department: string;
   primarySubject: string;
   password: string;
@@ -21,7 +23,7 @@ export type StaffCreateDraftRow = {
 export type StaffImportParsedRow = {
   nameZh: string;
   nameEn: string;
-  role: 'admin' | 'teacher';
+  role: StaffAssignableRole;
   department: string;
   primarySubject: string;
   passwordFromFile: string;
@@ -86,11 +88,13 @@ export function allocateLoginNames(slugBases: string[], taken: Set<string>): str
   return out;
 }
 
-function parseRoleCell(raw: string): 'admin' | 'teacher' | null {
+function parseRoleCell(raw: string): StaffAssignableRole | null {
   const t = raw.trim();
   if (!t) return 'teacher';
+  if (/系统管理|system[-\s]?admin/i.test(t)) return 'system-admin';
   if (/管理|admin/i.test(t) && !/教师|老师/.test(t)) return 'admin';
   if (/教职工|教师|老师|teacher|staff|user/i.test(t)) return 'teacher';
+  if (t.toLowerCase() === 'system-admin') return 'system-admin';
   if (t.toLowerCase() === 'admin') return 'admin';
   if (t.toLowerCase() === 'teacher') return 'teacher';
   return null;
@@ -98,8 +102,8 @@ function parseRoleCell(raw: string): 'admin' | 'teacher' | null {
 
 export function normalizeImportRole(
   raw: string,
-  allowed: readonly ('admin' | 'teacher')[],
-): 'admin' | 'teacher' {
+  allowed: readonly StaffAssignableRole[],
+): StaffAssignableRole {
   const parsed = parseRoleCell(raw);
   const r = parsed ?? 'teacher';
   if ((allowed as readonly string[]).includes(r)) return r;
@@ -118,7 +122,7 @@ function isLikelyHeaderRow(row: unknown[]): boolean {
  */
 export function parseStaffImportWorkbook(
   arrayBuffer: ArrayBuffer,
-  allowedRoles: readonly ('admin' | 'teacher')[],
+  allowedRoles: readonly StaffAssignableRole[],
 ): StaffImportParsedRow[] {
   const wb = XLSX.read(arrayBuffer, { type: 'array' });
   const sheetName = wb.SheetNames[0];

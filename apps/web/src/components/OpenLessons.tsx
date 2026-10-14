@@ -62,7 +62,7 @@ const cellInput =
   'w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-1 text-sm text-slate-800 ' +
   'hover:border-primary/25 focus:border-primary focus:bg-white focus:outline-none focus:ring-1 focus:ring-primary/30';
 
-const headCell = 'border-b border-r border-white/25 px-2 py-2.5 text-center font-medium last:border-r-0';
+const headCell = 'sticky top-0 z-10 border-b border-r border-white/25 bg-primary px-2 py-2.5 text-center font-medium text-primary-foreground last:border-r-0';
 const bodyCell = 'border-b border-r border-slate-200 px-2 py-1 align-top last:border-r-0';
 
 type SortKey = 'date' | 'subject';
@@ -809,118 +809,118 @@ export default function OpenLessons({
           ) : null}
         </div>
 
-        <div className={`${mobileTable ? '' : 'hidden'} -mr-11 mt-3 max-h-[calc(100vh-11rem)] overflow-auto pr-11 max-md:mr-0 max-md:max-h-none max-md:overflow-visible max-md:pr-0 md:block`}>
-          <div className="overflow-visible rounded-xl border border-primary/25 bg-white shadow-sm">
-          <table className="w-full min-w-[71rem] table-fixed border-collapse text-left">
-            <colgroup>
-              <col style={{ width: '9rem' }} />
-              <col style={{ width: '8rem' }} />
-              <col style={{ width: '6.5rem' }} />
-              <col style={{ width: '8.5rem' }} />
-              <col style={{ width: '9rem' }} />
-              <col />
-              <col style={{ width: '8rem' }} />
-              <col style={{ width: '11rem' }} />
-            </colgroup>
-            <thead className="sticky top-0 z-10 bg-primary text-primary-foreground">
-              <tr>
-                <th className={`${headCell} relative`} aria-sort={sort.key === 'subject' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                  <div ref={filterRootRef}>
-                    <div className="flex justify-center">
-                      <div className="relative">
-                        <SortHeader
-                          zh="学科"
-                          en="Subject"
-                          active={sort.key === 'subject'}
-                          dir={sort.dir}
-                          label={sortLabel(isZh, '学科', sort.key === 'subject', sort.dir)}
-                          onClick={() => toggleSort('subject')}
-                        />
-                        <button
-                          type="button"
-                          aria-expanded={filterOpen}
-                          aria-label={isZh ? '筛选学科' : 'Filter subjects'}
-                          className={`absolute left-full top-1/2 z-10 ml-2 -translate-y-1/2 rounded-md border p-1 ${
-                            subjectFilter
-                              ? 'border-amber-200 bg-amber-300 text-amber-950'
-                              : 'border-white/70 bg-white/25 text-white hover:bg-white/40'
-                          }`}
-                          onClick={() => setFilterOpen((open) => !open)}
-                        >
-                          <ListFilter className="h-4 w-4" strokeWidth={2.5} aria-hidden />
-                        </button>
+        <div className={`${mobileTable ? '' : 'hidden'} mt-3 max-h-[calc(100vh-11rem)] overflow-auto max-md:max-h-none max-md:overflow-visible md:block`}>
+          <div className="inline-block min-w-full overflow-hidden rounded-xl border border-primary/25 bg-white align-top shadow-sm">
+            <table className="w-full min-w-[71rem] table-fixed border-collapse text-left">
+              <colgroup>
+                <col style={{ width: '9rem' }} />
+                <col style={{ width: '8rem' }} />
+                <col style={{ width: '6.5rem' }} />
+                <col style={{ width: '8.5rem' }} />
+                <col style={{ width: '9rem' }} />
+                <col style={{ width: '16rem' }} />
+                <col style={{ width: '8rem' }} />
+                <col />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th className={headCell} aria-sort={sort.key === 'subject' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <div ref={filterRootRef} className="relative">
+                      <div className="flex justify-center">
+                        <div className="relative">
+                          <SortHeader
+                            zh="学科"
+                            en="Subject"
+                            active={sort.key === 'subject'}
+                            dir={sort.dir}
+                            label={sortLabel(isZh, '学科', sort.key === 'subject', sort.dir)}
+                            onClick={() => toggleSort('subject')}
+                          />
+                          <button
+                            type="button"
+                            aria-expanded={filterOpen}
+                            aria-label={isZh ? '筛选学科' : 'Filter subjects'}
+                            className={`absolute left-full top-1/2 z-10 ml-2 -translate-y-1/2 rounded-md border p-1 ${
+                              subjectFilter
+                                ? 'border-amber-200 bg-amber-300 text-amber-950'
+                                : 'border-white/70 bg-white/25 text-white hover:bg-white/40'
+                            }`}
+                            onClick={() => setFilterOpen((open) => !open)}
+                          >
+                            <ListFilter className="h-4 w-4" strokeWidth={2.5} aria-hidden />
+                          </button>
+                        </div>
                       </div>
+                      {filterOpen ? (
+                        <SubjectFilterMenu
+                          subjects={filterSubjects}
+                          selected={subjectFilter}
+                          isZh={isZh}
+                          onChange={setSubjectFilter}
+                        />
+                      ) : null}
                     </div>
-                    {filterOpen ? (
-                      <SubjectFilterMenu
-                        subjects={filterSubjects}
-                        selected={subjectFilter}
-                        isZh={isZh}
-                        onChange={setSubjectFilter}
-                      />
-                    ) : null}
-                  </div>
-                </th>
-                <th className={headCell}><Header zh="教师" en="Teacher" /></th>
-                <th className={headCell}><Header zh="班级" en="Class" /></th>
-                <th className={headCell} aria-sort={sort.key === 'date' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                  <SortHeader
-                    zh="日期"
-                    en="Date"
-                    active={sort.key === 'date'}
-                    dir={sort.dir}
-                    label={sortLabel(isZh, '日期', sort.key === 'date', sort.dir)}
-                    onClick={() => toggleSort('date')}
-                  />
-                </th>
-                <th className={headCell}><Header zh="时间" en="Time" /></th>
-                <th className={headCell}><Header zh="学期-单元-课题" en="Term-Unit-Topic" /></th>
-                <th className={headCell}><Header zh="上课地点" en="Location" /></th>
-                <th className={headCell}><Header zh="备注" en="Remarks" /></th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
-                    {isZh ? '正在读取本学期公开课…' : 'Loading open lessons…'}
-                  </td>
+                  </th>
+                  <th className={headCell}><Header zh="教师" en="Teacher" /></th>
+                  <th className={headCell}><Header zh="班级" en="Class" /></th>
+                  <th className={headCell} aria-sort={sort.key === 'date' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <SortHeader
+                      zh="日期"
+                      en="Date"
+                      active={sort.key === 'date'}
+                      dir={sort.dir}
+                      label={sortLabel(isZh, '日期', sort.key === 'date', sort.dir)}
+                      onClick={() => toggleSort('date')}
+                    />
+                  </th>
+                  <th className={headCell}><Header zh="时间" en="Time" /></th>
+                  <th className={headCell}><Header zh="学期-单元-课题" en="Term-Unit-Topic" /></th>
+                  <th className={headCell}><Header zh="上课地点" en="Location" /></th>
+                  <th className={headCell}><Header zh="备注" en="Remarks" /></th>
                 </tr>
-              ) : rows.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
-                    {isZh
-                      ? `本学期还没有${lessonKindLabel(lessonKind, true)}。`
-                      : `No ${lessonKindLabel(lessonKind, false).toLowerCase()}s this term.`}
-                  </td>
-                </tr>
-              ) : visibleRows.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
-                    {isZh ? '没有符合筛选的公开课。' : 'No open lessons match this filter.'}
-                  </td>
-                </tr>
-              ) : (
-                visibleRows.map((row) => (
-                  <LessonRow
-                    key={row.key}
-                    row={row}
-                    board={board}
-                    isZh={isZh}
-                    saving={savingKey === row.key}
-                    error={rowError[row.key] ? errorText(rowError[row.key], isZh) : ''}
-                    onChange={(patch, immediate) => updateRow(row.key, patch, immediate)}
-                    onCommit={() => commitRow(row.key)}
-                    onRemove={() => void removeRow(row)}
-                    rowRef={(node) => {
-                      if (node) rowNodes.current.set(row.key, node);
-                      else rowNodes.current.delete(row.key);
-                    }}
-                  />
-                ))
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
+                      {isZh ? '正在读取本学期公开课…' : 'Loading open lessons…'}
+                    </td>
+                  </tr>
+                ) : rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
+                      {isZh
+                        ? `本学期还没有${lessonKindLabel(lessonKind, true)}。`
+                        : `No ${lessonKindLabel(lessonKind, false).toLowerCase()}s this term.`}
+                    </td>
+                  </tr>
+                ) : visibleRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-8 text-center text-sm text-slate-500">
+                      {isZh ? '没有符合筛选的公开课。' : 'No open lessons match this filter.'}
+                    </td>
+                  </tr>
+                ) : (
+                  visibleRows.map((row) => (
+                    <LessonRow
+                      key={row.key}
+                      row={row}
+                      board={board}
+                      isZh={isZh}
+                      saving={savingKey === row.key}
+                      error={rowError[row.key] ? errorText(rowError[row.key], isZh) : ''}
+                      onChange={(patch, immediate) => updateRow(row.key, patch, immediate)}
+                      onCommit={() => commitRow(row.key)}
+                      onRemove={() => void removeRow(row)}
+                      rowRef={(node) => {
+                        if (node) rowNodes.current.set(row.key, node);
+                        else rowNodes.current.delete(row.key);
+                      }}
+                    />
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

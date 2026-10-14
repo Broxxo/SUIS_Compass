@@ -99,7 +99,9 @@ export default function AppTopBar({ title, showBack, onBack, centerContent, righ
                   {navUserLabel}
                   {roleLabel && <span className="text-slate-400">（{roleLabel}）</span>}
                 </div>
-                {(user.role === 'system-admin' || user.role === 'admin') && (
+                {(user.role === 'system-admin' ||
+                  user.role === 'admin' ||
+                  (user.moduleGrants?.includes('admin') ?? false)) && (
                   <button
                     type="button"
                     onClick={() => {

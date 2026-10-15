@@ -48,10 +48,9 @@ router.post('/', async (req, res) => {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    if (role !== 'system-admin' && role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: admin only' });
+    const { canEditCurriculumUnits } = await import('../lib/curriculumAccess.js');
+    if (!(await canEditCurriculumUnits(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum unit edit required' });
     }
 
     const { courseId, grade, semester, units } = req.body;
@@ -83,10 +82,9 @@ router.delete('/:courseId/:grade/:semester', async (req, res) => {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    if (role !== 'system-admin' && role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: admin only' });
+    const { canEditCurriculumUnits } = await import('../lib/curriculumAccess.js');
+    if (!(await canEditCurriculumUnits(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum unit edit required' });
     }
 
     const { courseId, grade, semester } = req.params;

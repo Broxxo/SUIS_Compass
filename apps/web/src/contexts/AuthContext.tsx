@@ -23,7 +23,22 @@ function toUser(r: {
   nameEn?: string | null;
   studentId?: string | null;
   moduleGrants?: string[] | null;
+  canManageCurriculum?: boolean | null;
+  canEditCurriculumUnits?: boolean | null;
 }): User {
+  const moduleGrants = Array.isArray(r.moduleGrants)
+    ? r.moduleGrants.filter((k) => typeof k === 'string')
+    : [];
+  const canManageCurriculum =
+    typeof r.canManageCurriculum === 'boolean'
+      ? r.canManageCurriculum
+      : r.role === 'system-admin' ||
+        r.role === 'admin' ||
+        moduleGrants.includes('curriculum');
+  const canEditCurriculumUnits =
+    typeof r.canEditCurriculumUnits === 'boolean'
+      ? r.canEditCurriculumUnits
+      : canManageCurriculum;
   return {
     id: r.id,
     username: r.username,
@@ -32,7 +47,9 @@ function toUser(r: {
     nameZh: r.nameZh ?? null,
     nameEn: r.nameEn ?? null,
     studentId: r.studentId ?? null,
-    moduleGrants: Array.isArray(r.moduleGrants) ? r.moduleGrants.filter((k) => typeof k === 'string') : [],
+    moduleGrants,
+    canManageCurriculum,
+    canEditCurriculumUnits,
   };
 }
 
@@ -108,6 +125,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             nameEn?: string | null;
             studentId?: string | null;
             moduleGrants?: string[] | null;
+            canManageCurriculum?: boolean | null;
+            canEditCurriculumUnits?: boolean | null;
           };
         };
         if (data.success && data.token && data.user) {

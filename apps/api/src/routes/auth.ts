@@ -60,6 +60,18 @@ async function toUserRow(row: {
   } catch {
     moduleGrants = [];
   }
+  let canManageCurriculum = row.role === 'system-admin' || row.role === 'admin';
+  let canEditCurriculumUnits = canManageCurriculum;
+  try {
+    const { canManageCurriculumFramework, canEditCurriculumUnits: canEditUnits } = await import(
+      '../lib/curriculumAccess.js'
+    );
+    canManageCurriculum = await canManageCurriculumFramework(row.id);
+    canEditCurriculumUnits = await canEditUnits(row.id);
+  } catch {
+    canManageCurriculum = canManageCurriculum || moduleGrants.includes('curriculum');
+    canEditCurriculumUnits = canManageCurriculum;
+  }
   return {
     id: row.id,
     username: row.username,
@@ -69,6 +81,10 @@ async function toUserRow(row: {
     nameEn: (row.name_en ?? '').toString().trim() || null,
     studentId: row.student_id ?? null,
     moduleGrants,
+    /** 新建/编辑课程、课程设置等框架能力 */
+    canManageCurriculum,
+    /** 编辑单元格子（含学科组长） */
+    canEditCurriculumUnits,
   };
 }
 

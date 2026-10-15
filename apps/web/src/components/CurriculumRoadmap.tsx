@@ -210,8 +210,9 @@ interface CurriculumRoadmapProps {
   /** 切换 AI 面板打开/关闭 */
   onToggleAI?: () => void;
   /**
-   * hub：全校只读看板（所有人不能改课程/单元/概念框架）。
-   * admin-course-management：后台「课程管理」；仅 system-admin 可改课程与概念框架，admin 可改单元。
+   * hub / admin-course-management：
+   * - 管理员或 curriculum 授权：可管理课程框架 + 编辑单元
+   * - 学科组长：仅可编辑单元格子，不显示右上角添加/课程设置
    */
   surface?: 'hub' | 'admin-course-management';
   /** 嵌在后台内时使用，避免占满视口 */
@@ -229,12 +230,16 @@ export default function CurriculumRoadmap({
   const { user } = useAuth();
   const isAdminSurface = surface === 'admin-course-management';
   const showRoadmapTopBar = !embedded;
-  const canEditFramework = surface === 'admin-course-management' && user?.role === 'system-admin';
-  const canEditUnits = surface === 'admin-course-management'
-    && (user?.role === 'system-admin' || user?.role === 'admin');
-  /** 与数据库学科顺序一致：仅管理员与系统管理员可在「课程设置」中调序并保存 */
-  const canReorderCategories =
-    isAdminSurface && (user?.role === 'system-admin' || user?.role === 'admin');
+  const canEditFramework =
+    user?.canManageCurriculum === true ||
+    user?.role === 'system-admin' ||
+    user?.role === 'admin' ||
+    (user?.moduleGrants?.includes('curriculum') ?? false);
+  const canEditUnits =
+    canEditFramework ||
+    user?.canEditCurriculumUnits === true;
+  /** 课程调序/领域设置仅框架权限 */
+  const canReorderCategories = canEditFramework;
   const { setContextFromApp } = useAIContext();
   
   // Load courses from localStorage or cloud on mount
@@ -824,19 +829,21 @@ export default function CurriculumRoadmap({
               <Download className="h-4 w-4" />
               <span>{t('settings.exportCourseData')}</span>
             </button>
-            <button
-              type="button"
-              disabled={isImportingCourseData}
-              className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
-              title={t('settings.importCourseDataTitle')}
-              onClick={() => {
-                setIsSettingsMenuOpen(false);
-                handleImportCourseDataClick();
-              }}
-            >
-              <Upload className="h-4 w-4" />
-              <span>{t('settings.importCourseData')}</span>
-            </button>
+            {user?.role === 'system-admin' ? (
+              <button
+                type="button"
+                disabled={isImportingCourseData}
+                className="w-full px-3 py-2 text-left hover:bg-slate-100 flex items-center gap-2 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                title={t('settings.importCourseDataTitle')}
+                onClick={() => {
+                  setIsSettingsMenuOpen(false);
+                  handleImportCourseDataClick();
+                }}
+              >
+                <Upload className="h-4 w-4" />
+                <span>{t('settings.importCourseData')}</span>
+              </button>
+            ) : null}
           </div>
         )}
       </div>
@@ -878,7 +885,7 @@ export default function CurriculumRoadmap({
                 t={t}
               />
             </div>
-            {isAdminSurface ? (
+            {canEditFramework ? (
               <div className="absolute right-0 top-1/2 flex -translate-y-1/2 flex-wrap items-center justify-end gap-1.5 sm:gap-2">
                 {adminToolbarActions}
               </div>

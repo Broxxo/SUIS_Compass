@@ -126,7 +126,7 @@ function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): strin
 
 function errorText(code: string, isZh: boolean): string {
   const zh: Record<string, string> = {
-    past_locked: '已经过去的内容只有管理员可以改。',
+    past_locked: '已经过去的整周只有管理员可以改；本周仍可填写。',
     forbidden: '没有修改这个模块的权限。',
     invalid_bounds: '日期顺序需要是：开学，然后寒假，然后春季开学，然后暑假。',
     invalid_time: '结束时间要晚于开始时间。',
@@ -145,6 +145,11 @@ function mondayOnOrBefore(value: string): string {
   const day = weekday(value);
   const delta = day === 0 ? 6 : day - 1;
   return addDays(value, -delta);
+}
+
+/** 与后端一致：仅锁定早于本周一的日期 */
+function isCalendarDatePastLocked(eventDate: string, today: string): boolean {
+  return mondayOnOrBefore(eventDate) < mondayOnOrBefore(today);
 }
 
 function shiftWeekendToMonday(value: string): string {
@@ -476,13 +481,13 @@ export default function SchoolCalendar({
   const canEditFocus = (moduleId: string, boundaryDate: string) => {
     if (!board) return false;
     if (!focusModuleIds.includes(moduleId)) return false;
-    if (boundaryDate < board.today) return board.isAdmin;
+    if (isCalendarDatePastLocked(boundaryDate, board.today)) return board.isAdmin;
     return true;
   };
   const canEditModule = (moduleId: string, boundaryDate: string) => {
     if (!board) return false;
     if (!board.editableModuleIds.includes(moduleId)) return false;
-    if (boundaryDate < board.today) return board.isAdmin;
+    if (isCalendarDatePastLocked(boundaryDate, board.today)) return board.isAdmin;
     return true;
   };
 

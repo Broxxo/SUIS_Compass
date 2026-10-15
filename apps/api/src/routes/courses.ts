@@ -136,12 +136,9 @@ router.post('/', async (req, res) => {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    const { userHasModuleGrant } = await import('../lib/modulePermissionGrants.js');
-    const canManageCurriculum = role === 'system-admin' || (await userHasModuleGrant(uid, 'curriculum'));
-    if (!canManageCurriculum) {
-      return res.status(403).json({ error: 'Forbidden: system-admin or curriculum grant required to create courses' });
+    const { canManageCurriculumFramework } = await import('../lib/curriculumAccess.js');
+    if (!(await canManageCurriculumFramework(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum framework management required to create courses' });
     }
 
     await ensureCoursesExtraColumns();
@@ -184,12 +181,9 @@ router.put('/:id', async (req, res) => {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    const { userHasModuleGrant } = await import('../lib/modulePermissionGrants.js');
-    const canManageCurriculum = role === 'system-admin' || (await userHasModuleGrant(uid, 'curriculum'));
-    if (!canManageCurriculum) {
-      return res.status(403).json({ error: 'Forbidden: system-admin or curriculum grant required to update courses' });
+    const { canManageCurriculumFramework } = await import('../lib/curriculumAccess.js');
+    if (!(await canManageCurriculumFramework(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum framework management required to update courses' });
     }
 
     await ensureCoursesExtraColumns();
@@ -255,12 +249,9 @@ router.delete('/:id', async (req, res) => {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    const { userHasModuleGrant } = await import('../lib/modulePermissionGrants.js');
-    const canManageCurriculum = role === 'system-admin' || (await userHasModuleGrant(uid, 'curriculum'));
-    if (!canManageCurriculum) {
-      return res.status(403).json({ error: 'Forbidden: system-admin or curriculum grant required to delete courses' });
+    const { canManageCurriculumFramework } = await import('../lib/curriculumAccess.js');
+    if (!(await canManageCurriculumFramework(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum framework management required to delete courses' });
     }
 
     const { id } = req.params;

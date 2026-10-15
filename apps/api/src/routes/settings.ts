@@ -124,10 +124,9 @@ router.put('/category-order', async (req, res) => {
     const uid = userId(req);
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    if (role !== 'system-admin' && role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
+    const { canManageCurriculumFramework } = await import('../lib/curriculumAccess.js');
+    if (!(await canManageCurriculumFramework(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum framework management required' });
     }
 
     const { categoryOrder } = req.body as { categoryOrder?: unknown };
@@ -183,10 +182,9 @@ router.put('/course-domains', async (req, res) => {
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
     await ensureCourseDomainsColumn();
 
-    const roleResult = await pool.query('SELECT role FROM users WHERE id = $1', [uid]);
-    const role = roleResult.rows[0]?.role as string | undefined;
-    if (role !== 'system-admin' && role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: admin or system-admin required' });
+    const { canManageCurriculumFramework } = await import('../lib/curriculumAccess.js');
+    if (!(await canManageCurriculumFramework(uid))) {
+      return res.status(403).json({ error: 'Forbidden: curriculum framework management required' });
     }
 
     const normalized = normalizeCourseDomainsConfig((req.body as { courseDomains?: unknown })?.courseDomains ?? req.body);

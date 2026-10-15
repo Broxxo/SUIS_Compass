@@ -30,6 +30,71 @@ type PermissionSettingsPanelProps = {
   teachers: AdminUser[];
 };
 
+type RoleMatrixKey = 'system-admin' | 'admin' | 'teacher';
+
+const ROLE_MATRIX_ORDER: RoleMatrixKey[] = ['system-admin', 'admin', 'teacher'];
+
+const ROLE_MATRIX_LABELS: Record<RoleMatrixKey, { zh: string; en: string }> = {
+  'system-admin': { zh: '系统管理员', en: 'System Admin' },
+  admin: { zh: '管理员', en: 'Admin' },
+  teacher: { zh: '教职工', en: 'Staff' },
+};
+
+/** 角色 × 模块总览（短说明，与当前默认权限一致） */
+const ROLE_MODULE_MATRIX: Record<
+  RoleMatrixKey,
+  Record<string, { zh: string; en: string }>
+> = {
+  'system-admin': {
+    'calendar-month': { zh: '可查看与修改', en: 'View & edit' },
+    'calendar-week': { zh: '可查看与修改', en: 'View & edit' },
+    'open-lessons': { zh: '可管理全部', en: 'Manage all' },
+    curriculum: { zh: '可管理（含整包导入）', en: 'Manage (incl. full import)' },
+    'student-center': { zh: '全校范围', en: 'School-wide' },
+    'teacher-center': { zh: '全校范围', en: 'School-wide' },
+    mailbox: { zh: '全部信件与处理', en: 'All mail & handle' },
+    lighthouse: { zh: '可查看与编辑', en: 'View & edit' },
+    admin: { zh: '全部后台（含数据库）', en: 'Full admin (incl. DB)' },
+  },
+  admin: {
+    'calendar-month': { zh: '可查看与修改', en: 'View & edit' },
+    'calendar-week': { zh: '可查看与修改', en: 'View & edit' },
+    'open-lessons': { zh: '可管理全部', en: 'Manage all' },
+    curriculum: { zh: '可管理', en: 'Manage' },
+    'student-center': { zh: '全校范围', en: 'School-wide' },
+    'teacher-center': { zh: '全校范围', en: 'School-wide' },
+    mailbox: { zh: '全部信件与处理', en: 'All mail & handle' },
+    lighthouse: { zh: '仅查看', en: 'View only' },
+    admin: { zh: '可进入后台', en: 'Can open admin' },
+  },
+  teacher: {
+    'calendar-month': { zh: '仅查看', en: 'View only' },
+    'calendar-week': {
+      zh: '可查看；年级/学科组长与协调员可改',
+      en: 'View; grade/subject leads & coordinators edit',
+    },
+    'open-lessons': {
+      zh: '填自己的课；组长管本组',
+      en: 'Own lessons; leads manage group',
+    },
+    curriculum: {
+      zh: '可查看；学科组长可编辑单元',
+      en: 'View; subject leads edit units',
+    },
+    'student-center': {
+      zh: '按班主任/任课/年级组长范围',
+      en: 'By homeroom / teaching / grade head',
+    },
+    'teacher-center': {
+      zh: '默认看自己；学科组长看本组',
+      en: 'Self; subject leads see group',
+    },
+    mailbox: { zh: '写信与看自己的信', en: 'Write & own mail' },
+    lighthouse: { zh: '仅查看', en: 'View only' },
+    admin: { zh: '—', en: '—' },
+  },
+};
+
 function teacherLabel(
   teacher: Pick<AdminUser, 'nameZh' | 'nameEn' | 'displayName' | 'username'>,
   isZh: boolean,
@@ -55,6 +120,34 @@ export default function PermissionSettingsPanel({ isZh, teachers }: PermissionSe
         .sort((a, b) => teacherLabel(a, isZh).localeCompare(teacherLabel(b, isZh), isZh ? 'zh' : 'en')),
     [teachers, isZh],
   );
+
+  const matrixColumns = useMemo(() => {
+    const fallbackLabels: Record<string, { zh: string; en: string }> = {
+      'calendar-month': { zh: '校历 · 月历', en: 'Calendar · Month' },
+      'calendar-week': { zh: '校历 · 周历', en: 'Calendar · Week' },
+      'open-lessons': { zh: '公开课', en: 'Open lessons' },
+      curriculum: { zh: '课程河流', en: 'Curriculum river' },
+      'student-center': { zh: '学生中心', en: 'Student center' },
+      'teacher-center': { zh: '教师中心', en: 'Teacher center' },
+      mailbox: { zh: '信箱', en: 'Mailbox' },
+      lighthouse: { zh: '协和灯塔', en: 'Xiehe Lighthouse' },
+      admin: { zh: '后台入口', en: 'Admin panel' },
+    };
+    const keys = Object.keys(ROLE_MODULE_MATRIX['system-admin']);
+    return keys.map((key) => {
+      const fromApi = modules.find((mod) => mod.key === key);
+      return {
+        key,
+        label: fromApi
+          ? isZh
+            ? fromApi.labelZh
+            : fromApi.labelEn
+          : isZh
+            ? fallbackLabels[key]?.zh ?? key
+            : fallbackLabels[key]?.en ?? key,
+      };
+    });
+  }, [modules, isZh]);
 
   const reload = async () => {
     setLoading(true);
@@ -113,6 +206,51 @@ export default function PermissionSettingsPanel({ isZh, teachers }: PermissionSe
         <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
       ) : null}
 
+      <section className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm sm:p-4">
+        <h3 className="text-sm font-semibold text-slate-900">
+          {isZh ? '角色权限总览' : 'Role overview'}
+        </h3>
+        <div className="mt-3 overflow-x-auto">
+          <table className="min-w-[960px] w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-100 text-left text-xs text-slate-600">
+                <th className="sticky left-0 z-10 bg-slate-100 py-2 px-2 font-medium whitespace-nowrap border border-slate-200">
+                  {isZh ? '角色' : 'Role'}
+                </th>
+                {matrixColumns.map((col) => (
+                  <th
+                    key={col.key}
+                    className="py-2 px-2 font-medium whitespace-nowrap border border-slate-200 min-w-[7.5rem]"
+                  >
+                    {col.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {ROLE_MATRIX_ORDER.map((role) => (
+                <tr key={role} className="border-t border-slate-100">
+                  <td className="sticky left-0 z-10 bg-white py-2 px-2 font-medium text-slate-800 whitespace-nowrap border border-slate-200">
+                    {ROLE_MATRIX_LABELS[role][isZh ? 'zh' : 'en']}
+                  </td>
+                  {matrixColumns.map((col) => {
+                    const cell = ROLE_MODULE_MATRIX[role][col.key];
+                    return (
+                      <td
+                        key={`${role}-${col.key}`}
+                        className="py-2 px-2 text-slate-600 align-top border border-slate-200 leading-snug"
+                      >
+                        {cell ? (isZh ? cell.zh : cell.en) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       {loading ? (
         <p className="text-sm text-slate-500">{isZh ? '正在读取权限…' : 'Loading permissions…'}</p>
       ) : (
@@ -130,12 +268,12 @@ export default function PermissionSettingsPanel({ isZh, teachers }: PermissionSe
                 <h3 className="text-sm font-semibold text-slate-900">
                   {isZh ? mod.labelZh : mod.labelEn}
                 </h3>
-                <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                <p className="mt-1 text-sm leading-relaxed text-slate-500">
                   {isZh ? mod.defaultAccessZh : mod.defaultAccessEn}
                 </p>
-                <p className="mt-2 text-xs text-slate-600">
+                <p className="mt-2 text-sm text-slate-600">
                   <span className="font-medium text-slate-700">
-                    {isZh ? '额外授权可做：' : 'Extra grant: '}
+                    {isZh ? '额外授权权限：' : 'Extra permissions: '}
                   </span>
                   {isZh ? mod.elevatedZh : mod.elevatedEn}
                 </p>

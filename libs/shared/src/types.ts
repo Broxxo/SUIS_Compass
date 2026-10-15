@@ -83,4 +83,8 @@ export type User = {
   studentId?: string | null;
   /** 模块额外授权（不跟学年），如 open-lessons、admin */
   moduleGrants?: string[];
+  /** 课程河流框架：新建/编辑课程、调序等（管理员或 curriculum 额外授权） */
+  canManageCurriculum?: boolean;
+  /** 课程河流单元格子编辑（管理员、学科组长或 curriculum 额外授权） */
+  canEditCurriculumUnits?: boolean;
 };

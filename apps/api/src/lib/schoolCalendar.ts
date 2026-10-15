@@ -3,7 +3,6 @@ import pool from '../config/database.js';
 import { getTeacherGradeHeadScopeKeys } from './gradeHeadAccess.js';
 import { userHasModuleGrant } from './modulePermissionGrants.js';
 import { loadSchoolGradeStructure, type GradeConfigSegment } from './schoolGradeStructure.js';
-import { loadSchoolTeachingSubjectGroups } from './schoolTeachingSubjectGroups.js';
 import { listHeadedSubjectGroupIds } from './subjectGroupPortraitDashboard.js';
 
 export type CalendarPhase = 'autumn_prep' | 'autumn' | 'winter' | 'spring_prep' | 'spring' | 'summer';
@@ -111,6 +110,12 @@ export function mondayOnOrBefore(value: string): string {
   const day = weekday(value);
   const delta = day === 0 ? 6 : day - 1;
   return addDays(value, -delta);
+}
+
+/** 非管理员：仅锁定「早于本周一」的日期；本周已过工作日仍可改。 */
+export function isCalendarDatePastLocked(eventDate: string, today = todayShanghai()): boolean {
+  if (!isDate(eventDate)) return true;
+  return mondayOnOrBefore(eventDate) < mondayOnOrBefore(today);
 }
 
 function shiftWeekendToMonday(value: string): string {
@@ -353,7 +358,7 @@ async function gradeHeadEditableModuleIds(
     .map((m) => m.id);
 }
 
-/** 周历事项：学科组长 / 教学管理协调员 → 其学科组覆盖学部的模块 */
+/** 周历事项：学科组长 / 教学管理协调员可写全部模块（含未绑定学部的「课程教学」等） */
 async function subjectLeadEditableModuleIds(
   userId: string,
   academicYearId: string,
@@ -361,20 +366,7 @@ async function subjectLeadEditableModuleIds(
 ): Promise<string[]> {
   const headed = await listHeadedSubjectGroupIds(academicYearId, userId);
   if (headed.size === 0) return [];
-  const groups = await loadSchoolTeachingSubjectGroups();
-  const segmentIds = new Set<string>();
-  let coversAll = false;
-  for (const group of groups) {
-    if (!headed.has(group.id)) continue;
-    if (group.segmentIds.length === 0) {
-      coversAll = true;
-      break;
-    }
-    for (const segmentId of group.segmentIds) segmentIds.add(segmentId);
-  }
-  if (coversAll) return modules.map((m) => m.id);
-  if (segmentIds.size === 0) return [];
-  return modules.filter((mod) => !!mod.segmentId && segmentIds.has(mod.segmentId)).map((m) => m.id);
+  return modules.map((m) => m.id);
 }
 
 /** 周历事项：管理员 / 周历额外授权 / 年级组长与年级协调员 / 学科组长与教学协调员 */
@@ -755,7 +747,9 @@ async function assertCanWriteEventModule(
   const modules = await calendarModules();
   const editable = new Set(await editableEventModuleIdsFor(userId, academicYearId, modules));
   if (!editable.has(moduleId)) return { error: 'forbidden' as const };
-  if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await callerIsAdmin(userId))) {
+    return { error: 'past_locked' as const };
+  }
   return { ok: true as const };
 }
 
@@ -768,7 +762,9 @@ async function assertCanWriteFocusModule(
   const modules = await calendarModules();
   const editable = new Set(await editableFocusModuleIdsFor(userId, academicYearId, modules));
   if (!editable.has(moduleId)) return { error: 'forbidden' as const };
-  if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await callerIsAdmin(userId))) {
+    return { error: 'past_locked' as const };
+  }
   return { ok: true as const };
 }
 
@@ -777,7 +773,9 @@ async function assertCanWriteAnyDivision(userId: string, academicYearId: string,
   const modules = await calendarModules();
   const editable = new Set(await editableEventModuleIdsFor(userId, academicYearId, modules));
   if (!modules.some((mod) => mod.segmentId && editable.has(mod.id))) return { error: 'forbidden' as const };
-  if (eventDate && eventDate < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await callerIsAdmin(userId))) {
+    return { error: 'past_locked' as const };
+  }
   return { ok: true as const };
 }
 
@@ -933,9 +931,13 @@ export async function updateCalendarEvent(
   }
   const title = input.title.trim();
   if (!title) return { error: 'title_required' as const };
-  const today = todayShanghai();
   const isAdmin = await callerIsAdmin(userId);
-  if ((existing.event_date < today || input.eventDate < today) && !isAdmin) return { error: 'past_locked' as const };
+  if (
+    !isAdmin &&
+    (isCalendarDatePastLocked(existing.event_date) || isCalendarDatePastLocked(input.eventDate))
+  ) {
+    return { error: 'past_locked' as const };
+  }
   const shared = Boolean(input.shared);
   const module = (await calendarModules()).find((item) => item.id === input.moduleId);
   if (!module) return { error: 'not_found' as const };
@@ -998,7 +1000,9 @@ export async function deleteCalendarEvent(userId: string, id: string) {
     )
   ).rows[0] as { academic_year_id: string; module_id: string; event_date: string; shared: boolean } | undefined;
   if (!existing) return { error: 'not_found' as const };
-  if (existing.event_date < todayShanghai() && !(await callerIsAdmin(userId))) return { error: 'past_locked' as const };
+  if (isCalendarDatePastLocked(existing.event_date) && !(await callerIsAdmin(userId))) {
+    return { error: 'past_locked' as const };
+  }
   const gate = existing.shared
     ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
     : await assertCanWriteEventModule(userId, existing.academic_year_id, existing.module_id, null);

@@ -87,4 +87,6 @@ export type User = {
   canManageCurriculum?: boolean;
   /** 课程河流单元格子编辑（管理员、学科组长或 curriculum 额外授权） */
   canEditCurriculumUnits?: boolean;
+  /** 是否为初始系统管理员（最早的系统管理员账号） */
+  isRootSystemAdmin?: boolean;
 };

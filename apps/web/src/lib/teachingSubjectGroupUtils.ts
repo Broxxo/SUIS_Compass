@@ -1,4 +1,4 @@
-import { STAFFING_HOMEROOM_SUBJECT_KEY, staffingSubjectKeyFromCourse } from '@repo/shared';
+import { STAFFING_HOMEROOM_SUBJECT_KEY, getSubjectCategoryTextForLayout, staffingSubjectKeyFromCourse } from '@repo/shared';
 import type { TeachingSubjectGroup } from '@repo/shared';
 import type { Course, GradeConfig } from '../types';
 import type { ClassItem, StaffingAssignment } from '../types/classManagement';
@@ -101,6 +101,42 @@ export function buildSubjectDisplayKeyToStaffingKeys(
   return map;
 }
 
+/** 学科组「相关学科」可用来和教职工主学科比对的名称（列名、中英文分类、课程名） */
+export function buildSubjectDisplayKeyToMatchTexts(
+  columnGroups: Array<{ key: string; name?: string; courses: Course[] }>,
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const group of columnGroups) {
+    const texts = new Set<string>();
+    if (group.key.trim()) texts.add(group.key.trim());
+    if (group.name?.trim()) texts.add(group.name.trim());
+    for (const course of group.courses) {
+      if (course.name.trim()) texts.add(course.name.trim());
+      const zh = getSubjectCategoryTextForLayout(course.subjectCategory, 'zh').trim();
+      const en = getSubjectCategoryTextForLayout(course.subjectCategory, 'en').trim();
+      if (zh) texts.add(zh);
+      if (en) texts.add(en);
+    }
+    map.set(group.key, [...texts]);
+  }
+  return map;
+}
+
+function normalizeSubjectText(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, '');
+}
+
+/** 主学科与学科组学科名称相同，或一方完整包含另一方（至少两个字） */
+export function subjectTextsOverlap(left: string, right: string): boolean {
+  const a = normalizeSubjectText(left);
+  const b = normalizeSubjectText(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = a.length < b.length ? a : b;
+  if (shorter.length < 2) return false;
+  return a.includes(b) || b.includes(a);
+}
+
 export function buildSubjectOptionsFromColumnGroups(
   columnGroups: Array<{ key: string; name: string }>,
 ): SubjectOption[] {
@@ -114,16 +150,21 @@ export function filterTeachersForSubjectGroup(
   classes: ClassItem[],
   gradeConfig: GradeConfig,
   displayKeyToSubjectKeys: Map<string, Set<string>>,
+  subjectMatchTexts?: Map<string, string[]>,
 ): AdminUser[] {
   if (group.subjectKeys.length === 0) return [];
   const scopedClassIds = new Set(
     classesInSelectedSegments(classes, group.segmentIds, gradeConfig).map((c) => c.id),
   );
   const allowedSubjectKeys = new Set<string>();
+  const matchTexts: string[] = [];
   for (const dk of group.subjectKeys) {
     const keys = displayKeyToSubjectKeys.get(dk);
     if (keys) keys.forEach((k) => allowedSubjectKeys.add(k));
     else allowedSubjectKeys.add(dk);
+    const texts = subjectMatchTexts?.get(dk);
+    if (texts && texts.length > 0) matchTexts.push(...texts);
+    else matchTexts.push(dk);
   }
   const teacherIds = new Set<string>();
   for (const a of assignments) {
@@ -132,5 +173,73 @@ export function filterTeachersForSubjectGroup(
     if (!allowedSubjectKeys.has(a.subjectKey)) continue;
     if (a.teacherId) teacherIds.add(a.teacherId);
   }
+  for (const teacher of teachers) {
+    const subject = (teacher.primarySubject ?? '').trim();
+    if (!subject) continue;
+    if (matchTexts.some((text) => subjectTextsOverlap(subject, text))) teacherIds.add(teacher.id);
+  }
   return teachers.filter((t) => teacherIds.has(t.id));
+}
+
+function teacherNameSortKey(teacher: AdminUser): string {
+  return (
+    (teacher.nameZh ?? '').trim() ||
+    (teacher.nameEn ?? '').trim() ||
+    teacher.displayName ||
+    teacher.username ||
+    teacher.id
+  );
+}
+
+/**
+ * 学科组组员候选顺序：
+ * 1. 已进本组
+ * 2. 岗位/主学科与相关学科重叠
+ * 3. 尚未加入任何学科组
+ */
+export function listTeachersForSubjectGroupPicker(
+  group: Pick<TeachingSubjectGroup, 'segmentIds' | 'subjectKeys'>,
+  teachers: AdminUser[],
+  assignments: StaffingAssignment[],
+  classes: ClassItem[],
+  gradeConfig: GradeConfig,
+  displayKeyToSubjectKeys: Map<string, Set<string>>,
+  subjectMatchTexts: Map<string, string[]> | undefined,
+  selectedMemberIds: readonly string[],
+  membersByGroupId: Map<string, string[]>,
+): AdminUser[] {
+  const related = filterTeachersForSubjectGroup(
+    group,
+    teachers,
+    assignments,
+    classes,
+    gradeConfig,
+    displayKeyToSubjectKeys,
+    subjectMatchTexts,
+  );
+  const relatedIds = new Set(related.map((teacher) => teacher.id));
+  const selectedIds = new Set(selectedMemberIds);
+  const inAnyGroup = new Set<string>();
+  for (const ids of membersByGroupId.values()) {
+    for (const id of ids) inAnyGroup.add(id);
+  }
+
+  const byId = new Map(teachers.map((teacher) => [teacher.id, teacher]));
+  const sortByName = (left: AdminUser, right: AdminUser) =>
+    teacherNameSortKey(left).localeCompare(teacherNameSortKey(right), 'zh');
+
+  const inGroup: AdminUser[] = [];
+  for (const id of selectedMemberIds) {
+    const teacher = byId.get(id);
+    if (teacher) inGroup.push(teacher);
+  }
+  const relatedNotInGroup = related.filter((teacher) => !selectedIds.has(teacher.id)).sort(sortByName);
+  const ungrouped = teachers
+    .filter(
+      (teacher) =>
+        !selectedIds.has(teacher.id) && !relatedIds.has(teacher.id) && !inAnyGroup.has(teacher.id),
+    )
+    .sort(sortByName);
+
+  return [...inGroup, ...relatedNotInGroup, ...ungrouped];
 }

@@ -2,8 +2,10 @@ import express, { type Request, type Response } from 'express';
 import { getCnHolidayFeed } from '../lib/cnHolidayFeed.js';
 import {
   createCalendarEvent,
+  createCalendarMeeting,
   createCalendarModule,
   deleteCalendarEvent,
+  deleteCalendarMeeting,
   deleteCalendarModule,
   getSchoolCalendarBoard,
   importSchoolCalendar,
@@ -15,9 +17,11 @@ import {
   saveWeekTheme,
   setCalendarEventStatus,
   updateCalendarEvent,
+  updateCalendarMeeting,
   updateCalendarModule,
   type CalendarEventStatus,
   type CalendarImportEvent,
+  type CalendarImportMeeting,
   type CalendarImportWeek,
   type DayOverrideKind,
 } from '../lib/schoolCalendar.js';
@@ -187,7 +191,7 @@ router.post('/import', async (req: ReqWithUserId, res: Response) => {
   try {
     const userId = req.userId;
     if (!userId) return fail(res, 401, 'unauthorized');
-    const body = (req.body ?? {}) as { academicYearId?: string; weeks?: unknown; events?: unknown };
+    const body = (req.body ?? {}) as { academicYearId?: string; weeks?: unknown; events?: unknown; meetings?: unknown };
     const academicYearId = String(body.academicYearId ?? '').trim();
     const weeks: CalendarImportWeek[] = Array.isArray(body.weeks)
       ? body.weeks.map((item, index) => {
@@ -226,7 +230,23 @@ router.post('/import', async (req: ReqWithUserId, res: Response) => {
             };
           })
         : null;
-    const result = await importSchoolCalendar(userId, academicYearId, { weeks, events });
+    const meetings: CalendarImportMeeting[] | null = body.meetings == null
+      ? null
+      : Array.isArray(body.meetings)
+        ? body.meetings.map((item, index) => {
+            const rec = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+            return {
+              row: Number(rec.row) > 0 ? Number(rec.row) : index + 3,
+              weekday: Number(rec.weekday),
+              period: String(rec.period ?? ''),
+              startTime: String(rec.startTime ?? ''),
+              endTime: String(rec.endTime ?? ''),
+              title: String(rec.title ?? ''),
+              location: String(rec.location ?? ''),
+            };
+          })
+        : null;
+    const result = await importSchoolCalendar(userId, academicYearId, { weeks, events, meetings });
     if ('error' in result) {
       const status = result.error === 'year_not_found' ? 404 : result.error === 'forbidden' ? 403 : 400;
       return res.status(status).json(result);
@@ -305,6 +325,57 @@ router.patch('/events/:id/status', async (req: ReqWithUserId, res: Response) => 
     return res.json(updated);
   } catch (error) {
     console.error('school calendar event status', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+function readMeetingBody(body: Record<string, unknown>) {
+  return {
+    weekday: Number(body.weekday),
+    period: String(body.period ?? '') as 'morning' | 'noon' | 'afternoon',
+    startTime: String(body.startTime ?? ''),
+    endTime: String(body.endTime ?? ''),
+    title: String(body.title ?? ''),
+    location: String(body.location ?? ''),
+  };
+}
+
+router.post('/meetings', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const created = await createCalendarMeeting(userId, String(body.academicYearId ?? ''), readMeetingBody(body));
+    if (reject(res, created)) return;
+    return res.json(created);
+  } catch (error) {
+    console.error('school calendar meeting create', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+router.patch('/meetings/:id', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const updated = await updateCalendarMeeting(userId, req.params.id, readMeetingBody((req.body ?? {}) as Record<string, unknown>));
+    if (reject(res, updated)) return;
+    return res.json(updated);
+  } catch (error) {
+    console.error('school calendar meeting update', error);
+    return fail(res, 500, 'internal');
+  }
+});
+
+router.delete('/meetings/:id', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return fail(res, 401, 'unauthorized');
+    const removed = await deleteCalendarMeeting(userId, req.params.id);
+    if (reject(res, removed)) return;
+    return res.json(removed);
+  } catch (error) {
+    console.error('school calendar meeting delete', error);
     return fail(res, 500, 'internal');
   }
 });

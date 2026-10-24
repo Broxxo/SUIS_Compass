@@ -84,6 +84,62 @@ function timeStartMinutes(text: string): number {
   return hour * 60 + minute;
 }
 
+function normalizeClock(value: string): string {
+  const match = value.trim().match(/^(\d{1,2})[:：](\d{2})$/);
+  if (!match) return '';
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return '';
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+/** 从旧公开课时间文字里抽出时刻，兼容 10:00–10:40、10:00-10:40、8:20—9:00 等写法。 */
+function extractClocks(text: string): string[] {
+  const clocks: string[] = [];
+  for (const match of text.matchAll(/(\d{1,2})\s*[:：]\s*(\d{2})/g)) {
+    const clock = normalizeClock(`${match[1]}:${match[2]}`);
+    if (clock) clocks.push(clock);
+  }
+  return clocks;
+}
+
+function splitTimeRange(text: string): { start: string; end: string } {
+  const clocks = extractClocks(text);
+  if (clocks.length >= 2) return { start: clocks[0], end: clocks[1] };
+  if (clocks.length === 1) return { start: clocks[0], end: '' };
+  return { start: '', end: '' };
+}
+
+function joinTimeRange(start: string, end: string): string {
+  const from = normalizeClock(start);
+  const to = normalizeClock(end);
+  if (!from && !to) return '';
+  if (!to) return from;
+  if (!from) return to;
+  return `${from}–${to}`;
+}
+
+/** 手机上可直接敲数字；输入 930 / 0930 也会在失焦时收成 09:30。 */
+function sanitizeClockTyping(raw: string): string {
+  const cleaned = raw.replace(/：/g, ':').replace(/[^\d:]/g, '');
+  const colon = cleaned.indexOf(':');
+  if (colon < 0) {
+    const digits = cleaned.slice(0, 4);
+    if (digits.length <= 2) return digits;
+    return `${digits.slice(0, 2)}:${digits.slice(2)}`;
+  }
+  return `${cleaned.slice(0, colon).slice(0, 2)}:${cleaned.slice(colon + 1).replace(/:/g, '').slice(0, 2)}`;
+}
+
+function coerceClock(raw: string): string {
+  const direct = normalizeClock(raw);
+  if (direct) return direct;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 3) return normalizeClock(`${digits[0]}:${digits.slice(1)}`);
+  if (digits.length >= 4) return normalizeClock(`${digits.slice(0, 2)}:${digits.slice(2, 4)}`);
+  return '';
+}
+
 function openLessonDayParts(date: string, isZh: boolean): { date: string; weekday: string } {
   if (!date) return { date: isZh ? '未填' : '—', weekday: '' };
   const match = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -682,15 +738,15 @@ export default function OpenLessons({
               </FilterSelect>
             </FilterField>
           </FilterToolbar>
-          <div className="hidden shrink-0 flex-wrap items-center justify-end gap-2 md:flex">
+          <div className="hidden shrink-0 flex-wrap items-center justify-end gap-2 pr-11 md:flex">
             <Button
               type="button"
               variant="outline"
-              size="sm"
+              className="h-auto px-3 py-2 text-sm"
               disabled={!yearId || !termReady || excelBusy !== null}
               onClick={() => void exportExcel()}
             >
-              {excelBusy === 'export' ? (isZh ? '导出中…' : 'Exporting…') : isZh ? '导出 Excel' : 'Export Excel'}
+              {excelBusy === 'export' ? (isZh ? '导出中…' : 'Exporting…') : isZh ? '导出' : 'Export'}
             </Button>
             <input
               ref={excelInputRef}
@@ -706,15 +762,15 @@ export default function OpenLessons({
             <Button
               type="button"
               variant="outline"
-              size="sm"
+              className="h-auto px-3 py-2 text-sm"
               disabled={!yearId || !termReady || excelBusy !== null}
               onClick={() => excelInputRef.current?.click()}
             >
-              {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+              {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入' : 'Import'}
             </Button>
             {canAdd ? (
-              <Button type="button" size="sm" onClick={() => setAddOpen(true)}>
-                {isZh ? '添加公开课' : 'Add open lesson'}
+              <Button type="button" className="h-auto border border-transparent px-3 py-2 text-sm" onClick={() => setAddOpen(true)}>
+                {isZh ? '添加' : 'Add'}
               </Button>
             ) : null}
           </div>
@@ -723,20 +779,20 @@ export default function OpenLessons({
         {pageError ? <p className="mt-3 whitespace-pre-line text-sm text-red-600">{errorText(pageError, isZh)}</p> : null}
 
         <div className="mt-3 md:hidden">
-          <div className="flex flex-nowrap items-center justify-between gap-2">
-            <button
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button
               type="button"
-              className="shrink-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700"
+              variant="outline"
+              className="h-10 shrink-0 px-3 text-sm"
               onClick={() => setMobileTable((open) => !open)}
             >
               {mobileTable ? (isZh ? '卡片' : 'Cards') : isZh ? '表格' : 'Sheet'}
-            </button>
-            <div className="flex shrink-0 items-center justify-end gap-1.5">
+            </Button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
-                className="h-8 shrink-0 px-2 text-xs"
+                className="h-10 shrink-0 px-3 text-sm"
                 disabled={!yearId || !termReady || excelBusy !== null}
                 onClick={() => void exportExcel()}
               >
@@ -745,16 +801,15 @@ export default function OpenLessons({
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
-                className="h-8 shrink-0 px-2 text-xs"
+                className="h-10 shrink-0 px-3 text-sm"
                 disabled={!yearId || !termReady || excelBusy !== null}
                 onClick={() => excelInputRef.current?.click()}
               >
                 {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入' : 'Import'}
               </Button>
               {canAdd ? (
-                <Button type="button" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={() => setAddOpen(true)}>
-                  {isZh ? '添加公开课' : 'Add'}
+                <Button type="button" className="h-10 shrink-0 px-3 text-sm" onClick={() => setAddOpen(true)}>
+                  {isZh ? '添加' : 'Add'}
                 </Button>
               ) : null}
             </div>
@@ -786,17 +841,30 @@ export default function OpenLessons({
                       </div>
                       <div className="min-w-0 flex-1 divide-y divide-slate-100">
                         {day.rows.map((row) => (
-                          <article key={row.key} className="px-3 py-2.5">
-                            <p className="text-sm font-medium leading-snug text-slate-800">
-                              {[row.timeText, row.subject, personLabel(isZh, row.teacherNameZh, row.teacherNameEn)]
-                                .filter((part) => part.trim())
-                                .join(' ')}
-                              {row.className || row.location
-                                ? ` ${row.className}${row.location ? `(${row.location})` : ''}`
-                                : ''}
-                            </p>
-                            {row.gradeUnitTopic ? (
-                              <p className="mt-1 text-xs leading-snug text-slate-500">{row.gradeUnitTopic}</p>
+                          <article key={row.key} className="flex items-start gap-2 px-3 py-2.5">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium leading-snug text-slate-800">
+                                {[row.timeText, row.subject, personLabel(isZh, row.teacherNameZh, row.teacherNameEn)]
+                                  .filter((part) => part.trim())
+                                  .join(' ')}
+                                {row.className || row.location
+                                  ? ` ${row.className}${row.location ? `(${row.location})` : ''}`
+                                  : ''}
+                              </p>
+                              {row.gradeUnitTopic ? (
+                                <p className="mt-1 text-xs leading-snug text-slate-500">{row.gradeUnitTopic}</p>
+                              ) : null}
+                            </div>
+                            {row.canEdit && row.id ? (
+                              <button
+                                type="button"
+                                title={isZh ? '删除这节公开课' : 'Delete this open lesson'}
+                                className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-600 hover:bg-red-50 disabled:opacity-40"
+                                disabled={savingKey === row.key}
+                                onClick={() => void removeRow(row)}
+                              >
+                                <Trash2 className="h-4 w-4" aria-hidden />
+                              </button>
                             ) : null}
                           </article>
                         ))}
@@ -810,15 +878,15 @@ export default function OpenLessons({
         </div>
 
         <div className={`${mobileTable ? '' : 'hidden'} mt-3 max-h-[calc(100vh-11rem)] overflow-auto max-md:max-h-none max-md:overflow-visible md:block`}>
-          <div className="inline-block min-w-full overflow-hidden rounded-xl border border-primary/25 bg-white align-top shadow-sm">
-            <table className="w-full min-w-[71rem] table-fixed border-collapse text-left">
+          <div className="inline-block min-w-full pr-11 align-top">
+            <table className="w-full min-w-[71rem] table-fixed border-collapse rounded-xl border border-primary/25 bg-white text-left shadow-sm">
               <colgroup>
-                <col style={{ width: '9rem' }} />
+                <col style={{ width: '7.2rem' }} />
                 <col style={{ width: '8rem' }} />
                 <col style={{ width: '6.5rem' }} />
                 <col style={{ width: '8.5rem' }} />
-                <col style={{ width: '9rem' }} />
-                <col style={{ width: '16rem' }} />
+                <col style={{ width: '6.75rem' }} />
+                <col style={{ width: '21.66rem' }} />
                 <col style={{ width: '8rem' }} />
                 <col />
               </colgroup>
@@ -1141,12 +1209,12 @@ function LessonRow({
           {readOnly ? (
             <ReadCell value={row.timeText} />
           ) : (
-            <input
-              className={cellInput}
+            <TimeRangeInputs
+              compact
               value={row.timeText}
-              placeholder="10:00–10:40"
-              onChange={(e) => onChange({ timeText: e.target.value }, false)}
-              onBlur={onCommit}
+              className={cellInput}
+              onChange={(timeText) => onChange({ timeText }, false)}
+              onCommit={onCommit}
             />
           )}
         </td>
@@ -1176,7 +1244,7 @@ function LessonRow({
             />
           )}
         </td>
-        <td className={`${bodyCell} relative overflow-visible`}>
+        <td className={`${bodyCell} relative`}>
           {readOnly ? (
             <ReadCell value={row.remarks} />
           ) : (
@@ -1188,17 +1256,15 @@ function LessonRow({
             />
           )}
           {row.canEdit && row.id ? (
-            <div className="absolute left-full top-0 z-20 flex h-full w-11 items-center pl-2">
-              <button
-                type="button"
-                title={isZh ? '删除这节公开课' : 'Delete this open lesson'}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-red-600 opacity-0 transition-opacity hover:bg-red-50 group-hover:opacity-100 disabled:opacity-40"
-                disabled={saving}
-                onClick={onRemove}
-              >
-                <Trash2 className="h-4 w-4" aria-hidden />
-              </button>
-            </div>
+            <button
+              type="button"
+              title={isZh ? '删除这节公开课' : 'Delete this open lesson'}
+              className="absolute left-full top-1/2 z-[1] ml-1 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-red-600 hover:bg-red-50 disabled:opacity-40"
+              disabled={saving}
+              onClick={onRemove}
+            >
+              <Trash2 className="h-4 w-4" aria-hidden />
+            </button>
           ) : null}
         </td>
       </tr>
@@ -1215,6 +1281,101 @@ function LessonRow({
 
 function ReadCell({ value }: { value: string }) {
   return <span className="block whitespace-pre-wrap px-1.5 py-1 text-sm text-slate-800">{value || '—'}</span>;
+}
+
+function ClockTextInput({
+  value,
+  className,
+  placeholder = '08:00',
+  onChange,
+  onCommit,
+}: {
+  value: string;
+  className?: string;
+  placeholder?: string;
+  onChange: (clock: string) => void;
+  onCommit?: () => void;
+}) {
+  const [text, setText] = useState(value);
+  useEffect(() => {
+    setText(value);
+  }, [value]);
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      placeholder={placeholder}
+      className={className}
+      value={text}
+      onChange={(e) => {
+        const next = sanitizeClockTyping(e.target.value);
+        setText(next);
+        const clock = normalizeClock(next);
+        if (clock) onChange(clock);
+      }}
+      onBlur={() => {
+        const clock = coerceClock(text);
+        setText(clock);
+        if (clock !== value) onChange(clock);
+        onCommit?.();
+      }}
+    />
+  );
+}
+
+function TimeRangeInputs({
+  value,
+  className,
+  compact = false,
+  onChange,
+  onCommit,
+}: {
+  value: string;
+  className?: string;
+  compact?: boolean;
+  onChange: (timeText: string) => void;
+  onCommit?: () => void;
+}) {
+  const parts = splitTimeRange(value);
+  const fieldClass = compact
+    ? 'w-[4.7ch] shrink-0 rounded border border-transparent bg-transparent p-0 text-sm tabular-nums text-slate-800 hover:border-primary/25 focus:border-primary focus:bg-white focus:outline-none focus:ring-1 focus:ring-primary/30'
+    : className;
+  const legacyUnparsed = Boolean(value.trim()) && !parts.start && !parts.end;
+  // 旧数据里如果没有可识别的时刻，保留整段文字，避免改显示方式后把原内容弄丢。
+  if (legacyUnparsed) {
+    return (
+      <input
+        type="text"
+        inputMode="text"
+        autoComplete="off"
+        className={className}
+        value={value}
+        placeholder="10:00–10:40"
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={onCommit}
+      />
+    );
+  }
+  return (
+    <div className={`flex min-w-0 items-center ${compact ? 'justify-center gap-0' : 'gap-1'}`}>
+      <ClockTextInput
+        value={parts.start}
+        className={compact ? `${fieldClass} text-right` : fieldClass}
+        placeholder="08:00"
+        onChange={(start) => onChange(joinTimeRange(start, parts.end))}
+        onCommit={onCommit}
+      />
+      <span className="shrink-0 text-slate-400">{compact ? '-' : '–'}</span>
+      <ClockTextInput
+        value={parts.end}
+        className={compact ? `${fieldClass} text-left` : fieldClass}
+        placeholder="08:40"
+        onChange={(end) => onChange(joinTimeRange(parts.start, end))}
+        onCommit={onCommit}
+      />
+    </div>
+  );
 }
 
 const formControl =
@@ -1331,10 +1492,10 @@ function AddLessonDialog({
                 <Input type="date" value={form.lessonDate} onChange={(e) => patch({ lessonDate: e.target.value })} />
               </Field>
               <Field label={isZh ? '时间' : 'Time'}>
-                <Input
+                <TimeRangeInputs
                   value={form.timeText}
-                  placeholder="10:00–10:40"
-                  onChange={(e) => patch({ timeText: e.target.value })}
+                  className={formControl}
+                  onChange={(timeText) => patch({ timeText })}
                 />
               </Field>
             </div>

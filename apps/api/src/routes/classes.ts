@@ -44,6 +44,7 @@ import {
   STAFFING_HOMEROOM_SUBJECT_KEY,
   type ReportGradeDimensionSnapshot,
   type ReportScoreLetterGrade,
+  parseTeacherCollectionBlocks,
 } from '@repo/shared';
 import { createRunOnce } from '../lib/runOnce.js';
 import { ensureGradeLevelConstraints } from '../lib/ensureGradeLevelConstraints.js';
@@ -54,8 +55,10 @@ import {
   getTeacherPortraitTemplateById,
   parseTargetDepartments,
   parseTeachingDiagnosis as parsePortraitDiagnosis,
+  parseTextAnswers,
+  submissionHasContent as portraitSubmissionHasContent,
   teacherMatchesTargetDepartments,
-  teachingDiagnosisHasContent as portraitDiagnosisHasContent,
+  textAnswersForBlocks,
   type TeachingDiagnosisPayload as PortraitDiagnosisPayload,
 } from '../lib/teacherPortraitCollections.js';
 import {
@@ -4426,8 +4429,7 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
       where.push(`t.status IN ('published', 'closed')`);
     }
     if (yearId) {
-      const effectiveYearId = await resolveConfigAcademicYearId(yearId);
-      values.push(effectiveYearId);
+      values.push(yearId);
       where.push(`t.academic_year_id = $${values.length}`);
     }
     if (term) {
@@ -4437,7 +4439,7 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = (await pool.query(
       `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
-              t.published_at, t.updated_at, t.target_departments, ay.name AS academic_year_name
+              t.published_at, t.updated_at, t.target_departments, t.form_blocks, ay.name AS academic_year_name
        FROM teacher_portrait_collection_templates t
        JOIN academic_years ay ON ay.id = t.academic_year_id
        ${whereSql}
@@ -4452,16 +4454,17 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
     let mySubmissions: Array<{ templateId: string; hasContent: boolean; updatedAt: string | null }> = [];
     if (userId && role === 'teacher') {
       const subs = (await pool.query(
-        `SELECT template_id, diagnosis, updated_at
+        `SELECT template_id, diagnosis, text_answers, updated_at
          FROM teacher_portrait_collection_submissions
          WHERE teacher_id = $1`,
         [userId],
       )).rows;
       mySubmissions = subs.map((s) => {
         const d = parsePortraitDiagnosis(s.diagnosis);
+        const answers = parseTextAnswers(s.text_answers);
         return {
           templateId: s.template_id as string,
-          hasContent: portraitDiagnosisHasContent(d),
+          hasContent: portraitSubmissionHasContent(d, answers),
           updatedAt: (s.updated_at as Date | null)?.toISOString() ?? null,
         };
       });
@@ -4479,6 +4482,7 @@ router.get('/teacher-portrait/collections', async (req: ReqWithUserId, res: Resp
           term: r.term as string,
           title: (r.title as string | null) ?? null,
           collectionType: r.collection_type as string,
+          formBlocks: parseTeacherCollectionBlocks(r.form_blocks),
           status: r.status as string,
           targetDepartments,
           publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
@@ -4521,15 +4525,17 @@ router.get('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
       }
     }
     let diagnosis = portraitEmptyDiagnosis();
+    let textAnswers = textAnswersForBlocks(null, template.formBlocks);
     let updatedAt: string | null = null;
     if (role === 'teacher') {
       const row = (await pool.query(
-        `SELECT diagnosis, updated_at FROM teacher_portrait_collection_submissions
+        `SELECT diagnosis, text_answers, updated_at FROM teacher_portrait_collection_submissions
          WHERE template_id = $1 AND teacher_id = $2 LIMIT 1`,
         [templateId, userId],
       )).rows[0];
       if (row) {
         diagnosis = parsePortraitDiagnosis(row.diagnosis);
+        textAnswers = textAnswersForBlocks(row.text_answers, template.formBlocks);
         updatedAt = (row.updated_at as Date | null)?.toISOString() ?? null;
       }
     }
@@ -4540,7 +4546,8 @@ router.get('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
       },
       submission: {
         diagnosis,
-        hasContent: portraitDiagnosisHasContent(diagnosis),
+        textAnswers,
+        hasContent: portraitSubmissionHasContent(diagnosis, textAnswers),
         updatedAt,
       },
     });
@@ -4571,34 +4578,48 @@ router.put('/teacher-portrait/collections/:templateId', async (req: ReqWithUserI
     if (!teacherMatchesTargetDepartments(teacherDepartment, template.targetDepartments)) {
       return res.status(403).json({ error: 'You are not in the target audience for this collection' });
     }
-    if (template.collectionType !== 'teaching-diagnosis-kiss') {
-      return res.status(400).json({ error: 'Unsupported collection type' });
-    }
+    const includesKiss = !template.formBlocks || template.formBlocks.some((block) => block.kind === 'kiss');
     const raw = req.body?.diagnosis as PortraitDiagnosisPayload | undefined;
-    const diagnosis: PortraitDiagnosisPayload = {
-      keep: String(raw?.keep ?? '').trim(),
-      improve: String(raw?.improve ?? '').trim(),
-      stop: String(raw?.stop ?? '').trim(),
-      start: String(raw?.start ?? '').trim(),
-    };
+    const diagnosis: PortraitDiagnosisPayload = includesKiss
+      ? {
+          keep: String(raw?.keep ?? '').trim(),
+          improve: String(raw?.improve ?? '').trim(),
+          stop: String(raw?.stop ?? '').trim(),
+          start: String(raw?.start ?? '').trim(),
+        }
+      : portraitEmptyDiagnosis();
+    const textAnswers = textAnswersForBlocks(req.body?.textAnswers, template.formBlocks);
     const submissionId = `tpcs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const result = await pool.query(
       `INSERT INTO teacher_portrait_collection_submissions
-         (id, template_id, teacher_id, diagnosis, created_by, updated_by)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $5)
+         (id, template_id, teacher_id, diagnosis, text_answers, created_by, updated_by)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $6)
        ON CONFLICT (template_id, teacher_id)
        DO UPDATE SET diagnosis = EXCLUDED.diagnosis,
+                     text_answers = CASE
+                       WHEN $7::boolean THEN EXCLUDED.text_answers
+                       ELSE teacher_portrait_collection_submissions.text_answers
+                     END,
                      updated_by = EXCLUDED.updated_by,
                      updated_at = CURRENT_TIMESTAMP
        RETURNING updated_at`,
-      [submissionId, templateId, userId, JSON.stringify(diagnosis), userId],
+      [
+        submissionId,
+        templateId,
+        userId,
+        JSON.stringify(diagnosis),
+        JSON.stringify(textAnswers),
+        userId,
+        template.formBlocks != null,
+      ],
     );
     const updatedAt = (result.rows[0]?.updated_at as Date | null)?.toISOString() ?? null;
     res.json({
       success: true,
       submission: {
         diagnosis,
-        hasContent: portraitDiagnosisHasContent(diagnosis),
+        textAnswers,
+        hasContent: portraitSubmissionHasContent(diagnosis, textAnswers),
         updatedAt,
       },
     });

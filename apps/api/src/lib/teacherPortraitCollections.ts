@@ -1,7 +1,11 @@
+import {
+  parseTeacherCollectionBlocks,
+  type TeacherCollectionBlock,
+} from '@repo/shared';
 import pool from '../config/database.js';
 import { createRunOnce } from './runOnce.js';
 
-export type TeacherPortraitCollectionType = 'teaching-diagnosis-kiss';
+export type TeacherPortraitCollectionType = 'teaching-diagnosis-kiss' | 'custom-form';
 export type TeacherPortraitTemplateStatus = 'draft' | 'published' | 'closed';
 export type Term = 'Semester 1' | 'Semester 2';
 
@@ -57,6 +61,14 @@ export async function ensureTeacherPortraitCollectionTables(): Promise<void> {
   await pool.query(`
     ALTER TABLE teacher_portrait_collection_templates
       ADD COLUMN IF NOT EXISTS target_departments JSONB
+  `);
+  await pool.query(`
+    ALTER TABLE teacher_portrait_collection_templates
+      ADD COLUMN IF NOT EXISTS form_blocks JSONB
+  `);
+  await pool.query(`
+    ALTER TABLE teacher_portrait_collection_submissions
+      ADD COLUMN IF NOT EXISTS text_answers JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
   });
 }
@@ -117,6 +129,38 @@ export function teachingDiagnosisHasContent(d: TeachingDiagnosisPayload): boolea
   return Boolean(d.keep || d.improve || d.stop || d.start);
 }
 
+export function parseTextAnswers(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^[a-zA-Z0-9_-]{1,40}$/.test(key) || typeof value !== 'string') continue;
+    const text = value.trim().slice(0, 20000);
+    if (text) out[key] = text;
+  }
+  return out;
+}
+
+export function textAnswersForBlocks(
+  raw: unknown,
+  blocks: TeacherCollectionBlock[] | null,
+): Record<string, string> {
+  if (!blocks) return {};
+  const parsed = parseTextAnswers(raw);
+  const out: Record<string, string> = {};
+  for (const block of blocks) {
+    if (block.kind !== 'text') continue;
+    out[block.id] = parsed[block.id] ?? '';
+  }
+  return out;
+}
+
+export function submissionHasContent(
+  diagnosis: TeachingDiagnosisPayload,
+  textAnswers: Record<string, string>,
+): boolean {
+  return teachingDiagnosisHasContent(diagnosis) || Object.values(textAnswers).some((value) => value.trim().length > 0);
+}
+
 export type TeacherPortraitTemplateRow = {
   id: string;
   academicYearId: string;
@@ -128,7 +172,26 @@ export type TeacherPortraitTemplateRow = {
   publishedAt: string | null;
   updatedAt: string | null;
   targetDepartments: string[] | null;
+  /** NULL 表示已发布的旧 KISS 任务，题目结构不变。 */
+  formBlocks: TeacherCollectionBlock[] | null;
 };
+
+function mapTemplateRow(r: Record<string, unknown>): TeacherPortraitTemplateRow {
+  const collectionType = (r.collection_type as TeacherPortraitCollectionType) ?? 'teaching-diagnosis-kiss';
+  return {
+    id: r.id as string,
+    academicYearId: r.academic_year_id as string,
+    academicYearName: r.academic_year_name as string,
+    term: r.term as Term,
+    title: (r.title as string | null) ?? null,
+    collectionType,
+    status: r.status as TeacherPortraitTemplateStatus,
+    publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
+    updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
+    targetDepartments: parseTargetDepartments(r.target_departments),
+    formBlocks: parseTeacherCollectionBlocks(r.form_blocks),
+  };
+}
 
 export async function listTeacherPortraitTemplates(filters: {
   academicYearId?: string;
@@ -153,25 +216,15 @@ export async function listTeacherPortraitTemplates(filters: {
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const rows = (await pool.query(
     `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
-            t.published_at, t.updated_at, t.target_departments, ay.name AS academic_year_name
+            t.published_at, t.updated_at, t.target_departments, t.form_blocks,
+            ay.name AS academic_year_name
      FROM teacher_portrait_collection_templates t
      JOIN academic_years ay ON ay.id = t.academic_year_id
      ${whereSql}
      ORDER BY t.updated_at DESC NULLS LAST`,
     values,
   )).rows;
-  return rows.map((r) => ({
-    id: r.id as string,
-    academicYearId: r.academic_year_id as string,
-    academicYearName: r.academic_year_name as string,
-    term: r.term as Term,
-    title: (r.title as string | null) ?? null,
-    collectionType: (r.collection_type as TeacherPortraitCollectionType) ?? 'teaching-diagnosis-kiss',
-    status: r.status as TeacherPortraitTemplateStatus,
-    publishedAt: (r.published_at as Date | null)?.toISOString() ?? null,
-    updatedAt: (r.updated_at as Date | null)?.toISOString() ?? null,
-    targetDepartments: parseTargetDepartments(r.target_departments),
-  }));
+  return rows.map((r) => mapTemplateRow(r as Record<string, unknown>));
 }
 
 export async function getTeacherPortraitTemplateById(
@@ -181,7 +234,8 @@ export async function getTeacherPortraitTemplateById(
   const row = (
     await pool.query(
       `SELECT t.id, t.academic_year_id, t.term, t.title, t.collection_type, t.status,
-              t.published_at, t.updated_at, t.target_departments, ay.name AS academic_year_name
+              t.published_at, t.updated_at, t.target_departments, t.form_blocks,
+              ay.name AS academic_year_name
        FROM teacher_portrait_collection_templates t
        JOIN academic_years ay ON ay.id = t.academic_year_id
        WHERE t.id = $1
@@ -190,18 +244,7 @@ export async function getTeacherPortraitTemplateById(
     )
   ).rows[0];
   if (!row) return null;
-  return {
-    id: row.id as string,
-    academicYearId: row.academic_year_id as string,
-    academicYearName: row.academic_year_name as string,
-    term: row.term as Term,
-    title: (row.title as string | null) ?? null,
-    collectionType: (row.collection_type as TeacherPortraitCollectionType) ?? 'teaching-diagnosis-kiss',
-    status: row.status as TeacherPortraitTemplateStatus,
-    publishedAt: (row.published_at as Date | null)?.toISOString() ?? null,
-    updatedAt: (row.updated_at as Date | null)?.toISOString() ?? null,
-    targetDepartments: parseTargetDepartments(row.target_departments),
-  };
+  return mapTemplateRow(row as Record<string, unknown>);
 }
 
 export async function countTeachersInSchool(): Promise<number> {
@@ -214,6 +257,11 @@ const SUBMISSION_HAS_CONTENT_SQL = `(
   OR COALESCE(NULLIF(TRIM(s.diagnosis->>'improve'), ''), '') <> ''
   OR COALESCE(NULLIF(TRIM(s.diagnosis->>'stop'), ''), '') <> ''
   OR COALESCE(NULLIF(TRIM(s.diagnosis->>'start'), ''), '') <> ''
+  OR EXISTS (
+    SELECT 1
+    FROM jsonb_each_text(COALESCE(s.text_answers, '{}'::jsonb)) AS kv(key, value)
+    WHERE btrim(kv.value) <> ''
+  )
 )`;
 
 export type TeacherPortraitProgressTeacher = {
@@ -295,6 +343,7 @@ export type TeacherPortraitSubmissionRow = {
   teacherId: string;
   teacherName: string;
   diagnosis: TeachingDiagnosisPayload;
+  textAnswers: Record<string, string>;
   updatedAt: string | null;
   hasContent: boolean;
 };
@@ -309,7 +358,7 @@ export async function getTeacherPortraitSubmission(
       `SELECT u.id AS teacher_id,
               COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''),
                        NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name,
-              s.diagnosis, s.updated_at
+              s.diagnosis, s.text_answers, s.updated_at
        FROM users u
        LEFT JOIN teacher_portrait_collection_submissions s
          ON s.teacher_id = u.id AND s.template_id = $1
@@ -320,12 +369,14 @@ export async function getTeacherPortraitSubmission(
   ).rows[0];
   if (!row) return null;
   const diagnosis = parseTeachingDiagnosis(row.diagnosis);
+  const textAnswers = parseTextAnswers(row.text_answers);
   return {
     teacherId: row.teacher_id as string,
     teacherName: String(row.teacher_name ?? teacherId),
     diagnosis,
+    textAnswers,
     updatedAt: (row.updated_at as Date | null)?.toISOString() ?? null,
-    hasContent: teachingDiagnosisHasContent(diagnosis),
+    hasContent: submissionHasContent(diagnosis, textAnswers),
   };
 }
 
@@ -341,7 +392,7 @@ export async function listTeacherPortraitSubmissions(
     `SELECT u.id AS teacher_id,
             COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''),
                      NULLIF(TRIM(u.display_name), ''), u.username, u.id) AS teacher_name,
-            s.diagnosis, s.updated_at
+            s.diagnosis, s.text_answers, s.updated_at
      FROM users u
      LEFT JOIN teacher_portrait_collection_submissions s
        ON s.teacher_id = u.id AND s.template_id = $1
@@ -352,17 +403,149 @@ export async function listTeacherPortraitSubmissions(
     teacher_id: string;
     teacher_name: string;
     diagnosis: unknown;
+    text_answers: unknown;
     updated_at: Date | null;
   }>;
 
   return rows.map((row) => {
     const diagnosis = parseTeachingDiagnosis(row.diagnosis);
+    const textAnswers = parseTextAnswers(row.text_answers);
     return {
       teacherId: row.teacher_id,
       teacherName: String(row.teacher_name ?? row.teacher_id),
       diagnosis,
+      textAnswers,
       updatedAt: row.updated_at?.toISOString() ?? null,
-      hasContent: teachingDiagnosisHasContent(diagnosis),
+      hasContent: submissionHasContent(diagnosis, textAnswers),
     };
   });
+}
+
+export type TeacherCollectionExchangeTeacher = {
+  username: string;
+  nameZh: string;
+  nameEn: string;
+  department: string;
+  diagnosis: TeachingDiagnosisPayload;
+  textAnswers: Record<string, string>;
+};
+
+export type TeacherCollectionExchangePayload = {
+  meta: {
+    academicYearName: string;
+    term: string;
+    title: string;
+    departments: string[];
+    formBlocks: TeacherCollectionBlock[] | null;
+  };
+  teachers: TeacherCollectionExchangeTeacher[];
+};
+
+export async function exportTeacherPortraitCollection(
+  templateId: string,
+): Promise<TeacherCollectionExchangePayload | null> {
+  await ensureTeacherPortraitCollectionTables();
+  const template = await getTeacherPortraitTemplateById(templateId);
+  if (!template) return null;
+  const values: unknown[] = [templateId];
+  const deptFilter = sqlTeacherInTargetDepartments(template.targetDepartments, 'u', values);
+  const rows = (await pool.query(
+    `SELECT u.username,
+            COALESCE(u.name_zh, '') AS name_zh,
+            COALESCE(u.name_en, '') AS name_en,
+            COALESCE(u.department, '') AS department,
+            s.diagnosis,
+            s.text_answers
+     FROM users u
+     LEFT JOIN teacher_portrait_collection_submissions s
+       ON s.teacher_id = u.id AND s.template_id = $1
+     WHERE u.role = 'teacher'${deptFilter}
+     ORDER BY COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''), u.username) ASC`,
+    values,
+  )).rows as Array<{
+    username: string;
+    name_zh: string;
+    name_en: string;
+    department: string;
+    diagnosis: unknown;
+    text_answers: unknown;
+  }>;
+  return {
+    meta: {
+      academicYearName: template.academicYearName,
+      term: template.term,
+      title: template.title ?? '',
+      departments: template.targetDepartments ?? [],
+      formBlocks: template.formBlocks,
+    },
+    teachers: rows.map((row) => ({
+      username: row.username,
+      nameZh: row.name_zh,
+      nameEn: row.name_en,
+      department: row.department,
+      diagnosis: parseTeachingDiagnosis(row.diagnosis),
+      textAnswers: textAnswersForBlocks(row.text_answers, template.formBlocks),
+    })),
+  };
+}
+
+export async function importTeacherPortraitCollection(
+  templateId: string,
+  teachers: TeacherCollectionExchangeTeacher[],
+  userId: string | null,
+): Promise<{ importedTeachers: number; warnings: string[] }> {
+  await ensureTeacherPortraitCollectionTables();
+  const template = await getTeacherPortraitTemplateById(templateId);
+  if (!template) {
+    const error = new Error('template_not_found');
+    throw error;
+  }
+  const includesKiss = !template.formBlocks || template.formBlocks.some((block) => block.kind === 'kiss');
+  const warnings: string[] = [];
+  let importedTeachers = 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const teacher of teachers) {
+      if (!teacher || typeof teacher !== 'object') continue;
+      const username = String(teacher.username ?? '').trim();
+      if (!username) continue;
+      const user = (await client.query(
+        `SELECT id, department FROM users
+         WHERE role = 'teacher' AND lower(username) = lower($1)
+         LIMIT 1`,
+        [username],
+      )).rows[0] as { id: string; department: string | null } | undefined;
+      if (!user) {
+        warnings.push(`未找到登录名「${username}」的教师`);
+        continue;
+      }
+      if (!teacherMatchesTargetDepartments(user.department, template.targetDepartments)) {
+        warnings.push(`「${username}」不在这份任务的部门范围内，已跳过`);
+        continue;
+      }
+      const diagnosis = includesKiss ? parseTeachingDiagnosis(teacher.diagnosis) : emptyTeachingDiagnosis();
+      const textAnswers = textAnswersForBlocks(teacher.textAnswers, template.formBlocks);
+      const submissionId = `tpcs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      await client.query(
+        `INSERT INTO teacher_portrait_collection_submissions
+           (id, template_id, teacher_id, diagnosis, text_answers, created_by, updated_by)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $6)
+         ON CONFLICT (template_id, teacher_id)
+         DO UPDATE SET diagnosis = EXCLUDED.diagnosis,
+                       text_answers = EXCLUDED.text_answers,
+                       updated_by = EXCLUDED.updated_by,
+                       updated_at = CURRENT_TIMESTAMP`,
+        [submissionId, templateId, user.id, JSON.stringify(diagnosis), JSON.stringify(textAnswers), userId],
+      );
+      importedTeachers += 1;
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  return { importedTeachers, warnings };
 }

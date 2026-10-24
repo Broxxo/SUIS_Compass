@@ -96,13 +96,13 @@ export default function HubTeacherTodosTile({
                       if (editing) return;
                       onOpenTodo(item);
                     }}
-                    className="flex w-full items-baseline justify-between gap-3 rounded-lg px-1.5 py-1.5 text-left transition-all hover:bg-cyan-100/60 hover:ring-1 hover:ring-cyan-200/45 active:bg-cyan-200/50 active:ring-cyan-300/40 disabled:pointer-events-none disabled:opacity-60"
+                    className="flex w-full items-baseline justify-between gap-2 rounded-lg px-1.5 py-1.5 text-left transition-all hover:bg-cyan-100/60 hover:ring-1 hover:ring-cyan-200/45 active:bg-cyan-200/50 active:ring-cyan-300/40 disabled:pointer-events-none disabled:opacity-60"
                   >
                     <div className="min-w-0 truncate text-[12px] font-medium leading-tight text-slate-700 sm:text-[13px]">
                       {item.label}
                     </div>
                     {item.subtitle ? (
-                      <div className="max-w-[58%] shrink-0 truncate text-right text-[11px] leading-tight text-slate-500 sm:text-[12px]">
+                      <div className="shrink-0 whitespace-nowrap text-[11px] leading-tight text-slate-500 sm:text-[12px]">
                         {item.subtitle}
                       </div>
                     ) : null}

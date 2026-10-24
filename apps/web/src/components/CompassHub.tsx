@@ -40,6 +40,7 @@ type HubView =
   | 'open-lessons'
   | 'school-calendar'
   | 'lighthouse'
+  | 'project-center'
   | 'more';
 
 /** 立体入口按钮通用样式：阴影、高光、hover 上浮 */
@@ -59,6 +60,7 @@ type HubTileId =
   | 'open-lessons'
   | 'school-calendar'
   | 'lighthouse'
+  | 'project-center'
   | `placeholder-${number}`;
 
 type HubTile = {
@@ -79,7 +81,16 @@ const HUB_LAYOUT_STORAGE_KEY = 'suis-compass-hub-layout-v4';
 function migrateSavedHubIds(savedIds: string[]): string[] {
   const out: string[] = [];
   for (const raw of savedIds) {
-    const id = raw === 'class-assistant' ? 'more-features' : raw === 'placeholder-1' ? 'school-calendar' : raw === 'placeholder-2' ? 'lighthouse' : raw;
+    const id =
+      raw === 'class-assistant'
+        ? 'more-features'
+        : raw === 'placeholder-1'
+          ? 'school-calendar'
+          : raw === 'placeholder-2'
+            ? 'lighthouse'
+            : raw === 'placeholder-3'
+              ? 'project-center'
+              : raw;
     if (id === 'class-management') continue;
     if (!out.includes(id)) out.push(id);
   }
@@ -400,6 +411,14 @@ export default function CompassHub({
       });
       return;
     }
+    if (item.target.type === 'school-calendar') {
+      onOpenTodo({
+        view: 'school-calendar',
+        academicYearId: item.target.academicYearId,
+        eventId: item.target.eventId,
+      });
+      return;
+    }
     if (item.target.type === 'teacher-portrait-collection') {
       onOpenTodo({
         view: 'teacher-portrait',
@@ -572,7 +591,25 @@ export default function CompassHub({
           </span>
         ),
       },
-      { id: 'placeholder-3', kind: 'placeholder', spanX: 1, spanY: 1, fontSize: '1rem' },
+      {
+        id: 'project-center',
+        kind: 'app',
+        view: 'project-center',
+        spanX: 1,
+        spanY: 1,
+        fontSize: 'clamp(0.95rem, 2.2vw, 1.25rem)',
+        className: 'p-1.5 sm:p-2',
+        style: {
+          background: 'linear-gradient(145deg, #4f46e5 0%, #4338ca 50%, #312e81 100%)',
+          boxShadow: '0 6px 16px -2px rgba(67, 56, 202, 0.35), inset 0 1px 0 rgba(255,255,255,0.22)',
+        },
+        renderLabel: (zh) => (
+          <span className="flex flex-col items-center leading-tight">
+            <span>{zh ? '项目' : 'Project'}</span>
+            <span>{zh ? '中心' : 'Center'}</span>
+          </span>
+        ),
+      },
       {
         id: 'more-features',
         kind: 'app',

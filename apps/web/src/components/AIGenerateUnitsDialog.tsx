@@ -433,7 +433,7 @@ export default function AIGenerateUnitsDialog({
     try {
       // 构建提示词：如果有上传的教材内容，使用教材内容；否则使用搜索
       const textbookSource = uploadedFile 
-        ? `【教材内容】（已上传教材文件：${uploadedFile.name}）\n${uploadedFileContent.substring(0, 50000)}` // 限制内容长度，避免超出token限制
+        ? `【教材内容】（已上传教材文件：${uploadedFile.name}）\n${uploadedFileContent}`
         : `教材信息：${textbookInfo}（格式：课程类别-教材版本-学期，已包含年级与学期）`;
 
       const prompt = `你是一位专业的课程规划专家。请基于以下信息生成单元数据：

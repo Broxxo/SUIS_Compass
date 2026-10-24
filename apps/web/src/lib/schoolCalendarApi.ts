@@ -21,6 +21,7 @@ function apiUrl(path: string): string {
 
 export type CalendarPhase = 'autumn_prep' | 'autumn' | 'winter' | 'spring_prep' | 'spring' | 'summer';
 export type CalendarEventStatus = 'planned' | 'done' | 'cancelled';
+export type MeetingPeriod = 'morning' | 'noon' | 'afternoon';
 
 export type SchoolCalendarModule = {
   id: string;
@@ -49,6 +50,16 @@ export type SchoolCalendarFocus = {
   focus: string;
 };
 
+export type SchoolCalendarMeeting = {
+  id: string;
+  weekday: number;
+  period: MeetingPeriod;
+  startTime: string;
+  endTime: string;
+  title: string;
+  location: string;
+};
+
 export type SchoolCalendarEvent = {
   id: string;
   moduleId: string;
@@ -63,14 +74,18 @@ export type SchoolCalendarEvent = {
   status: CalendarEventStatus;
   note: string;
   shared: boolean;
+  /** 当前用户是否可改这条事项 */
+  canEdit?: boolean;
 };
 
 export type SchoolCalendarBoard = {
   academicYearId: string;
   today: string;
   isAdmin: boolean;
-  /** 可改周主题与全部月历焦点（管理员或月历额外授权） */
+  /** 可改周主题与全部月历焦点（管理员、协调员或月历额外授权） */
   canManageMonth?: boolean;
+  /** 组长、协调员、管理员可在过往周新建事项 */
+  canWritePastWeek?: boolean;
   /** 周历事项可写的模块 */
   editableModuleIds: string[];
   /** 月历焦点可写的模块 */
@@ -86,6 +101,9 @@ export type SchoolCalendarBoard = {
   weeks: SchoolCalendarWeek[];
   focuses: SchoolCalendarFocus[];
   events: SchoolCalendarEvent[];
+  /** 管理员或周历额外授权可以改每周固定例会 */
+  canEditMeetings?: boolean;
+  meetings?: SchoolCalendarMeeting[];
   overrides: Array<{ date: string; kind: 'makeup' | 'off' }>;
   staff: Array<{ id: string; nameZh: string; nameEn: string }>;
 };
@@ -201,8 +219,17 @@ export async function importSchoolCalendar(
       status: string;
       note: string;
     }> | null;
+    meetings: Array<{
+      row: number;
+      weekday: number;
+      period: string;
+      startTime: string;
+      endTime: string;
+      title: string;
+      location: string;
+    }> | null;
   },
-): Promise<{ weekCount: number; eventCount: number; eventsReplaced: boolean }> {
+): Promise<{ weekCount: number; eventCount: number; eventsReplaced: boolean; meetingCount: number; meetingsReplaced: boolean }> {
   const response = await fetch(apiUrl('/api/school-calendar/import'), {
     method: 'POST',
     headers: getHeaders(),
@@ -210,14 +237,16 @@ export async function importSchoolCalendar(
   });
   const data = (await response.json().catch(() => ({}))) as {
     error?: string;
-    issues?: Array<{ row: number; sheet: 'month' | 'week'; code: string; detail?: string }>;
+    issues?: Array<{ row: number; sheet: 'month' | 'week' | 'meeting'; code: string; detail?: string }>;
     weekCount?: number;
     eventCount?: number;
     eventsReplaced?: boolean;
+    meetingCount?: number;
+    meetingsReplaced?: boolean;
   };
   if (!response.ok) {
     const error = new Error(data.error || 'internal') as Error & {
-      issues?: Array<{ row: number; sheet: 'month' | 'week'; code: string; detail?: string }>;
+      issues?: Array<{ row: number; sheet: 'month' | 'week' | 'meeting'; code: string; detail?: string }>;
     };
     error.issues = data.issues;
     throw error;
@@ -226,6 +255,8 @@ export async function importSchoolCalendar(
     weekCount: data.weekCount ?? 0,
     eventCount: data.eventCount ?? 0,
     eventsReplaced: Boolean(data.eventsReplaced),
+    meetingCount: data.meetingCount ?? 0,
+    meetingsReplaced: Boolean(data.meetingsReplaced),
   };
 }
 
@@ -266,6 +297,35 @@ export async function setSchoolCalendarEventStatus(id: string, status: CalendarE
 
 export async function deleteSchoolCalendarEvent(id: string): Promise<void> {
   const response = await fetch(apiUrl(`/api/school-calendar/events/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: getHeaders(),
+  });
+  if (!response.ok) await readError(response);
+}
+
+export async function createSchoolCalendarMeeting(
+  academicYearId: string,
+  input: Omit<SchoolCalendarMeeting, 'id'>,
+): Promise<void> {
+  const response = await fetch(apiUrl('/api/school-calendar/meetings'), {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ academicYearId, ...input }),
+  });
+  if (!response.ok) await readError(response);
+}
+
+export async function updateSchoolCalendarMeeting(id: string, input: Omit<SchoolCalendarMeeting, 'id'>): Promise<void> {
+  const response = await fetch(apiUrl(`/api/school-calendar/meetings/${encodeURIComponent(id)}`), {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) await readError(response);
+}
+
+export async function deleteSchoolCalendarMeeting(id: string): Promise<void> {
+  const response = await fetch(apiUrl(`/api/school-calendar/meetings/${encodeURIComponent(id)}`), {
     method: 'DELETE',
     headers: getHeaders(),
   });

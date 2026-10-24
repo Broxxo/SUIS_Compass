@@ -19,6 +19,8 @@ import {
   extractExamGradeInclusion,
   type ReportGradeDimensionSnapshot,
   type ReportScoreLetterGrade,
+  collectionTypeForBlocks,
+  parseTeacherCollectionBlocks,
 } from '@repo/shared';
 import { loadPresetGradeDimensionsSnapshot } from '../lib/reportTemplateGradeDimensions.js';
 import { ensureAllCoursesInYearPresetLibrary } from '../lib/courseReportLibrarySync.js';
@@ -71,9 +73,11 @@ import {
 import { createRunOnce } from '../lib/runOnce.js';
 import {
   ensureTeacherPortraitCollectionTables,
+  exportTeacherPortraitCollection,
   getTeacherPortraitSubmission,
   getTeacherPortraitTemplateById,
   getTeacherPortraitTemplateProgress,
+  importTeacherPortraitCollection,
   listTeacherPortraitSubmissions,
   listTeacherPortraitTemplates,
   parseTargetDepartments,
@@ -1139,8 +1143,11 @@ router.post('/users', async (req: AuthedRequest, res: Response) => {
     if (!VALID_ROLES.includes(role as (typeof VALID_ROLES)[number])) {
       return res.status(400).json({ error: 'Invalid role' });
     }
-    if (callerRole !== 'system-admin' && role === 'system-admin') {
-      return res.status(403).json({ error: 'Only system-admin can create system-admin accounts' });
+    if (role === 'system-admin') {
+      const { isRootSystemAdmin } = await import('../lib/rootSystemAdmin.js');
+      if (!(await isRootSystemAdmin(callerId))) {
+        return res.status(403).json({ error: 'Only the original system admin can create system-admin accounts' });
+      }
     }
     if (callerRole === 'admin' && role !== 'teacher') {
       return res.status(403).json({ error: 'Admin can only create teacher accounts' });
@@ -1219,11 +1226,11 @@ router.delete('/users/:id', async (req: AuthedRequest, res: Response) => {
     if (row.username !== confirmUsername) {
       return res.status(400).json({ error: 'Username does not match' });
     }
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Only system admin can delete accounts' });
+    }
     if (row.role === 'system-admin') {
       return res.status(403).json({ error: 'Cannot delete system-admin' });
-    }
-    if (callerRole === 'admin' && row.role !== 'teacher' && row.role !== 'student') {
-      return res.status(403).json({ error: 'Admin can only delete teacher or student accounts' });
     }
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
     res.json({ success: true });
@@ -1295,6 +1302,12 @@ router.patch('/users/:id', async (req: AuthedRequest, res: Response) => {
     }
     if (callerRole === 'admin' && targetRole !== 'teacher') {
       return res.status(403).json({ error: 'Admin can only update teacher accounts' });
+    }
+    if (targetRole === 'system-admin' && callerId !== id) {
+      const { isRootSystemAdmin } = await import('../lib/rootSystemAdmin.js');
+      if (!(await isRootSystemAdmin(callerId))) {
+        return res.status(403).json({ error: 'Only the original system admin can edit other system admins' });
+      }
     }
 
     let nextZh = normNameField(cur.name_zh);
@@ -1389,6 +1402,8 @@ router.put('/users/:id/role', async (req: AuthedRequest, res: Response) => {
     if (callerRole !== 'system-admin') {
       return res.status(403).json({ error: 'Only system admin can change roles' });
     }
+    const { isRootSystemAdmin } = await import('../lib/rootSystemAdmin.js');
+    const callerIsRoot = await isRootSystemAdmin(callerId);
 
     const { id } = req.params;
     const { role: newRole } = req.body as { role?: string };
@@ -1407,14 +1422,11 @@ router.put('/users/:id/role', async (req: AuthedRequest, res: Response) => {
     if (targetRole === 'student') {
       return res.status(403).json({ error: 'Cannot change student role via this endpoint' });
     }
-    if (targetRole === 'system-admin' && newRole !== 'system-admin') {
-      const countResult = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM users WHERE role = 'system-admin'`,
-      );
-      const n = (countResult.rows[0] as { n: number }).n;
-      if (n <= 1) {
-        return res.status(403).json({ error: 'Cannot demote the last system-admin' });
-      }
+    if (await isRootSystemAdmin(id)) {
+      return res.status(403).json({ error: 'Cannot change the original system admin' });
+    }
+    if ((targetRole === 'system-admin' || newRole === 'system-admin') && !callerIsRoot) {
+      return res.status(403).json({ error: 'Only the original system admin can grant or change system-admin' });
     }
 
     await pool.query('UPDATE users SET role = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newRole, id]);
@@ -2867,8 +2879,11 @@ router.delete('/division-coordinators/:id', async (req: AuthedRequest, res: Resp
   }
 });
 
-router.get('/module-permissions', async (_req: AuthedRequest, res: Response) => {
+router.get('/module-permissions', async (req: AuthedRequest, res: Response) => {
   try {
+    if ((await getCallerRole(req.userId)) !== 'system-admin') {
+      return res.status(403).json({ error: 'Only system admin can view permission settings' });
+    }
     const { getModulePermissionOverview } = await import('../lib/modulePermissionGrants.js');
     const modules = await getModulePermissionOverview();
     return res.json({ modules });
@@ -2880,6 +2895,9 @@ router.get('/module-permissions', async (_req: AuthedRequest, res: Response) => 
 
 router.post('/module-permissions', async (req: AuthedRequest, res: Response) => {
   try {
+    if ((await getCallerRole(req.userId)) !== 'system-admin') {
+      return res.status(403).json({ error: 'Only system admin can change permission settings' });
+    }
     const body = (req.body ?? {}) as { moduleKey?: string; userId?: string };
     const { addModulePermissionGrant } = await import('../lib/modulePermissionGrants.js');
     const grant = await addModulePermissionGrant({
@@ -2905,6 +2923,9 @@ router.post('/module-permissions', async (req: AuthedRequest, res: Response) => 
 
 router.delete('/module-permissions/:id', async (req: AuthedRequest, res: Response) => {
   try {
+    if ((await getCallerRole(req.userId)) !== 'system-admin') {
+      return res.status(403).json({ error: 'Only system admin can change permission settings' });
+    }
     const id = String(req.params.id ?? '').trim();
     if (!id) return res.status(400).json({ error: 'id is required' });
     const { deleteModulePermissionGrant } = await import('../lib/modulePermissionGrants.js');
@@ -3141,7 +3162,10 @@ function createTeacherPortraitTemplateId(): string {
   return `tpc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const VALID_TEACHER_COLLECTION_TYPES: TeacherPortraitCollectionType[] = ['teaching-diagnosis-kiss'];
+const VALID_TEACHER_COLLECTION_TYPES: TeacherPortraitCollectionType[] = [
+  'teaching-diagnosis-kiss',
+  'custom-form',
+];
 
 router.get('/teacher-portrait/templates', async (req: AuthedRequest, res: Response) => {
   try {
@@ -3167,24 +3191,36 @@ router.post('/teacher-portrait/templates', async (req: AuthedRequest, res: Respo
       title?: string | null;
       collectionType?: string;
       targetDepartments?: unknown;
+      formBlocks?: unknown;
     };
     const academicYearId = String(body.academicYearId ?? '').trim();
     const term = body.term === 'Semester 1' || body.term === 'Semester 2' ? body.term : null;
     if (!academicYearId || !term) {
       return res.status(400).json({ error: 'academicYearId and term required' });
     }
-    const collectionType = (String(body.collectionType ?? 'teaching-diagnosis-kiss').trim() ||
+    const hasFormBlocks = Object.prototype.hasOwnProperty.call(body, 'formBlocks');
+    let collectionType = (String(body.collectionType ?? 'teaching-diagnosis-kiss').trim() ||
       'teaching-diagnosis-kiss') as TeacherPortraitCollectionType;
-    if (!VALID_TEACHER_COLLECTION_TYPES.includes(collectionType)) {
+    let formBlocksJson: string | null = null;
+    if (hasFormBlocks) {
+      const blocks = parseTeacherCollectionBlocks(body.formBlocks);
+      if (!blocks) {
+        return res.status(400).json({ error: 'Invalid form blocks' });
+      }
+      collectionType = collectionTypeForBlocks(blocks);
+      formBlocksJson = JSON.stringify(blocks);
+    } else if (!VALID_TEACHER_COLLECTION_TYPES.includes(collectionType)) {
       return res.status(400).json({ error: 'Invalid collectionType' });
+    } else if (collectionType !== 'teaching-diagnosis-kiss') {
+      return res.status(400).json({ error: 'formBlocks required' });
     }
     const title = body.title != null ? String(body.title).trim() || null : null;
     const targetDepartments = parseTargetDepartments(body.targetDepartments);
     const id = createTeacherPortraitTemplateId();
     await pool.query(
       `INSERT INTO teacher_portrait_collection_templates
-         (id, academic_year_id, term, title, collection_type, target_departments, status, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'draft', $7, $7)`,
+         (id, academic_year_id, term, title, collection_type, target_departments, form_blocks, status, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, 'draft', $8, $8)`,
       [
         id,
         academicYearId,
@@ -3192,6 +3228,7 @@ router.post('/teacher-portrait/templates', async (req: AuthedRequest, res: Respo
         title,
         collectionType,
         targetDepartments ? JSON.stringify(targetDepartments) : null,
+        formBlocksJson,
         req.userId ?? null,
       ],
     );
@@ -3207,12 +3244,13 @@ router.put('/teacher-portrait/templates/:templateId', async (req: AuthedRequest,
   try {
     await ensureTeacherPortraitCollectionTables();
     const templateId = String(req.params.templateId ?? '').trim();
-    const body = req.body as { title?: string | null; targetDepartments?: unknown };
+    const body = req.body as { title?: string | null; targetDepartments?: unknown; formBlocks?: unknown };
     const hasTitle = Object.prototype.hasOwnProperty.call(body, 'title');
     const hasTargetDepartments = Object.prototype.hasOwnProperty.call(body, 'targetDepartments');
+    const hasFormBlocks = Object.prototype.hasOwnProperty.call(body, 'formBlocks');
     if (!templateId) return res.status(400).json({ error: 'templateId required' });
-    if (!hasTitle && !hasTargetDepartments) {
-      return res.status(400).json({ error: 'title or targetDepartments required' });
+    if (!hasTitle && !hasTargetDepartments && !hasFormBlocks) {
+      return res.status(400).json({ error: 'title, targetDepartments, or formBlocks required' });
     }
     const current = await getTeacherPortraitTemplateById(templateId);
     if (!current) return res.status(404).json({ error: 'Template not found' });
@@ -3229,6 +3267,17 @@ router.put('/teacher-portrait/templates/:templateId', async (req: AuthedRequest,
       const targetDepartments = parseTargetDepartments(body.targetDepartments);
       values.push(targetDepartments ? JSON.stringify(targetDepartments) : null);
       sets.push(`target_departments = $${values.length}::jsonb`);
+    }
+    if (hasFormBlocks) {
+      if (current.status !== 'draft') {
+        return res.status(409).json({ error: 'formBlocks can only be changed while draft' });
+      }
+      const blocks = parseTeacherCollectionBlocks(body.formBlocks);
+      if (!blocks) return res.status(400).json({ error: 'Invalid form blocks' });
+      values.push(JSON.stringify(blocks));
+      sets.push(`form_blocks = $${values.length}::jsonb`);
+      values.push(collectionTypeForBlocks(blocks));
+      sets.push(`collection_type = $${values.length}`);
     }
     values.push(templateId);
     await pool.query(
@@ -3342,6 +3391,40 @@ router.get(
     }
   },
 );
+
+router.get('/teacher-portrait/templates/:templateId/exchange', async (req: AuthedRequest, res: Response) => {
+  try {
+    const templateId = String(req.params.templateId ?? '').trim();
+    if (!templateId) return res.status(400).json({ error: 'templateId required' });
+    const payload = await exportTeacherPortraitCollection(templateId);
+    if (!payload) return res.status(404).json({ error: 'Template not found' });
+    res.json(payload);
+  } catch (error) {
+    console.error('Export teacher portrait collection error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/teacher-portrait/templates/:templateId/exchange', async (req: AuthedRequest, res: Response) => {
+  try {
+    const templateId = String(req.params.templateId ?? '').trim();
+    const teachers = (req.body as { teachers?: unknown })?.teachers;
+    if (!templateId) return res.status(400).json({ error: 'templateId required' });
+    if (!Array.isArray(teachers)) return res.status(400).json({ error: 'Invalid collection file' });
+    const result = await importTeacherPortraitCollection(
+      templateId,
+      teachers as Parameters<typeof importTeacherPortraitCollection>[1],
+      req.userId ?? null,
+    );
+    res.json(result);
+  } catch (error) {
+    if ((error as Error)?.message === 'template_not_found') {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    console.error('Import teacher portrait collection error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 router.delete('/teacher-portrait/templates/:templateId', async (req: AuthedRequest, res: Response) => {
   try {

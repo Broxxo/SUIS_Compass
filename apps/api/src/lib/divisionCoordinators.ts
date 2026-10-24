@@ -175,6 +175,20 @@ async function postsForTeacher(
   return rows.map((row) => mapRow(row));
 }
 
+/** 协调员岗位覆盖的学部。周历里这些学部对应的模块就是其分管模块。 */
+export async function coordinatorSegmentIds(
+  teacherId: string,
+  academicYearId: string,
+  db: Pool = pool,
+): Promise<Set<string>> {
+  const posts = await postsForTeacher(teacherId, academicYearId, db);
+  const ids = new Set<string>();
+  for (const post of posts) {
+    for (const segmentId of post.segmentIds) ids.add(segmentId);
+  }
+  return ids;
+}
+
 /** 年级管理：该协调员在所选学部内，等同于这些年级的年级组长。 */
 export async function coordinatorGradeScopeKeys(
   teacherId: string,

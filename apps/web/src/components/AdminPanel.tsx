@@ -1,6 +1,7 @@
 import { MenuSelect } from './MenuSelect';
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import AppTopBar from './AppTopBar';
+import CompassMailbox from './CompassMailbox';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { useAuth } from '../contexts/AuthContext';
@@ -141,9 +142,11 @@ import GradeManagementPanel from './admin/GradeManagementPanel';
 import TeachingManagementPanel from './admin/TeachingManagementPanel';
 import {
   buildSubjectDisplayKeyToStaffingKeys,
+  buildSubjectDisplayKeyToMatchTexts,
   buildSubjectOptionsFromColumnGroups,
 } from '../lib/teachingSubjectGroupUtils';
 import TeacherPortraitCollectionsAdmin from './TeacherPortraitCollectionsAdmin';
+import { AcademicReportExchangeButtons } from './admin/TaskExchangeButtons';
 import {
   AcademicYearSelect,
   AcademicYearSelectField,
@@ -685,11 +688,12 @@ const PRESET_TARGET_DEFAULT_DIMENSION_COLS = 4;
 
 interface AdminPanelProps {
   onBackToHub: () => void;
+  onOpenInbox?: () => void;
   isAIOpen?: boolean;
   onToggleAI?: () => void;
 }
 
-export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminPanelProps) {
+export default function AdminPanel({ onBackToHub, onOpenInbox, isAIOpen, onToggleAI }: AdminPanelProps) {
   const { user: currentUser } = useAuth();
   const { language } = useLanguage();
   const isZh = language === 'zh';
@@ -705,7 +709,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   /** 教职工列表筛选 */
   const [userStaffFilterDepartment, setUserStaffFilterDepartment] = useState('');
   const [userStaffFilterPrimarySubject, setUserStaffFilterPrimarySubject] = useState('');
-  const [userStaffFilterRole, setUserStaffFilterRole] = useState<'' | 'admin' | 'teacher'>('');
+  const [userStaffFilterRole, setUserStaffFilterRole] = useState<'' | 'system-admin' | 'admin' | 'teacher'>('');
   const [userStaffFilterSearch, setUserStaffFilterSearch] = useState('');
   /** 教职工列表：表头排序（部门 / 主学科） */
   const [userStaffSortKey, setUserStaffSortKey] = useState<'department' | 'primarySubject' | null>(null);
@@ -949,12 +953,13 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
   const isSystemAdmin = currentUser?.role === 'system-admin';
   const staffingDataTabActive = adminTab === 'staffing';
 
-  /** 当前用户可创建的权限类型：系统管理员可创建系统管理员/管理员/教师，管理员只能创建教师 */
+  /** 可创建的身份：只有初始系统管理员能创建系统管理员；其他系统管理员可创建管理员和教师；管理员只能创建教师 */
   const assignableRoles = useMemo((): User['role'][] => {
-    if (currentUser?.role === 'system-admin') return ['system-admin', 'admin', 'teacher'];
+    if (currentUser?.role === 'system-admin' && currentUser.isRootSystemAdmin) return ['system-admin', 'admin', 'teacher'];
+    if (currentUser?.role === 'system-admin') return ['admin', 'teacher'];
     if (currentUser?.role === 'admin') return ['teacher'];
     return [];
-  }, [currentUser?.role]);
+  }, [currentUser?.role, currentUser?.isRootSystemAdmin]);
 
   /** 列表展示：按当前登录身份过滤教职工 */
   const displayedUsers = useMemo(() => {
@@ -965,23 +970,22 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     return users;
   }, [users, currentUser?.role]);
 
-  /** 当前用户可否编辑该行（权限、部门等）：学生账号不可在此编辑 */
+  /** 当前用户可否编辑该行。其他系统管理员的资料只有初始系统管理员能改。 */
   const canEditUser = (u: AdminUser) => {
     if (u.role === 'student') return false;
-    if (currentUser?.role === 'system-admin') return true;
+    if (currentUser?.role === 'system-admin') {
+      if (u.role === 'system-admin' && u.id !== currentUser.id && !currentUser.isRootSystemAdmin) return false;
+      return true;
+    }
     if (currentUser?.role === 'admin' && u.role === 'teacher') return true;
     return false;
   };
 
-  /** 当前用户可否删除该行：系统管理员可删管理员/教师/学生，管理员可删教师与学生 */
+  /** 删除账号只有系统管理员可以，且不能删除系统管理员。 */
   const canDeleteUser = (u: AdminUser) => {
+    if (currentUser?.role !== 'system-admin') return false;
     if (u.role === 'system-admin') return false;
-    if (u.role === 'student') {
-      return currentUser?.role === 'system-admin' || currentUser?.role === 'admin';
-    }
-    if (currentUser?.role === 'system-admin') return true;
-    if (currentUser?.role === 'admin' && u.role === 'teacher') return true;
-    return false;
+    return u.role === 'admin' || u.role === 'teacher' || u.role === 'student';
   };
 
   const loadOrgDepartmentLabels = useCallback(async () => {
@@ -5042,6 +5046,11 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
     [staffingCourseColumnGroups],
   );
 
+  const staffingSubjectMatchTexts = useMemo(
+    () => buildSubjectDisplayKeyToMatchTexts(staffingCourseColumnGroups),
+    [staffingCourseColumnGroups],
+  );
+
   const subjectGroupMembersByGroupId = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const m of subjectGroupMembers) {
@@ -5649,8 +5658,8 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
       students: { zh: '学生', en: 'Students' },
       courses: { zh: '课程', en: 'Courses' },
       staffing: { zh: '岗位编制', en: 'Staffing' },
-      'report-settings': { zh: '学业报告', en: 'Report settings' },
-      'teacher-portrait-settings': { zh: '教师画像', en: 'Teacher portrait' },
+      'report-settings': { zh: '学生中心', en: 'Student center' },
+      'teacher-portrait-settings': { zh: '教师中心', en: 'Teacher center' },
       database: { zh: '数据库', en: 'Database' },
     };
     const label = tabLabels[adminTab]?.[isZh ? 'zh' : 'en'] ?? adminTab;
@@ -5672,6 +5681,9 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
         onBack={onBackToHub}
         onToggleAI={onToggleAI}
         isAIOpen={isAIOpen}
+        rightChildren={
+          onOpenInbox ? <CompassMailbox isZh={isZh} onOpenInbox={onOpenInbox} /> : null
+        }
       />
       <div className="border-b border-slate-200 bg-white flex-shrink-0">
         <div className={`${adminContentFrameClass} flex gap-1 flex-wrap`}>
@@ -5722,14 +5734,14 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
             onClick={() => { setAdminTab('report-settings'); setError(null); }}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'report-settings' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            {isZh ? '学生画像' : 'Student portrait'}
+            {isZh ? '学生中心' : 'Student center'}
           </button>
           <button
             type="button"
             onClick={() => { setAdminTab('teacher-portrait-settings'); setError(null); }}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'teacher-portrait-settings' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            {isZh ? '教师画像' : 'Teacher portrait'}
+            {isZh ? '教师中心' : 'Teacher center'}
           </button>
           {isSystemAdmin && (
             <button
@@ -5771,13 +5783,15 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
             <SegmentTabButton grouped active={usersSubTab === 'all-users'} onClick={() => setUsersSubTab('all-users')}>
               {isZh ? '所有用户' : 'All users'}
             </SegmentTabButton>
-            <SegmentTabButton grouped active={usersSubTab === 'permissions'} onClick={() => setUsersSubTab('permissions')}>
-              {isZh ? '权限设置' : 'Permissions'}
-            </SegmentTabButton>
+            {isSystemAdmin ? (
+              <SegmentTabButton grouped active={usersSubTab === 'permissions'} onClick={() => setUsersSubTab('permissions')}>
+                {isZh ? '权限设置' : 'Permissions'}
+              </SegmentTabButton>
+            ) : null}
           </SegmentTabGroup>
         </SegmentTabStrip>
 
-        {usersSubTab === 'permissions' ? (
+        {usersSubTab === 'permissions' && isSystemAdmin ? (
           <PermissionSettingsPanel isZh={isZh} teachers={users} />
         ) : null}
 
@@ -6035,10 +6049,13 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                   <span className="text-[10px] uppercase text-slate-400">{isZh ? '权限' : 'Access'}</span>
                   <MenuSelect
                     value={userStaffFilterRole}
-                    onChange={(e) => setUserStaffFilterRole(e.target.value as '' | 'admin' | 'teacher')}
+                    onChange={(e) => setUserStaffFilterRole(e.target.value as '' | 'system-admin' | 'admin' | 'teacher')}
                     className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm bg-white min-w-[6rem]"
                   >
                     <option value="">{isZh ? '全部' : 'All'}</option>
+                    {isSystemAdmin ? (
+                      <option value="system-admin">{ROLE_LABELS['system-admin'][isZh ? 'zh' : 'en']}</option>
+                    ) : null}
                     <option value="admin">{ROLE_LABELS.admin[isZh ? 'zh' : 'en']}</option>
                     <option value="teacher">{ROLE_LABELS.teacher[isZh ? 'zh' : 'en']}</option>
                   </MenuSelect>
@@ -6182,7 +6199,8 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                         <td className="py-2 pr-4">
                           {currentUser?.role === 'system-admin' &&
                           u.role !== 'student' &&
-                          u.id !== currentUser.id ? (
+                          u.id !== currentUser.id &&
+                          (currentUser.isRootSystemAdmin || u.role !== 'system-admin') ? (
                             <MenuSelect
                               value={u.role}
                               onChange={(e) =>
@@ -6190,7 +6208,9 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                               }
                               className="text-sm rounded border border-slate-300 px-2 py-1 bg-white min-w-[100px]"
                             >
-                              <option value="system-admin">{ROLE_LABELS['system-admin'][isZh ? 'zh' : 'en']}</option>
+                              {currentUser.isRootSystemAdmin ? (
+                                <option value="system-admin">{ROLE_LABELS['system-admin'][isZh ? 'zh' : 'en']}</option>
+                              ) : null}
                               <option value="admin">{ROLE_LABELS.admin[isZh ? 'zh' : 'en']}</option>
                               <option value="teacher">{ROLE_LABELS.teacher[isZh ? 'zh' : 'en']}</option>
                             </MenuSelect>
@@ -6452,6 +6472,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                     assignments={staffingAssignments}
                     classes={staffingClassList}
                     displayKeyToSubjectKeys={staffingDisplayKeyToSubjectKeys}
+                    subjectMatchTexts={staffingSubjectMatchTexts}
                     functionalTeacherByKey={functionalTeacherByKey}
                     membersByGroupId={subjectGroupMembersByGroupId}
                     savingGroupId={savingTeachingGroupId}
@@ -7336,6 +7357,14 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
                                 <Button size="sm" variant="outline" onClick={() => void openEditEvaluationDesigner(tpl.id)}>
                                   {isZh ? '编辑' : 'Edit'}
                                 </Button>
+                                <AcademicReportExchangeButtons
+                                  templateId={tpl.id}
+                                  title={tpl.title || (isZh ? '未命名报告' : 'Untitled report')}
+                                  isZh={isZh}
+                                  onImported={() => {
+                                    if (reportSettingYearId) void loadReportTemplateList(reportSettingYearId, reportSettingTerm);
+                                  }}
+                                />
                                 <Button size="sm" variant="outline" onClick={() => void setTemplateStatus(tpl.id, 'published')}>
                                   {isZh ? '发布' : 'Publish'}
                                 </Button>
@@ -7405,7 +7434,7 @@ export default function AdminPanel({ onBackToHub, isAIOpen, onToggleAI }: AdminP
             {!USE_CLOUD_STORAGE && (
               <div className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
                 {isZh
-                  ? '当前为本地模式。请在 apps/web/.env 启用 VITE_USE_CLOUD_STORAGE=true，并配置 VITE_API_URL 后刷新，即可管理教师画像采集任务。'
+                  ? '当前为本地模式。请在 apps/web/.env 启用 VITE_USE_CLOUD_STORAGE=true，并配置 VITE_API_URL 后刷新，即可管理教师中心收集任务。'
                   : 'Enable VITE_USE_CLOUD_STORAGE=true and VITE_API_URL to manage teacher portrait collections.'}
               </div>
             )}

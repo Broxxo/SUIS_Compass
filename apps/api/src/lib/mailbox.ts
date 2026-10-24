@@ -274,6 +274,21 @@ export async function deleteMailboxMessage(
   return { id: messageId };
 }
 
+/** 管理员顶栏角标：待处理（status=open）信件数；非管理员为 0。 */
+export async function getMailboxSummary(
+  userId: string,
+): Promise<{ viewerIsAdmin: boolean; openCount: number }> {
+  await ensureMailboxTable();
+  const isAdmin = await viewerIsAdmin(userId);
+  if (!isAdmin) return { viewerIsAdmin: false, openCount: 0 };
+  const row = (
+    await pool.query(
+      `SELECT COUNT(*)::int AS n FROM compass_mailbox_messages WHERE status = 'open'`,
+    )
+  ).rows[0] as { n: number } | undefined;
+  return { viewerIsAdmin: true, openCount: Number(row?.n ?? 0) };
+}
+
 export async function setMailboxStatus(
   userId: string,
   messageId: string,

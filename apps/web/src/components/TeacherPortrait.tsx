@@ -34,7 +34,6 @@ import TeacherPortraitCollectionFill from './TeacherPortraitCollectionFill';
 import TeacherPortraitPersonalDashboard from './TeacherPortraitPersonalDashboard';
 import TeacherPortraitAdminPersonalDashboard from './TeacherPortraitAdminPersonalDashboard';
 import TeacherPortraitSubjectGroupDashboard from './TeacherPortraitSubjectGroupDashboard';
-import { AcademicYearSelect } from './academicPeriodSelectors';
 import {
   buildTeacherPortraitAIPayload,
   type TeacherPortraitSubjectDashboardSlice,
@@ -514,15 +513,6 @@ export default function TeacherPortrait({
               </Button>
             </div>
           )}
-          {isAdmin && tab !== 'dashboard' && tab !== 'subject' && (
-            <AcademicYearSelect
-              isZh={isZh}
-              years={years}
-              value={yearId}
-              onChange={setYearId}
-              className="py-1.5"
-            />
-          )}
         </div>
 
         {error && (
@@ -686,9 +676,7 @@ export default function TeacherPortrait({
         {!loading && tab === 'dashboard' && isAdmin && (
           <TeacherPortraitAdminPersonalDashboard
             isZh={isZh}
-            years={years}
             yearId={yearId}
-            onYearIdChange={setYearId}
             assignments={assignments}
             classById={classById}
             teachers={teachers}

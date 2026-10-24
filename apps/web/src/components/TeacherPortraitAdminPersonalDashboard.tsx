@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTermForYear } from '../lib/academicPeriodDefault';
-import { api, USE_CLOUD_STORAGE } from '../lib/api';
+import { USE_CLOUD_STORAGE } from '../lib/api';
 import { buildTeacherPersonalAssignments } from '../lib/teacherPortraitStats';
-import type { AcademicYear, ClassItem, StaffingAssignment } from '../types/classManagement';
+import type { ClassItem, StaffingAssignment } from '../types/classManagement';
 import {
-  AcademicYearSelectField,
   FilterField,
   FilterSelect,
   FilterToolbar,
@@ -13,21 +12,17 @@ import {
 import TeacherPortraitAssignmentsCard from './TeacherPortraitAssignmentsCard';
 import TeachingSelfReflectionBlock from './TeachingSelfReflectionBlock';
 
-type TeacherOption = { id: string; name: string; hasReflection?: boolean };
+type TeacherOption = { id: string; name: string };
 
 export default function TeacherPortraitAdminPersonalDashboard({
   isZh,
-  years,
   yearId,
-  onYearIdChange,
   assignments,
   classById,
   teachers,
 }: {
   isZh: boolean;
-  years: AcademicYear[];
   yearId: string;
-  onYearIdChange: (id: string) => void;
   assignments: StaffingAssignment[];
   classById: Map<string, ClassItem>;
   teachers: Array<{ id: string; primarySubject?: string | null }>;
@@ -55,15 +50,6 @@ export default function TeacherPortraitAdminPersonalDashboard({
     setLoadingTeachers(true);
     (async () => {
       try {
-        const templates = await api.getAdminTeacherPortraitTemplates({ academicYearId: yearId, term });
-        const active =
-          templates.find((t) => t.status === 'published' || t.status === 'closed') ?? null;
-        const reflectionByTeacher = new Map<string, boolean>();
-        if (active?.id) {
-          const submissions = await api.getAdminTeacherPortraitTemplateSubmissions(active.id);
-          for (const s of submissions) reflectionByTeacher.set(s.teacherId, s.hasContent);
-        }
-
         const fromStaffing = new Map<string, string>();
         for (const a of assignments) {
           if (!a.teacherId) continue;
@@ -76,11 +62,7 @@ export default function TeacherPortraitAdminPersonalDashboard({
         }
 
         const options = Array.from(fromStaffing.entries())
-          .map(([id, name]) => ({
-            id,
-            name,
-            hasReflection: reflectionByTeacher.get(id) ?? false,
-          }))
+          .map(([id, name]) => ({ id, name }))
           .sort((a, b) => a.name.localeCompare(b.name));
 
         if (!cancelled) {
@@ -113,7 +95,7 @@ export default function TeacherPortraitAdminPersonalDashboard({
     return () => {
       cancelled = true;
     };
-  }, [yearId, term, assignments, teachers, nameById]);
+  }, [yearId, assignments, teachers, nameById]);
 
   const assignmentGroups = useMemo(() => {
     if (!teacherId) return [];
@@ -125,12 +107,6 @@ export default function TeacherPortraitAdminPersonalDashboard({
   return (
     <div className="space-y-4">
       <FilterToolbar>
-        <AcademicYearSelectField
-          isZh={isZh}
-          years={years}
-          value={yearId}
-          onChange={onYearIdChange}
-        />
         <TermSelectField isZh={isZh} value={term} onChange={setTerm} />
         <FilterField label={isZh ? '教师' : 'Teacher'}>
           <FilterSelect
@@ -145,7 +121,6 @@ export default function TeacherPortraitAdminPersonalDashboard({
               teacherOptions.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
-                  {t.hasReflection ? (isZh ? ' · 已填诊断' : ' · Diagnosis done') : ''}
                 </option>
               ))
             )}
@@ -164,7 +139,7 @@ export default function TeacherPortraitAdminPersonalDashboard({
 
           <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 space-y-3">
             <h3 className="text-sm font-semibold text-slate-800">
-              {isZh ? '教学诊断' : 'Teaching diagnosis'} · {selectedTeacher.name}
+              {isZh ? '本学期任务' : 'Tasks this term'} · {selectedTeacher.name}
             </h3>
             <TeachingSelfReflectionBlock
               isZh={isZh}

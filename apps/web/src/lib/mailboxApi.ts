@@ -61,6 +61,25 @@ export async function fetchMailbox(): Promise<MailboxBoard> {
   return response.json() as Promise<MailboxBoard>;
 }
 
+export type MailboxSummary = {
+  viewerIsAdmin: boolean;
+  openCount: number;
+};
+
+export async function fetchMailboxSummary(): Promise<MailboxSummary> {
+  const response = await fetch(apiUrl('/api/mailbox/summary'), { headers: getHeaders() });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json() as Promise<MailboxSummary>;
+}
+
+/** 信箱待处理数变化时通知顶栏角标刷新 */
+export const MAILBOX_BADGE_REFRESH_EVENT = 'suis-compass-mailbox-badge-refresh';
+
+export function notifyMailboxBadgeRefresh(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(MAILBOX_BADGE_REFRESH_EVENT));
+}
+
 export async function createMailboxMessage(body: string): Promise<MailboxMessage> {
   const response = await fetch(apiUrl('/api/mailbox'), {
     method: 'POST',

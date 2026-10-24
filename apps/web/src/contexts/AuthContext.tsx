@@ -25,6 +25,7 @@ function toUser(r: {
   moduleGrants?: string[] | null;
   canManageCurriculum?: boolean | null;
   canEditCurriculumUnits?: boolean | null;
+  isRootSystemAdmin?: boolean | null;
 }): User {
   const moduleGrants = Array.isArray(r.moduleGrants)
     ? r.moduleGrants.filter((k) => typeof k === 'string')
@@ -50,6 +51,7 @@ function toUser(r: {
     moduleGrants,
     canManageCurriculum,
     canEditCurriculumUnits,
+    isRootSystemAdmin: r.isRootSystemAdmin === true,
   };
 }
 
@@ -127,6 +129,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             moduleGrants?: string[] | null;
             canManageCurriculum?: boolean | null;
             canEditCurriculumUnits?: boolean | null;
+            isRootSystemAdmin?: boolean | null;
           };
         };
         if (data.success && data.token && data.user) {

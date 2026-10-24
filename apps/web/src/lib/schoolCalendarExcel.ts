@@ -1,6 +1,6 @@
 /**
  * 校历 Excel：版式跟公开课表一致。第一行是学校和学年标题，蓝底白字，中英两行。
- * 第二行表头中英两行，淡灰底黑字。一份工作簿里有月历和周历两张表。
+ * 第二行表头中英两行，淡灰底黑字。一份工作簿里有月历、周历和例会三张表。
  */
 import type { SchoolCalendarBoard, SchoolCalendarWeek } from './schoolCalendarApi';
 
@@ -31,12 +31,22 @@ const WEEK_COLUMNS = [
   { key: 'note', zh: '备注', en: 'Note', width: 24 },
 ] as const;
 
+const MEETING_COLUMNS = [
+  { key: 'period', zh: '时段', en: 'Period', width: 14 },
+  { key: 'weekday', zh: '星期', en: 'Weekday', width: 14 },
+  { key: 'start', zh: '开始', en: 'Start', width: 10 },
+  { key: 'end', zh: '结束', en: 'End', width: 10 },
+  { key: 'title', zh: '事项', en: 'Title', width: 28 },
+  { key: 'location', zh: '地点', en: 'Location', width: 28 },
+] as const;
+
 type MonthFixedKey = (typeof MONTH_FIXED)[number]['key'];
 type WeekColumnKey = (typeof WEEK_COLUMNS)[number]['key'];
+type MeetingColumnKey = (typeof MEETING_COLUMNS)[number]['key'];
 
 export type SchoolCalendarImportIssue = {
   row: number;
-  sheet: 'month' | 'week';
+  sheet: 'month' | 'week' | 'meeting';
   code: string;
   detail?: string;
 };
@@ -63,9 +73,20 @@ export type SchoolCalendarImportEvent = {
   note: string;
 };
 
+export type SchoolCalendarImportMeeting = {
+  row: number;
+  weekday: number;
+  period: 'morning' | 'noon' | 'afternoon';
+  startTime: string;
+  endTime: string;
+  title: string;
+  location: string;
+};
+
 export type SchoolCalendarWorkbookData = {
   weeks: SchoolCalendarImportWeek[];
   events: SchoolCalendarImportEvent[] | null;
+  meetings: SchoolCalendarImportMeeting[] | null;
   issues: SchoolCalendarImportIssue[];
 };
 
@@ -80,6 +101,26 @@ for (const column of WEEK_COLUMNS) {
   WEEK_HEADER[normHeader(column.zh)] = column.key;
   WEEK_HEADER[normHeader(column.en)] = column.key;
 }
+
+const MEETING_HEADER: Record<string, MeetingColumnKey> = {};
+for (const column of MEETING_COLUMNS) {
+  MEETING_HEADER[normHeader(column.zh)] = column.key;
+  MEETING_HEADER[normHeader(column.en)] = column.key;
+}
+
+const MEETING_PERIOD_LABEL: Record<'morning' | 'noon' | 'afternoon', [string, string]> = {
+  morning: ['上午', 'Morning'],
+  noon: ['中午', 'Noon'],
+  afternoon: ['下午', 'Afternoon'],
+};
+
+const MEETING_WEEKDAY_LABEL: Record<number, [string, string]> = {
+  1: ['周一', 'Monday'],
+  2: ['周二', 'Tuesday'],
+  3: ['周三', 'Wednesday'],
+  4: ['周四', 'Thursday'],
+  5: ['周五', 'Friday'],
+};
 
 const STATUS_LABEL: Record<string, [string, string]> = {
   planned: ['待完成', 'To do'],
@@ -329,6 +370,39 @@ export async function buildSchoolCalendarWorkbook(input: {
     });
   });
   weekSheet.views = [{ state: 'frozen', ySplit: 2 }];
+
+  const meetingSheet = workbook.addWorksheet('例会');
+  meetingSheet.columns = MEETING_COLUMNS.map((column) => ({ width: column.width }));
+  meetingSheet.mergeCells(1, 1, 1, MEETING_COLUMNS.length);
+  meetingSheet.getRow(1).height = 48;
+  for (let col = 1; col <= MEETING_COLUMNS.length; col += 1) {
+    paintTitle(meetingSheet.getCell(1, col), col === 1 ? title : null);
+  }
+  meetingSheet.getRow(2).height = 36;
+  MEETING_COLUMNS.forEach((column, index) => paintHeader(meetingSheet.getCell(2, index + 1), column));
+  const periodOrder: Record<string, number> = { morning: 1, noon: 2, afternoon: 3 };
+  const meetings = [...(input.board.meetings ?? [])].sort(
+    (a, b) => a.weekday - b.weekday || (periodOrder[a.period] ?? 9) - (periodOrder[b.period] ?? 9) || a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime),
+  );
+  meetings.forEach((meeting, index) => {
+    const excelRow = meetingSheet.getRow(index + 3);
+    const period = MEETING_PERIOD_LABEL[meeting.period] ?? MEETING_PERIOD_LABEL.morning;
+    const weekday = MEETING_WEEKDAY_LABEL[meeting.weekday] ?? ['', ''];
+    const values = [
+      personLabel(input.isZh, period[0], period[1]),
+      personLabel(input.isZh, weekday[0], weekday[1]),
+      meeting.startTime,
+      meeting.endTime,
+      meeting.title,
+      meeting.location,
+    ];
+    excelRow.height = 22;
+    values.forEach((value, colIndex) => {
+      const key = MEETING_COLUMNS[colIndex].key;
+      writeBodyCell(excelRow.getCell(colIndex + 1), value, key === 'title' || key === 'location' ? 'left' : 'center');
+    });
+  });
+  meetingSheet.views = [{ state: 'frozen', ySplit: 2 }];
   const buf = await workbook.xlsx.writeBuffer();
   return buf as ArrayBuffer;
 }
@@ -519,20 +593,23 @@ export async function parseSchoolCalendarWorkbook(arrayBuffer: ArrayBuffer): Pro
   try {
     await workbook.xlsx.load(arrayBuffer);
   } catch {
-    return { weeks: [], events: null, issues: [{ row: 1, sheet: 'month', code: 'file_unreadable' }] };
+    return { weeks: [], events: null, meetings: null, issues: [{ row: 1, sheet: 'month', code: 'file_unreadable' }] };
   }
   const sheets = workbook.worksheets;
-  if (sheets.length === 0) return { weeks: [], events: null, issues: [{ row: 1, sheet: 'month', code: 'empty_sheet' }] };
+  if (sheets.length === 0) return { weeks: [], events: null, meetings: null, issues: [{ row: 1, sheet: 'month', code: 'empty_sheet' }] };
 
   const namedMonth = sheetByName(sheets, ['月历', 'Month']);
   const namedWeek = sheetByName(sheets, ['周历', 'Week']);
+  const namedMeeting = sheetByName(sheets, ['例会', 'Meetings', 'Meeting']);
   const monthSheet = namedMonth ?? sheets.find((sheet) => sheetLooksLike(sheet, MONTH_HEADER, ['monday', 'theme', 'shared']));
   const weekSheet = namedWeek ?? sheets.find((sheet) => sheet !== monthSheet && sheetLooksLike(sheet, WEEK_HEADER, ['date', 'module', 'title']));
-  if (!monthSheet) return { weeks: [], events: null, issues: [{ row: 1, sheet: 'month', code: 'empty_sheet' }] };
+  const meetingSheet = namedMeeting
+    ?? sheets.find((sheet) => sheet !== monthSheet && sheet !== weekSheet && sheetLooksLike(sheet, MEETING_HEADER, ['period', 'weekday', 'title']));
+  if (!monthSheet) return { weeks: [], events: null, meetings: null, issues: [{ row: 1, sheet: 'month', code: 'empty_sheet' }] };
 
   const monthHeader = findHeaderRow(monthSheet, MONTH_HEADER, ['monday', 'theme', 'shared']);
   if (!monthHeader) {
-    return { weeks: [], events: null, issues: [{ row: 2, sheet: 'month', code: 'missing_columns' }] };
+    return { weeks: [], events: null, meetings: null, issues: [{ row: 2, sheet: 'month', code: 'missing_columns' }] };
   }
   const issues: SchoolCalendarImportIssue[] = [];
   const weeks: SchoolCalendarImportWeek[] = [];
@@ -614,5 +691,71 @@ export async function parseSchoolCalendarWorkbook(arrayBuffer: ArrayBuffer): Pro
       }
     }
   }
-  return { weeks, events, issues };
+
+  let meetings: SchoolCalendarImportMeeting[] | null = null;
+  if (meetingSheet) {
+    meetings = [];
+    const meetingHeader = findHeaderRow(meetingSheet, MEETING_HEADER, ['period', 'weekday', 'title']);
+    if (!meetingHeader) {
+      issues.push({ row: 2, sheet: 'meeting', code: 'missing_columns' });
+    } else {
+      const col = (key: MeetingColumnKey) => meetingHeader.columns.get(key) ?? 0;
+      for (let rowNumber = meetingHeader.headerRow + 1; rowNumber <= (meetingSheet.rowCount || meetingHeader.headerRow); rowNumber += 1) {
+        const row = meetingSheet.getRow(rowNumber);
+        const periodText = col('period') ? cellText(row.getCell(col('period')).value) : '';
+        const weekdayText = col('weekday') ? cellText(row.getCell(col('weekday')).value) : '';
+        const startTime = col('start') ? normalizeTime(row.getCell(col('start')).value) : '';
+        const endTime = col('end') ? normalizeTime(row.getCell(col('end')).value) : '';
+        const title = col('title') ? cellText(row.getCell(col('title')).value) : '';
+        const location = col('location') ? cellText(row.getCell(col('location')).value) : '';
+        if (!periodText && !weekdayText && !startTime && !endTime && !title && !location) continue;
+        const period = parseMeetingPeriod(periodText);
+        const weekday = parseMeetingWeekday(weekdayText);
+        if (!period) issues.push({ row: rowNumber, sheet: 'meeting', code: 'invalid_period', detail: periodText });
+        if (!weekday) issues.push({ row: rowNumber, sheet: 'meeting', code: 'invalid_weekday', detail: weekdayText });
+        if (!title.trim()) issues.push({ row: rowNumber, sheet: 'meeting', code: 'title_required' });
+        if (!/^\d{2}:\d{2}$/.test(startTime) || !/^\d{2}:\d{2}$/.test(endTime) || startTime >= endTime) {
+          issues.push({ row: rowNumber, sheet: 'meeting', code: 'invalid_time', detail: `${startTime}-${endTime}` });
+        }
+        if (!period || !weekday) continue;
+        meetings.push({
+          row: rowNumber,
+          weekday,
+          period,
+          startTime,
+          endTime,
+          title,
+          location,
+        });
+      }
+    }
+  }
+  return { weeks, events, meetings, issues };
+}
+
+function headerTokens(value: string): string[] {
+  return value.split(/[\s/／,，;；\n]+/).map((part) => normHeader(part)).filter(Boolean);
+}
+
+function parseMeetingPeriod(value: string): 'morning' | 'noon' | 'afternoon' | '' {
+  for (const token of headerTokens(value)) {
+    if (token === '上午' || token === 'morning' || token === 'am') return 'morning';
+    if (token === '中午' || token === 'noon') return 'noon';
+    if (token === '下午' || token === 'afternoon' || token === 'pm') return 'afternoon';
+  }
+  return '';
+}
+
+function parseMeetingWeekday(value: string): number {
+  const map: Record<string, number> = {
+    '1': 1, '周一': 1, '星期一': 1, monday: 1, mon: 1,
+    '2': 2, '周二': 2, '星期二': 2, tuesday: 2, tue: 2,
+    '3': 3, '周三': 3, '星期三': 3, wednesday: 3, wed: 3,
+    '4': 4, '周四': 4, '星期四': 4, thursday: 4, thu: 4,
+    '5': 5, '周五': 5, '星期五': 5, friday: 5, fri: 5,
+  };
+  for (const token of headerTokens(value)) {
+    if (map[token]) return map[token];
+  }
+  return 0;
 }

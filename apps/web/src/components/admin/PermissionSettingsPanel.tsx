@@ -64,14 +64,14 @@ const ROLE_MODULE_MATRIX: Record<
     'student-center': { zh: '全校范围', en: 'School-wide' },
     'teacher-center': { zh: '全校范围', en: 'School-wide' },
     mailbox: { zh: '全部信件与处理', en: 'All mail & handle' },
-    lighthouse: { zh: '仅查看', en: 'View only' },
+    lighthouse: { zh: '可查看与编辑', en: 'View & edit' },
     admin: { zh: '可进入后台', en: 'Can open admin' },
   },
   teacher: {
-    'calendar-month': { zh: '仅查看', en: 'View only' },
+    'calendar-month': { zh: '仅查看；协调员可改全部', en: 'View; coordinators edit all' },
     'calendar-week': {
-      zh: '可查看；年级/学科组长与协调员可改',
-      en: 'View; grade/subject leads & coordinators edit',
+      zh: '组长改自己创建的（含过往、不限模块）；协调员改分管模块里组长创建的',
+      en: 'Leads edit what they created (any module, incl. past); coordinators edit lead-created items on their modules',
     },
     'open-lessons': {
       zh: '填自己的课；组长管本组',

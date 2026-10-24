@@ -10,6 +10,7 @@ import {
   createMailboxMessage,
   deleteMailboxMessage,
   fetchMailbox,
+  notifyMailboxBadgeRefresh,
   replyToMailboxMessage,
   setMailboxStatus,
   updateMailboxMessage,
@@ -82,6 +83,7 @@ function StaffMailbox({
         setBody('');
         setComposing(false);
         setMessages((current) => [message, ...current.filter((item) => item.id !== message.id)]);
+        notifyMailboxBadgeRefresh();
       })
       .catch((err: unknown) => {
         const code = err instanceof Error ? err.message : '';
@@ -113,6 +115,7 @@ function StaffMailbox({
         setMessages((current) => current.filter((message) => message.id !== messageId));
         setConfirmDeleteId(null);
         setEditingId((current) => (current === messageId ? null : current));
+        notifyMailboxBadgeRefresh();
       })
       .catch(() => setError(isZh ? '没有删掉' : 'Could not delete it'))
       .finally(() => setBusyId(null));
@@ -273,6 +276,7 @@ function AdminMailbox({
       .then(() => {
         setMessages((current) => current.filter((message) => message.id !== messageId));
         setConfirmDeleteId(null);
+        notifyMailboxBadgeRefresh();
       })
       .catch(() => setError(isZh ? '没有删掉' : 'Could not delete it'))
       .finally(() => setBusyId(null));
@@ -285,6 +289,7 @@ function AdminMailbox({
     setMailboxStatus(messageId, status)
       .then(() => {
         setMessages((current) => current.map((message) => (message.id === messageId ? { ...message, status } : message)));
+        notifyMailboxBadgeRefresh();
       })
       .catch(() => setError(isZh ? '状态没有改成' : 'Could not update the status'))
       .finally(() => setBusyId(null));

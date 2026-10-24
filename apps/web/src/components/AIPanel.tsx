@@ -28,6 +28,7 @@ import { Course } from '../types';
 import { loadSemesterDataSync } from '../lib/storage';
 import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/aiModels';
 import { getApiUrl, getAuthHeaders } from '../lib/api';
+import { extractTextFromPDF } from '../lib/pdfParser';
 import { formatNavUserLabel } from '../lib/userDisplay';
 import {
   Send,
@@ -48,6 +49,8 @@ import { aiMarkdownComponents, aiRemarkPlugins } from './aiMarkdown';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import AppTopBar from './AppTopBar';
+
+const AI_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
 const CHAT_LIST_KEY = 'ai-chat-list';
 const CHAT_MSGS_PREFIX = 'ai-chat-msgs-';
@@ -283,6 +286,10 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
     return [];
   });
   const [input, setInput] = useState('');
+  const [attachment, setAttachment] = useState<{ name: string; text: string } | null>(null);
+  const [attachmentError, setAttachmentError] = useState('');
+  const [readingFile, setReadingFile] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string>(getSavedModelId());
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -416,9 +423,43 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
     setContextMenuOpen(false);
   };
 
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > AI_UPLOAD_MAX_BYTES) {
+      setAttachment(null);
+      setAttachmentError(t('ai.panel.fileTooLarge'));
+      return;
+    }
+    const extension = '.' + (file.name.split('.').pop()?.toLowerCase() ?? '');
+    const isTxt = file.type === 'text/plain' || extension === '.txt';
+    const isPdf = file.type === 'application/pdf' || extension === '.pdf';
+    if (!isTxt && !isPdf) {
+      setAttachment(null);
+      setAttachmentError(t('ai.panel.fileType'));
+      return;
+    }
+    setAttachmentError('');
+    setReadingFile(true);
+    try {
+      const text = isTxt ? await file.text() : await extractTextFromPDF(file);
+      setAttachment({ name: file.name, text });
+    } catch (err) {
+      console.error('AI file read failed:', err);
+      setAttachment(null);
+      setAttachmentError(err instanceof Error ? err.message : t('ai.assistant.errorMessage'));
+    } finally {
+      setReadingFile(false);
+    }
+  };
+
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
-    const userMessage: Message = { role: 'user', content: input.trim() };
+    const typed = input.trim();
+    const fileText = attachment?.text.trim() ?? '';
+    if ((!typed && !fileText) || isLoading || readingFile) return;
+    const content = [typed, attachment ? `【附件：${attachment.name}】\n${attachment.text}` : ''].filter(Boolean).join('\n\n');
+    const userMessage: Message = { role: 'user', content };
     let chatId = currentChatId;
     if (!chatId) {
       chatId = 'chat-' + Date.now();
@@ -433,6 +474,8 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
     const newMessages = [...messages, userMessage];
     setMessages(newMessages);
     setInput('');
+    setAttachment(null);
+    setAttachmentError('');
     setIsLoading(true);
 
     const context = buildContextString(screenId, contextPayload as Record<string, unknown>, language === 'zh');
@@ -775,6 +818,25 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
               </div>
               <div className="flex-shrink-0 px-4 sm:px-6 pb-6 sm:pb-8">
                 <div className="w-full max-w-2xl mx-auto rounded-2xl border border-slate-100 bg-white shadow-lg overflow-visible">
+                  {attachment || attachmentError ? (
+                    <div className="px-4 pt-3">
+                      {attachment ? (
+                        <div className="flex min-w-0 items-center gap-2 text-xs text-slate-600">
+                          <Paperclip className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                          <span className="truncate">{attachment.name}</span>
+                          <button
+                            type="button"
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                            aria-label={t('ai.panel.removeFile')}
+                            onClick={() => setAttachment(null)}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : null}
+                      {attachmentError ? <p className="text-xs text-red-600">{attachmentError}</p> : null}
+                    </div>
+                  ) : null}
                   <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
@@ -790,7 +852,13 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
                   />
                   <div className="flex items-center justify-between px-2 py-1.5">
                     <div className="flex items-center gap-0.5">
-                      <button type="button" className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" title={t('ai.panel.upload')}>
+                      <button
+                        type="button"
+                        className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 disabled:opacity-40"
+                        title={t('ai.panel.upload')}
+                        disabled={readingFile}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
                         <Paperclip className="h-4 w-4" />
                       </button>
                       <button
@@ -849,9 +917,9 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
                     <button
                       type="button"
                       onClick={handleSend}
-                      disabled={!input.trim() || isLoading}
+                      disabled={(!input.trim() && !attachment) || isLoading || readingFile}
                       className={`p-2 rounded-lg ${
-                        input.trim() && !isLoading ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-400'
+                        (input.trim() || attachment) && !isLoading && !readingFile ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-400'
                       }`}
                     >
                       <Send className="h-4 w-4" />
@@ -935,6 +1003,25 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
               {/* 输入框：无外容器，仅窗体 + 阴影（参考 Gemini） */}
               <div className="flex-shrink-0 p-4 px-4 sm:px-6 pb-6">
                 <div className="max-w-2xl mx-auto rounded-2xl border border-slate-100 bg-white shadow-lg overflow-visible">
+                  {attachment || attachmentError ? (
+                    <div className="px-4 pt-3">
+                      {attachment ? (
+                        <div className="flex min-w-0 items-center gap-2 text-xs text-slate-600">
+                          <Paperclip className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                          <span className="truncate">{attachment.name}</span>
+                          <button
+                            type="button"
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                            aria-label={t('ai.panel.removeFile')}
+                            onClick={() => setAttachment(null)}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : null}
+                      {attachmentError ? <p className="text-xs text-red-600">{attachmentError}</p> : null}
+                    </div>
+                  ) : null}
                   <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
@@ -950,7 +1037,13 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
                   />
                   <div className="flex items-center justify-between px-2 py-1.5">
                     <div className="flex items-center gap-0.5">
-                      <button type="button" className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" title={t('ai.panel.upload')}>
+                      <button
+                        type="button"
+                        className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 disabled:opacity-40"
+                        title={t('ai.panel.upload')}
+                        disabled={readingFile}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
                         <Paperclip className="h-4 w-4" />
                       </button>
                       <button
@@ -1009,9 +1102,9 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
                     <button
                       type="button"
                       onClick={handleSend}
-                      disabled={!input.trim() || isLoading}
+                      disabled={(!input.trim() && !attachment) || isLoading || readingFile}
                       className={`p-2 rounded-lg ${
-                        input.trim() && !isLoading ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-400'
+                        (input.trim() || attachment) && !isLoading && !readingFile ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-400'
                       }`}
                     >
                       <Send className="h-4 w-4" />
@@ -1066,6 +1159,14 @@ export default function AIPanel({ fullScreen, fromHub, onClose }: AIPanelProps) 
       </div>
 
       {/* 删除对话确认弹窗 */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".txt,.pdf,text/plain,application/pdf"
+        className="hidden"
+        onChange={(event) => void handleFileChange(event)}
+      />
+
       <Dialog open={deleteConfirmChatId !== null} onOpenChange={(open) => !open && setDeleteConfirmChatId(null)}>
         <DialogContent className="sm:max-w-[380px]">
           <DialogHeader>

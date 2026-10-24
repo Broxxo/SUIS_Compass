@@ -1,5 +1,6 @@
 /**
  * 校历：月历看每周主题。周历只列出这一周真正上课的日子，和月历里的放假、调休对齐。
+ * 例会是每周固定的会议安排，不跟某一周绑定。
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core';
@@ -22,8 +23,10 @@ import { latestAcademicYear } from '../lib/academicPeriodDefault';
 import type { AcademicYear } from '../types/classManagement';
 import {
   createSchoolCalendarEvent,
+  createSchoolCalendarMeeting,
   createSchoolCalendarModule,
   deleteSchoolCalendarEvent,
+  deleteSchoolCalendarMeeting,
   deleteSchoolCalendarModule,
   fetchPublicHolidays,
   fetchSchoolCalendar,
@@ -34,10 +37,13 @@ import {
   saveSchoolCalendarSettings,
   setSchoolCalendarEventStatus,
   updateSchoolCalendarEvent,
+  updateSchoolCalendarMeeting,
   updateSchoolCalendarModule,
+  type MeetingPeriod,
   type PublicHolidayDay,
   type SchoolCalendarBoard,
   type SchoolCalendarEvent,
+  type SchoolCalendarMeeting,
   type SchoolCalendarModule,
   type SchoolCalendarWeek,
 } from '../lib/schoolCalendarApi';
@@ -69,10 +75,15 @@ function yearMonthParts(key: string): { year: string; month: string } {
   return { year, month };
 }
 
+function importSheetName(sheet: SchoolCalendarImportIssue['sheet'], isZh: boolean): string {
+  if (sheet === 'week') return isZh ? '周历' : 'Week';
+  if (sheet === 'meeting') return isZh ? '例会' : 'Meetings';
+  return isZh ? '月历' : 'Month';
+}
+
 function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): string {
-  const where = isZh
-    ? `${issue.sheet === 'week' ? '周历' : '月历'}第 ${issue.row} 行`
-    : `${issue.sheet === 'week' ? 'Week' : 'Month'} row ${issue.row}`;
+  const sheetName = importSheetName(issue.sheet, isZh);
+  const where = isZh ? `${sheetName}第 ${issue.row} 行` : `${sheetName} row ${issue.row}`;
   const zh: Record<string, string> = {
     file_unreadable: '读不了这个文件，请使用导出的 xlsx 表格。',
     empty_sheet: '没有找到月历表。请使用导出的表格。',
@@ -95,6 +106,8 @@ function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): strin
     owner_ambiguous: '负责人对应了不止一位老师。',
     participant_not_found: '找不到这位参与人。',
     participant_ambiguous: '参与人对应了不止一位老师。',
+    invalid_weekday: '星期要写成周一到周五。',
+    invalid_period: '时段要写成上午、中午或下午。',
   };
   const en: Record<string, string> = {
     file_unreadable: 'This file could not be read. Use the exported xlsx workbook.',
@@ -118,6 +131,8 @@ function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): strin
     owner_ambiguous: 'This owner matches more than one person.',
     participant_not_found: 'This participant was not found.',
     participant_ambiguous: 'This participant matches more than one person.',
+    invalid_weekday: 'Weekday must be Monday through Friday.',
+    invalid_period: 'Period must be Morning, Noon, or Afternoon.',
   };
   const text = (isZh ? zh : en)[issue.code] ?? issue.code;
   const detail = issue.detail ? `（${issue.detail}）` : '';
@@ -126,18 +141,32 @@ function importIssueText(issue: SchoolCalendarImportIssue, isZh: boolean): strin
 
 function errorText(code: string, isZh: boolean): string {
   const zh: Record<string, string> = {
-    past_locked: '已经过去的整周只有管理员可以改；本周仍可填写。',
-    forbidden: '没有修改这个模块的权限。',
+    past_locked: '已经过去的整周不能新建事项；已有事项仍可由相关组长或协调员修改。',
+    forbidden: '没有修改这条事项的权限。',
     invalid_bounds: '日期顺序需要是：开学，然后寒假，然后春季开学，然后暑假。',
     invalid_time: '结束时间要晚于开始时间。',
     invalid_date: '这一天不在本学年的周次里。',
     last_module: '至少保留一个模块。',
     name_required: '请填写模块名称。',
+    title_required: '请填写事项。',
+    title_too_long: '事项太长了。',
+    location_too_long: '地点太长了。',
+    invalid_weekday: '星期要选周一到周五。',
+    invalid_period: '时段要选上午、中午或下午。',
+    not_found: '这条例会已经不在了。',
     internal: '保存没有成功，请稍后再试。',
     shared_module: '全学部只用于小学部和中学部。',
   };
   if (isZh) return zh[code] ?? zh.internal;
   if (code === 'shared_module') return 'Whole-school events belong on a division module.';
+  if (code === 'past_locked') {
+    return 'Past weeks cannot take new events; existing ones can still be edited by related leads or coordinators.';
+  }
+  if (code === 'forbidden') return 'You do not have permission to change this event.';
+  if (code === 'title_required') return 'Enter a title.';
+  if (code === 'invalid_weekday') return 'Choose Monday through Friday.';
+  if (code === 'invalid_period') return 'Choose morning, noon, or afternoon.';
+  if (code === 'not_found') return 'This meeting is no longer there.';
   return code;
 }
 
@@ -257,20 +286,18 @@ function timesOverlap(a: SchoolCalendarEvent, b: SchoolCalendarEvent): boolean {
 function calendarAIPayload(input: {
   board: SchoolCalendarBoard | null;
   yearName: string;
-  mode: 'month' | 'week';
+  mode: 'month' | 'week' | 'meetings';
   weekId: string;
   modules: SchoolCalendarModule[];
   holidayByDate: Map<string, PublicHolidayDay>;
-  moduleFilter: string;
   isZh: boolean;
 }): SchoolCalendarAIPayload {
-  const { board, yearName, mode, weekId, modules, holidayByDate, moduleFilter, isZh } = input;
-  const filtered = moduleFilter === 'all' ? null : modules[0] ?? null;
+  const { board, yearName, mode, weekId, modules, holidayByDate, isZh } = input;
   const base = {
     yearName,
     today: board?.today ?? '',
     visibleModules: modules.map((mod) => ({ nameZh: mod.nameZh, nameEn: mod.nameEn })),
-    filteredTo: filtered ? { nameZh: filtered.nameZh, nameEn: filtered.nameEn } : null,
+    filteredTo: null,
     settings: board?.settings ?? null,
     showShared: modules.some((mod) => mod.segmentId),
   };
@@ -362,10 +389,14 @@ export default function SchoolCalendar({
   onBackToHub,
   isAIOpen = false,
   onToggleAI,
+  initialYearId,
+  initialEventId,
 }: {
   onBackToHub?: () => void;
   isAIOpen?: boolean;
   onToggleAI?: () => void;
+  initialYearId?: string;
+  initialEventId?: string;
 }) {
   const { user } = useAuth();
   const { setContextFromApp } = useAIContext();
@@ -377,9 +408,8 @@ export default function SchoolCalendar({
   const [board, setBoard] = useState<SchoolCalendarBoard | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
-  const [mode, setMode] = useState<'month' | 'week'>('month');
+  const [mode, setMode] = useState<'month' | 'week' | 'meetings'>('month');
   const [weekId, setWeekId] = useState('');
-  const [moduleFilter, setModuleFilter] = useState('all');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusEdit, setFocusEdit] = useState<{ weekId: string; moduleId: string; seedLocal?: boolean } | null>(null);
   const [themeEditWeekId, setThemeEditWeekId] = useState<string | null>(null);
@@ -387,9 +417,13 @@ export default function SchoolCalendar({
   const [eventDate, setEventDate] = useState('');
   const [eventWeekId, setEventWeekId] = useState('');
   const [eventModuleId, setEventModuleId] = useState('');
+  const [meetingEdit, setMeetingEdit] = useState<SchoolCalendarMeeting | 'new' | null>(null);
+  const [meetingWeekday, setMeetingWeekday] = useState(1);
+  const [meetingPeriod, setMeetingPeriod] = useState<MeetingPeriod>('morning');
   const [holidayDays, setHolidayDays] = useState<PublicHolidayDay[]>([]);
   const [excelBusy, setExcelBusy] = useState<'export' | 'import' | 'briefing' | null>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
+  const openedHubEventRef = useRef('');
 
   const reload = async (nextYear = yearId, quiet = false) => {
     if (!nextYear) return;
@@ -417,10 +451,11 @@ export default function SchoolCalendar({
       .then((list) => {
         setYears(list);
         const current = list.find((year) => year.isCurrent) ?? latestAcademicYear(list);
-        setYearId(current?.id ?? '');
+        const pinned = initialYearId && list.some((year) => year.id === initialYearId) ? initialYearId : '';
+        setYearId(pinned || current?.id || '');
       })
       .catch(() => setPageError(isZh ? '学年没有读出来。' : 'Could not load years.'));
-  }, [isZh]);
+  }, [isZh, initialYearId]);
 
   useEffect(() => {
     fetchPublicHolidays()
@@ -435,12 +470,20 @@ export default function SchoolCalendar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [yearId]);
 
+  useEffect(() => {
+    if (!initialEventId || !board || openedHubEventRef.current === initialEventId) return;
+    const event = board.events.find((item) => item.id === initialEventId);
+    if (!event) return;
+    openedHubEventRef.current = initialEventId;
+    setMode('week');
+    setWeekId(event.weekId);
+    setEventWeekId(event.weekId);
+    setEventDate(event.eventDate);
+    setEventModuleId(event.moduleId);
+    setEventEdit(event);
+  }, [board, initialEventId]);
+
   const week = board?.weeks.find((item) => item.id === weekId) ?? null;
-  const visibleModules = useMemo(() => {
-    if (!board) return [];
-    if (moduleFilter === 'all') return board.modules;
-    return board.modules.filter((item) => item.id === moduleFilter);
-  }, [board, moduleFilter]);
 
   const holidayByDate = useMemo(() => {
     const marks = new Map<string, PublicHolidayDay>();
@@ -465,11 +508,10 @@ export default function SchoolCalendar({
     yearName: years.find((year) => year.id === yearId)?.name ?? '',
     mode,
     weekId,
-    modules: visibleModules,
+    modules: board?.modules ?? [],
     holidayByDate,
-    moduleFilter,
     isZh,
-  }), [board, years, yearId, mode, weekId, visibleModules, holidayByDate, moduleFilter, isZh]);
+  }), [board, years, yearId, mode, weekId, holidayByDate, isZh]);
 
   useEffect(() => {
     if (!onToggleAI) return;
@@ -481,20 +523,20 @@ export default function SchoolCalendar({
   const canEditFocus = (moduleId: string, boundaryDate: string) => {
     if (!board) return false;
     if (!focusModuleIds.includes(moduleId)) return false;
-    if (isCalendarDatePastLocked(boundaryDate, board.today)) return board.isAdmin;
+    if (isCalendarDatePastLocked(boundaryDate, board.today)) return Boolean(board.canManageMonth);
     return true;
   };
   const canEditModule = (moduleId: string, boundaryDate: string) => {
     if (!board) return false;
     if (!board.editableModuleIds.includes(moduleId)) return false;
-    if (isCalendarDatePastLocked(boundaryDate, board.today)) return board.isAdmin;
+    if (isCalendarDatePastLocked(boundaryDate, board.today)) return Boolean(board.canWritePastWeek);
     return true;
   };
 
   const statusCache = useRef<{ events: SchoolCalendarEvent[]; map: Map<string, SchoolCalendarEvent['status']> } | null>(null);
   const statusTicket = useRef(new Map<string, number>());
   const cycleEventStatus = (event: SchoolCalendarEvent) => {
-    if (!board || !canSetEventStatus(board, event)) return;
+    if (!board || !canEditEvent(event)) return;
     if (!statusCache.current || statusCache.current.events !== board.events) {
       statusCache.current = {
         events: board.events,
@@ -569,27 +611,33 @@ export default function SchoolCalendar({
         return;
       }
       const yearLabel = years.find((year) => year.id === yearId)?.name ?? '';
-      const ok = window.confirm(
+      const scopes = [isZh ? '月历' : 'the month calendar'];
+      if (parsed.events) scopes.push(isZh ? '周历' : 'the week calendar');
+      if (parsed.meetings) scopes.push(isZh ? '例会' : 'standing meetings');
+      const kept = [
         parsed.events
-          ? isZh
-            ? `将用这个表格替换 ${yearLabel} 的月历和周历。表格里没有的周会清空，没有的事项会删除。`
-            : `This replaces the ${yearLabel} month and week calendars. Weeks and events missing from the file will be cleared.`
-          : isZh
-            ? `将用这个表格替换 ${yearLabel} 的月历。表格里没有的周会清空。周历事项保持不变。`
-            : `This replaces the ${yearLabel} month calendar. Weeks missing from the file will be cleared. Week events stay as they are.`,
+          ? isZh ? '没有的周历事项会删除' : 'week events missing from the file will be deleted'
+          : isZh ? '周历事项保持不变' : 'week events stay as they are',
+        parsed.meetings
+          ? isZh ? '没有的例会会删除' : 'standing meetings missing from the file will be deleted'
+          : isZh ? '例会保持不变' : 'standing meetings stay as they are',
+      ];
+      const ok = window.confirm(
+        isZh
+          ? `将用这个表格替换 ${yearLabel} 的${scopes.join('、')}。表格里没有的周会清空，${kept.join('，')}。`
+          : `This replaces ${yearLabel} ${scopes.join(', ')}. Weeks missing from the file will be cleared, ${kept.join(', and ')}.`,
       );
       if (!ok) return;
-      const result = await importSchoolCalendar(yearId, { weeks: parsed.weeks, events: parsed.events });
+      const result = await importSchoolCalendar(yearId, {
+        weeks: parsed.weeks,
+        events: parsed.events,
+        meetings: parsed.meetings,
+      });
       await reload();
-      window.alert(
-        result.eventsReplaced
-          ? isZh
-            ? `已导入月历 ${result.weekCount} 周，周历 ${result.eventCount} 条事项。`
-            : `Imported ${result.weekCount} weeks and ${result.eventCount} events.`
-          : isZh
-            ? `已导入月历 ${result.weekCount} 周。`
-            : `Imported ${result.weekCount} weeks.`,
-      );
+      const imported = [isZh ? `月历 ${result.weekCount} 周` : `${result.weekCount} weeks`];
+      if (result.eventsReplaced) imported.push(isZh ? `周历 ${result.eventCount} 条事项` : `${result.eventCount} events`);
+      if (result.meetingsReplaced) imported.push(isZh ? `例会 ${result.meetingCount} 条` : `${result.meetingCount} meetings`);
+      window.alert(isZh ? `已导入${imported.join('，')}。` : `Imported ${imported.join(', ')}.`);
     } catch (error) {
       const issues = error && typeof error === 'object' && 'issues' in error
         ? (error as { issues?: SchoolCalendarImportIssue[] }).issues
@@ -632,30 +680,16 @@ export default function SchoolCalendar({
                 <SegmentTabButton grouped active={mode === 'month'} onClick={() => setMode('month')}>
                   {isZh ? '月历' : 'Month'}
                 </SegmentTabButton>
+                <SegmentTabButton grouped active={mode === 'meetings'} onClick={() => setMode('meetings')}>
+                  {isZh ? '例会' : 'Meetings'}
+                </SegmentTabButton>
               </SegmentTabGroup>
-              {board ? (
-                <SegmentTabGroup>
-                  <SegmentTabButton grouped active={moduleFilter === 'all'} onClick={() => setModuleFilter('all')}>
-                    {isZh ? '全部模块' : 'All'}
-                  </SegmentTabButton>
-                  {board.modules.map((mod) => (
-                    <SegmentTabButton
-                      key={mod.id}
-                      grouped
-                      active={moduleFilter === mod.id}
-                      onClick={() => setModuleFilter(mod.id)}
-                    >
-                      {isZh ? mod.nameZh : mod.nameEn}
-                    </SegmentTabButton>
-                  ))}
-                </SegmentTabGroup>
-              ) : null}
             </SegmentTabStrip>
           </div>
           {canManageCalendar && board ? (
             <div className="flex flex-wrap items-center gap-2">
               <Button type="button" variant="outline" size="sm" disabled={excelBusy !== null} onClick={() => void exportExcel()}>
-                {excelBusy === 'export' ? (isZh ? '导出中…' : 'Exporting…') : isZh ? '导出 Excel' : 'Export Excel'}
+                {excelBusy === 'export' ? (isZh ? '导出中…' : 'Exporting…') : isZh ? '导出' : 'Export'}
               </Button>
               <input
                 ref={excelInputRef}
@@ -669,13 +703,13 @@ export default function SchoolCalendar({
                 }}
               />
               <Button type="button" variant="outline" size="sm" disabled={excelBusy !== null} onClick={() => excelInputRef.current?.click()}>
-                {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入 Excel' : 'Import Excel'}
+                {excelBusy === 'import' ? (isZh ? '导入中…' : 'Importing…') : isZh ? '导入' : 'Import'}
               </Button>
               <Button type="button" variant="outline" size="sm" disabled={excelBusy !== null || !week} onClick={() => void exportWeekBriefing()}>
                 {excelBusy === 'briefing' ? (isZh ? '生成中…' : 'Preparing…') : isZh ? '本周工作提示' : 'Week briefing'}
               </Button>
               <Button type="button" variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
-                {isZh ? '校历设置' : 'Calendar settings'}
+                {isZh ? '设置' : 'Settings'}
               </Button>
             </div>
           ) : null}
@@ -688,7 +722,7 @@ export default function SchoolCalendar({
           <MonthTable
             board={board}
             months={months}
-            modules={visibleModules}
+            modules={board.modules}
             isZh={isZh}
             canEditModule={canEditFocus}
             canManageMonth={canManageMonth}
@@ -700,11 +734,26 @@ export default function SchoolCalendar({
             onTheme={(targetWeekId) => setThemeEditWeekId(targetWeekId)}
             onFocus={(targetWeekId, moduleId, seedLocal) => setFocusEdit({ weekId: targetWeekId, moduleId, seedLocal })}
           />
+        ) : mode === 'meetings' ? (
+          <MeetingBoard
+            board={board}
+            isZh={isZh}
+            onAdd={(weekday, period) => {
+              setMeetingWeekday(weekday);
+              setMeetingPeriod(period);
+              setMeetingEdit('new');
+            }}
+            onOpen={(meeting) => {
+              setMeetingWeekday(meeting.weekday);
+              setMeetingPeriod(meeting.period);
+              setMeetingEdit(meeting);
+            }}
+          />
         ) : week ? (
           <WeekBoard
             board={board}
             week={week}
-            modules={visibleModules}
+            modules={board.modules}
             isZh={isZh}
             holidayByDate={holidayByDate}
             canEditModule={canEditModule}
@@ -775,6 +824,17 @@ export default function SchoolCalendar({
           canEditModule={canEditModule}
           onClose={() => setEventEdit(null)}
           onSaved={() => void run(async () => setEventEdit(null))}
+        />
+      ) : null}
+      {board && meetingEdit ? (
+        <MeetingDialog
+          academicYearId={board.academicYearId}
+          meeting={meetingEdit === 'new' ? null : meetingEdit}
+          initialWeekday={meetingWeekday}
+          initialPeriod={meetingPeriod}
+          isZh={isZh}
+          onClose={() => setMeetingEdit(null)}
+          onSaved={() => void run(async () => setMeetingEdit(null))}
         />
       ) : null}
     </div>
@@ -1116,9 +1176,8 @@ function monthFocusCells({
   return nodes;
 }
 
-function canSetEventStatus(board: SchoolCalendarBoard, event: SchoolCalendarEvent): boolean {
-  if (event.shared) return board.modules.some((mod) => mod.segmentId && board.editableModuleIds.includes(mod.id));
-  return board.editableModuleIds.includes(event.moduleId);
+function canEditEvent(event: SchoolCalendarEvent): boolean {
+  return event.canEdit === true;
 }
 
 function WeekEventLine({
@@ -1136,7 +1195,7 @@ function WeekEventLine({
   onOpen: (event: SchoolCalendarEvent) => void;
   onCycleStatus: (event: SchoolCalendarEvent) => void;
 }) {
-  const canSetStatus = canSetEventStatus(board, event);
+  const canSetStatus = canEditEvent(event);
   const mark = statusMarkLabel(event.status, isZh);
   const parts = [
     { text: `${event.startTime}–${event.endTime}`, className: 'tabular-nums text-slate-500' },
@@ -1165,7 +1224,7 @@ function WeekEventLine({
       </button>
       <button
         type="button"
-        className={`block min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-slate-50 ${clash ? 'bg-amber-50 hover:bg-amber-100/50' : ''} ${event.status === 'cancelled' ? 'opacity-50 line-through' : ''}`}
+        className={`block min-w-0 flex-1 whitespace-normal break-words rounded px-1 py-0.5 text-left text-xs leading-snug hover:bg-slate-50 ${clash ? 'bg-amber-50 hover:bg-amber-100/50' : ''} ${event.status === 'cancelled' ? 'opacity-50 line-through' : ''}`}
         onClick={() => onOpen(event)}
       >
         {parts.map((part, partIndex) => (
@@ -1215,17 +1274,17 @@ function WeekModuleSlot({
       </div>
       {canAdd && dayEvents.length === 0 ? (
         <button type="button" aria-label={isZh ? '添加事项' : 'Add event'} className="absolute inset-0" onClick={onAdd}>
-          <Plus className="pointer-events-none absolute left-1/2 top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/cell:opacity-100" />
+          <Plus className="pointer-events-none absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 text-slate-300 opacity-40 md:h-3.5 md:w-3.5 md:opacity-0 md:group-hover/cell:opacity-100" />
         </button>
       ) : null}
       {canAdd && dayEvents.length > 0 ? (
         <button
           type="button"
           aria-label={isZh ? '添加事项' : 'Add event'}
-          className="pointer-events-none absolute right-0.5 top-0.5 z-20 flex h-5 w-5 items-center justify-center rounded bg-white/90 text-slate-400 opacity-0 shadow-sm hover:text-slate-700 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/cell:pointer-events-auto group-hover/cell:opacity-100"
+          className="absolute right-0.5 top-0.5 z-20 flex h-7 w-7 items-center justify-center rounded bg-white/90 text-slate-400 shadow-sm hover:text-slate-700 max-md:pointer-events-auto max-md:opacity-100 md:h-5 md:w-5 md:pointer-events-none md:opacity-0 md:group-hover/cell:pointer-events-auto md:group-hover/cell:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
           onClick={onAdd}
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-4 w-4 md:h-3.5 md:w-3.5" />
         </button>
       ) : null}
     </div>
@@ -1265,7 +1324,7 @@ function weekDayModuleCells({
     const mod = modules[index];
     if (!mod.segmentId) {
       nodes.push(
-        <td key={mod.id} className={`${cellBorder} ${cellHover} overflow-hidden ${surface} p-0`}>
+        <td key={mod.id} className={`${cellBorder} ${cellHover} ${surface} p-0`}>
           <WeekModuleSlot
             dayEvents={localEvents(mod.id)}
             events={events}
@@ -1285,7 +1344,7 @@ function weekDayModuleCells({
     while (end < modules.length && modules[end].segmentId) end += 1;
     const run = modules.slice(index, end);
     nodes.push(
-      <td key={run.map((item) => item.id).join('-')} colSpan={run.length} className={`${cellBorder} h-px overflow-hidden ${surface} p-0`}>
+      <td key={run.map((item) => item.id).join('-')} colSpan={run.length} className={`${cellBorder} h-px ${surface} p-0`}>
         <div className="flex h-full min-h-full flex-col">
           {sharedEvents.length > 0 && run.length > 1 ? (
             <div className="border-b border-slate-200 p-1">
@@ -1304,9 +1363,9 @@ function weekDayModuleCells({
               </div>
             </div>
           ) : null}
-          <div className="grid min-h-8 flex-1" style={{ gridTemplateColumns: `repeat(${run.length}, minmax(0, 1fr))` }}>
+          <div className="grid h-full min-h-8 flex-1" style={{ gridTemplateColumns: `repeat(${run.length}, minmax(0, 1fr))` }}>
             {run.map((item, itemIndex) => (
-              <div key={item.id} className={`flex h-full min-h-8 flex-col ${itemIndex > 0 ? 'border-l border-slate-200' : ''}`}>
+              <div key={item.id} className={`flex h-full min-h-full min-w-0 flex-col ${itemIndex > 0 ? 'border-l border-slate-200' : ''}`}>
                 {sharedEvents.length > 0 && run.length === 1 ? (
                   <div className="border-b border-slate-200 p-1">
                     <p className="px-1 pb-0.5 text-[10px] leading-none text-slate-400">{isZh ? '全学部' : 'Whole school'}</p>
@@ -1800,6 +1859,217 @@ function FocusDialog({
   );
 }
 
+const MEETING_PERIODS: MeetingPeriod[] = ['morning', 'noon', 'afternoon'];
+const MEETING_WEEKDAYS = [1, 2, 3, 4, 5];
+
+function meetingPeriodLabel(period: MeetingPeriod, isZh: boolean): string {
+  if (period === 'morning') return isZh ? '上午' : 'Morning';
+  if (period === 'noon') return isZh ? '中午' : 'Noon';
+  return isZh ? '下午' : 'Afternoon';
+}
+
+function MeetingBoard({
+  board,
+  isZh,
+  onAdd,
+  onOpen,
+}: {
+  board: SchoolCalendarBoard;
+  isZh: boolean;
+  onAdd: (weekday: number, period: MeetingPeriod) => void;
+  onOpen: (meeting: SchoolCalendarMeeting) => void;
+}) {
+  const canEdit = board.canEditMeetings ?? board.isAdmin;
+  const meetings = board.meetings ?? [];
+  return (
+    <div className="mt-4">
+      <div className="mb-3">
+        <h2 className="text-base font-semibold text-slate-900">{isZh ? '会议安排表' : 'Meeting schedule'}</h2>
+        <p className="mt-1 text-xs text-slate-500">
+          {isZh ? '每周固定，不随某一周变化。' : 'The same each week. It does not follow a dated week.'}
+        </p>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+        <table className="w-full min-w-[720px] table-fixed border-collapse text-sm">
+          <thead>
+            <tr className="bg-slate-50 text-slate-600">
+              <th className="w-16 border-b border-r border-slate-200 px-2 py-2" />
+              {MEETING_WEEKDAYS.map((day) => (
+                <th key={day} className="border-b border-slate-200 px-2 py-2 text-center font-medium">
+                  <span className="block">{WEEKDAY_ZH[day]}</span>
+                  <span className="block text-xs font-normal text-slate-400">{WEEKDAY_EN[day]}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {MEETING_PERIODS.map((period) => (
+              <tr key={period}>
+                <th className="border-b border-r border-slate-200 bg-slate-50 px-2 py-3 text-center text-xs font-medium text-slate-600">
+                  {meetingPeriodLabel(period, isZh)}
+                </th>
+                {MEETING_WEEKDAYS.map((day) => {
+                  const cellMeetings = meetings.filter((item) => item.weekday === day && item.period === period);
+                  return (
+                    <td key={day} className={`group/cell relative border-b border-l border-slate-200 p-1 align-top ${cellHover}`}>
+                      <div className="flex min-h-16 flex-col gap-1">
+                        {cellMeetings.map((meeting) => (
+                          <button
+                            key={meeting.id}
+                            type="button"
+                            className="block w-full rounded px-1 py-1 text-center text-xs leading-snug hover:bg-slate-50"
+                            onClick={() => onOpen(meeting)}
+                          >
+                            <span className="block break-words tabular-nums text-slate-500">
+                              {meeting.startTime}–{meeting.endTime}
+                            </span>
+                            <span className="block break-words text-slate-900">{meeting.title}</span>
+                            {meeting.location ? (
+                              <span className="block break-words text-primary">{meeting.location}</span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                      {canEdit && cellMeetings.length === 0 ? (
+                        <button
+                          type="button"
+                          aria-label={isZh ? '添加例会' : 'Add meeting'}
+                          className="absolute inset-0"
+                          onClick={() => onAdd(day, period)}
+                        >
+                          <Plus className="pointer-events-none absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 text-slate-300 opacity-40 md:h-3.5 md:w-3.5 md:opacity-0 md:group-hover/cell:opacity-100" />
+                        </button>
+                      ) : null}
+                      {canEdit && cellMeetings.length > 0 ? (
+                        <button
+                          type="button"
+                          aria-label={isZh ? '添加例会' : 'Add meeting'}
+                          className="absolute right-0.5 top-0.5 z-20 flex h-7 w-7 items-center justify-center rounded bg-white/90 text-slate-400 shadow-sm hover:text-slate-700 max-md:pointer-events-auto max-md:opacity-100 md:h-5 md:w-5 md:pointer-events-none md:opacity-0 md:group-hover/cell:pointer-events-auto md:group-hover/cell:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
+                          onClick={() => onAdd(day, period)}
+                        >
+                          <Plus className="h-4 w-4 md:h-3.5 md:w-3.5" />
+                        </button>
+                      ) : null}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function meetingDefaultTimes(period: MeetingPeriod): { start: string; end: string } {
+  if (period === 'morning') return { start: '08:30', end: '09:30' };
+  if (period === 'noon') return { start: '12:40', end: '13:20' };
+  return { start: '13:30', end: '14:30' };
+}
+
+function MeetingDialog({
+  academicYearId,
+  meeting,
+  initialWeekday,
+  initialPeriod,
+  isZh,
+  onClose,
+  onSaved,
+}: {
+  academicYearId: string;
+  meeting: SchoolCalendarMeeting | null;
+  initialWeekday: number;
+  initialPeriod: MeetingPeriod;
+  isZh: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const defaults = meetingDefaultTimes(meeting?.period ?? initialPeriod);
+  const [weekday, setWeekday] = useState(String(meeting?.weekday ?? initialWeekday));
+  const [period, setPeriod] = useState<MeetingPeriod>(meeting?.period ?? initialPeriod);
+  const [startTime, setStartTime] = useState(meeting?.startTime ?? defaults.start);
+  const [endTime, setEndTime] = useState(meeting?.endTime ?? defaults.end);
+  const [title, setTitle] = useState(meeting?.title ?? '');
+  const [location, setLocation] = useState(meeting?.location ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const save = () => {
+    setBusy(true);
+    const payload = { weekday: Number(weekday), period, startTime, endTime, title, location };
+    const task = meeting
+      ? updateSchoolCalendarMeeting(meeting.id, payload)
+      : createSchoolCalendarMeeting(academicYearId, payload);
+    task
+      .then(onSaved)
+      .catch((err: unknown) => setError(errorText(err instanceof Error ? err.message : 'internal', isZh)))
+      .finally(() => setBusy(false));
+  };
+  const remove = () => {
+    if (!meeting) return;
+    setBusy(true);
+    deleteSchoolCalendarMeeting(meeting.id)
+      .then(onSaved)
+      .catch((err: unknown) => setError(errorText(err instanceof Error ? err.message : 'internal', isZh)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Dialog modal={false} open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-h-[90vh] max-w-md overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{meeting ? (isZh ? '例会' : 'Meeting') : isZh ? '添加例会' : 'Add meeting'}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <label className="block text-slate-600">
+            {isZh ? '星期' : 'Weekday'}
+            <MenuSelect className="mt-1 w-full" value={weekday} onChange={(e) => setWeekday(e.target.value)}>
+              {MEETING_WEEKDAYS.map((day) => (
+                <option key={day} value={day}>{isZh ? WEEKDAY_ZH[day] : WEEKDAY_EN[day]}</option>
+              ))}
+            </MenuSelect>
+          </label>
+          <label className="block text-slate-600">
+            {isZh ? '时段' : 'Period'}
+            <MenuSelect className="mt-1 w-full" value={period} onChange={(e) => setPeriod(e.target.value as MeetingPeriod)}>
+              {MEETING_PERIODS.map((item) => (
+                <option key={item} value={item}>{meetingPeriodLabel(item, isZh)}</option>
+              ))}
+            </MenuSelect>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-slate-600">
+              {isZh ? '开始' : 'Start'}
+              <Input className="mt-1" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value.slice(0, 5))} />
+            </label>
+            <label className="block text-slate-600">
+              {isZh ? '结束' : 'End'}
+              <Input className="mt-1" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value.slice(0, 5))} />
+            </label>
+          </div>
+          <label className="block text-slate-600">
+            {isZh ? '事项' : 'Title'}
+            <Input className="mt-1" value={title} onChange={(e) => setTitle(e.target.value)} />
+          </label>
+          <label className="block text-slate-600">
+            {isZh ? '地点' : 'Location'}
+            <Input className="mt-1" value={location} onChange={(e) => setLocation(e.target.value)} />
+          </label>
+        </div>
+        {error ? <p className="text-sm text-red-600">{error}</p> : null}
+        <DialogFooter>
+          {meeting ? (
+            <Button type="button" variant="outline" className="text-red-600 hover:text-red-700 sm:mr-auto" disabled={busy} onClick={remove}>
+              {isZh ? '删除' : 'Delete'}
+            </Button>
+          ) : null}
+          <Button type="button" variant="outline" onClick={onClose}>{isZh ? '关闭' : 'Close'}</Button>
+          <Button type="button" disabled={busy || !title.trim()} onClick={save}>{isZh ? '保存' : 'Save'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function EventDialog({
   board,
   week,
@@ -1840,10 +2110,11 @@ function EventDialog({
   const shared = moduleChoice === WHOLE_SCHOOL_CHOICE;
   const canEditShared = (boundaryDate: string) =>
     board.modules.some((mod) => mod.segmentId && canEditModule(mod.id, boundaryDate));
-  const locked = shared
-    ? !canEditShared(event?.eventDate ?? date) || !canEditShared(date)
-    : event && !event.shared
-      ? !canEditModule(event.moduleId, event.eventDate)
+  /** 已有事项按 canEdit（含过往周）；新建仍按模块权限，且过去整周不可新建。 */
+  const locked = event
+    ? !canEditEvent(event)
+    : shared
+      ? !canEditShared(date)
       : !canEditModule(moduleChoice, date);
   const divisionAnchor = board.modules.find((mod) => mod.segmentId && mod.id === event?.moduleId)?.id
     ?? board.modules.find((mod) => mod.segmentId)?.id
@@ -1922,11 +2193,23 @@ function EventDialog({
           <div className="grid grid-cols-2 gap-2">
             <label className="text-slate-600">
               {isZh ? '开始' : 'Start'}
-              <Input className="mt-1" value={startTime} disabled={locked} onChange={(e) => setStartTime(e.target.value)} placeholder="10:30" />
+              <Input
+                className="mt-1"
+                type="time"
+                value={startTime}
+                disabled={locked}
+                onChange={(e) => setStartTime(e.target.value.slice(0, 5))}
+              />
             </label>
             <label className="text-slate-600">
               {isZh ? '结束' : 'End'}
-              <Input className="mt-1" value={endTime} disabled={locked} onChange={(e) => setEndTime(e.target.value)} placeholder="11:10" />
+              <Input
+                className="mt-1"
+                type="time"
+                value={endTime}
+                disabled={locked}
+                onChange={(e) => setEndTime(e.target.value.slice(0, 5))}
+              />
             </label>
           </div>
           <label className="block text-slate-600">
@@ -1971,7 +2254,17 @@ function EventDialog({
             <textarea className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm" rows={3} value={note} disabled={locked} onChange={(e) => setNote(e.target.value)} />
           </label>
         </div>
-        {locked ? <p className="text-xs text-slate-500">{isZh ? '已经过去的事项只有管理员可以改。' : 'Past events can only be changed by an admin.'}</p> : null}
+        {locked ? (
+          <p className="text-xs text-slate-500">
+            {event
+              ? isZh
+                ? '只有责任人、参与人中的组长，或管辖该组长的分管协调员，以及管理员可以改。'
+                : 'Only leads who own or joined this event, coordinators over those leads, or admins can edit it.'
+              : isZh
+                ? '已经过去的整周不能新建事项。'
+                : 'Past weeks cannot take new events.'}
+          </p>
+        ) : null}
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
         <DialogFooter>
           {event && !locked ? (

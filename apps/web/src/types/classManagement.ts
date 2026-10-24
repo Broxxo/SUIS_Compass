@@ -314,6 +314,8 @@ export interface TeacherPortraitCollectionTemplateSummary {
   term: Term;
   title: string | null;
   collectionType: string;
+  /** 为空表示已发布的旧 KISS 任务。 */
+  formBlocks?: import('@repo/shared').TeacherCollectionBlock[] | null;
   status: TeacherPortraitCollectionTemplateStatus;
   targetDepartments?: string[] | null;
   publishedAt: string | null;
@@ -341,6 +343,7 @@ export interface TeacherPortraitCollectionSubmission {
   teacherId: string;
   teacherName: string;
   diagnosis: ReportTeachingDiagnosis;
+  textAnswers?: Record<string, string>;
   updatedAt: string | null;
   hasContent: boolean;
 }

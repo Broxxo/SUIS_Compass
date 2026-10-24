@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 import {
   createMailboxMessage,
   deleteMailboxMessage,
+  getMailboxSummary,
   listMailboxMessages,
   replyToMailboxMessage,
   setMailboxStatus,
@@ -11,6 +12,17 @@ import {
 type ReqWithUserId = Request & { userId?: string };
 
 const router = express.Router();
+
+router.get('/summary', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'unauthorized' });
+    return res.json(await getMailboxSummary(userId));
+  } catch (error) {
+    console.error('mailbox summary', error);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 
 router.get('/', async (req: ReqWithUserId, res: Response) => {
   try {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { templateIncludesKiss } from '@repo/shared';
 import { useTermForYear } from '../lib/academicPeriodDefault';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import {
@@ -123,7 +124,11 @@ export default function TeacherPortraitSubjectGroupDashboard({
           }));
 
         const diagnoses = diagnosisTemplates
-          .filter((t) => t.status === 'published' || t.status === 'closed')
+          .filter(
+            (t) =>
+              (t.status === 'published' || t.status === 'closed') &&
+              templateIncludesKiss(t),
+          )
           .map((t) => ({
             key: `diagnosis::${t.id}`,
             dataSource: 'diagnosis' as const,
@@ -163,6 +168,7 @@ export default function TeacherPortraitSubjectGroupDashboard({
   useEffect(() => {
     if (!USE_CLOUD_STORAGE || !yearId || !effectiveGroupId || !parsedSource) {
       setDashboard(null);
+      setLoadingDashboard(false);
       return;
     }
     let cancelled = false;
@@ -315,6 +321,14 @@ export default function TeacherPortraitSubjectGroupDashboard({
           {isZh
             ? '您当前不是任何学科组的组长，暂无学科看板。'
             : 'You are not assigned as a subject group lead.'}
+        </p>
+      ) : loadingSources ? (
+        <p className="text-sm text-slate-500">{isZh ? '加载看板数据…' : 'Loading dashboard…'}</p>
+      ) : !parsedSource ? (
+        <p className="text-sm text-slate-500">
+          {isZh
+            ? '这个学期还没有已发布的学业报告或教学诊断。'
+            : 'No published report or teaching diagnosis for this term.'}
         </p>
       ) : loadingDashboard ? (
         <p className="text-sm text-slate-500">{isZh ? '加载看板数据…' : 'Loading dashboard…'}</p>

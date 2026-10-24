@@ -1,8 +1,8 @@
-import { MenuSelect } from './MenuSelect';
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   TEACHER_PORTRAIT_COLLECTION_TYPES,
   teacherPortraitCollectionTypeLabel,
+  type TeacherCollectionBlock,
   type TeacherPortraitCollectionType,
 } from '@repo/shared';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
@@ -11,7 +11,13 @@ import type {
   TeacherPortraitCollectionTemplateSummary,
   Term,
 } from '../types/classManagement';
+import TeacherCollectionBlockEditor, {
+  collectionBlockSummary,
+  normalizeCollectionBlocks,
+  validateCollectionBlocks,
+} from './TeacherCollectionBlockEditor';
 import TeacherPortraitCollectionFormPreview from './TeacherPortraitCollectionFormPreview';
+import { TeacherCollectionExchangeButtons } from './admin/TaskExchangeButtons';
 import { Button } from './ui/button';
 import {
   Dialog,
@@ -21,10 +27,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from './ui/dialog';
-
-const COLLECTION_TYPE_OPTIONS = Object.keys(
-  TEACHER_PORTRAIT_COLLECTION_TYPES,
-) as TeacherPortraitCollectionType[];
 
 function statusLabel(status: string, isZh: boolean): string {
   if (status === 'published') return isZh ? '已发布' : 'Published';
@@ -71,8 +73,7 @@ export default function TeacherPortraitCollectionsAdmin({
   const [list, setList] = useState<TeacherPortraitCollectionTemplateSummary[]>([]);
   const [progressById, setProgressById] = useState<Record<string, TeacherPortraitCollectionProgress>>({});
   const [newTitle, setNewTitle] = useState('');
-  const [newCollectionType, setNewCollectionType] =
-    useState<TeacherPortraitCollectionType>('teaching-diagnosis-kiss');
+  const [newBlocks, setNewBlocks] = useState<TeacherCollectionBlock[]>([]);
   const [newTargetDepartments, setNewTargetDepartments] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
   const [progressListLoading, setProgressListLoading] = useState(false);
@@ -82,6 +83,7 @@ export default function TeacherPortraitCollectionsAdmin({
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editTemplateId, setEditTemplateId] = useState('');
   const [editTitle, setEditTitle] = useState('');
+  const [editBlocks, setEditBlocks] = useState<TeacherCollectionBlock[] | null>(null);
   const [editIsDraft, setEditIsDraft] = useState(false);
   const [editTargetDepartments, setEditTargetDepartments] = useState<Set<string>>(() => new Set());
   const [progressDialogOpen, setProgressDialogOpen] = useState(false);
@@ -89,10 +91,7 @@ export default function TeacherPortraitCollectionsAdmin({
   const [progressDialogData, setProgressDialogData] = useState<TeacherPortraitCollectionProgress | null>(null);
   const [progressDialogLoading, setProgressDialogLoading] = useState(false);
 
-  const newTypeDefaultTitle = useMemo(
-    () => teacherPortraitCollectionTypeLabel(newCollectionType, isZh),
-    [newCollectionType, isZh],
-  );
+  const previewTitle = newTitle.trim() || (isZh ? '未命名收集任务' : 'Untitled collection');
 
   useEffect(() => {
     setNewTargetDepartments(new Set(departmentOptions));
@@ -243,14 +242,18 @@ export default function TeacherPortraitCollectionsAdmin({
       ) {
         throw new Error(isZh ? '请至少选择一个部门' : 'Select at least one department');
       }
+      const blocks = normalizeCollectionBlocks(newBlocks);
+      const problem = validateCollectionBlocks(blocks, isZh);
+      if (problem) throw new Error(problem);
       await api.createAdminTeacherPortraitTemplate({
         academicYearId: yearId,
         term,
-        title: newTitle.trim() || newTypeDefaultTitle,
-        collectionType: newCollectionType,
+        title: newTitle.trim() || previewTitle,
+        formBlocks: blocks,
         targetDepartments: normalizeTargetDepartmentsPayload(newTargetDepartments, departmentOptions),
       });
       setNewTitle('');
+      setNewBlocks([]);
       setNewTargetDepartments(new Set(departmentOptions));
       setCreateDialogOpen(false);
     });
@@ -260,6 +263,9 @@ export default function TeacherPortraitCollectionsAdmin({
     setEditTemplateId(tpl.id);
     setEditTitle(tpl.title || teacherPortraitCollectionTypeLabel(type, isZh));
     setEditIsDraft(tpl.status === 'draft');
+    setEditBlocks(
+      tpl.status === 'draft' ? (tpl.formBlocks && tpl.formBlocks.length > 0 ? tpl.formBlocks : [{ id: 'kiss', kind: 'kiss' }]) : null,
+    );
     if (tpl.targetDepartments && tpl.targetDepartments.length > 0) {
       setEditTargetDepartments(new Set(tpl.targetDepartments));
     } else {
@@ -278,6 +284,11 @@ export default function TeacherPortraitCollectionsAdmin({
       ) {
         throw new Error(isZh ? '请至少选择一个部门' : 'Select at least one department');
       }
+      const draftBlocks = editIsDraft && editBlocks ? normalizeCollectionBlocks(editBlocks) : null;
+      if (draftBlocks) {
+        const problem = validateCollectionBlocks(draftBlocks, isZh);
+        if (problem) throw new Error(problem);
+      }
       await api.putAdminTeacherPortraitTemplate(editTemplateId, {
         title: editTitle.trim() || null,
         ...(editIsDraft
@@ -286,12 +297,14 @@ export default function TeacherPortraitCollectionsAdmin({
                 editTargetDepartments,
                 departmentOptions,
               ),
+              ...(draftBlocks ? { formBlocks: draftBlocks } : {}),
             }
           : {}),
       });
       setEditDialogOpen(false);
       setEditTemplateId('');
       setEditTitle('');
+      setEditBlocks(null);
       setEditIsDraft(false);
     });
 
@@ -338,36 +351,19 @@ export default function TeacherPortraitCollectionsAdmin({
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4 space-y-3">
         <div className="text-sm font-semibold text-slate-800">{isZh ? '新建采集' : 'New collection'}</div>
 
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">{isZh ? '模版' : 'Template'}</label>
-            <MenuSelect
-              value={newCollectionType}
-              onChange={(e) => setNewCollectionType(e.target.value as TeacherPortraitCollectionType)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-            >
-              {COLLECTION_TYPE_OPTIONS.map((type) => (
-                <option key={type} value={type}>
-                  {teacherPortraitCollectionTypeLabel(type, isZh)}
-                </option>
-              ))}
-            </MenuSelect>
-          </div>
+        <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
+          <input
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            placeholder={isZh ? '任务标题，例如上学期发展规划' : 'Task title'}
+            className="w-full border-0 bg-transparent px-1 text-base font-semibold text-slate-900 placeholder:text-slate-400 focus:outline-none"
+          />
+          <TeacherCollectionBlockEditor blocks={newBlocks} onChange={setNewBlocks} isZh={isZh} />
+        </div>
 
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">{isZh ? '部门筛选' : 'Departments'}</label>
-            {renderDepartmentCheckboxes(newTargetDepartments, setNewTargetDepartments, 'new-dept')}
-          </div>
-
-          <div>
-            <label className="block text-xs text-slate-500 mb-1">{isZh ? '标题（可选）' : 'Title (optional)'}</label>
-            <input
-              value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
-              placeholder={newTypeDefaultTitle}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-            />
-          </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">{isZh ? '部门筛选' : 'Departments'}</label>
+          {renderDepartmentCheckboxes(newTargetDepartments, setNewTargetDepartments, 'new-dept')}
         </div>
 
         <div className="flex justify-end pt-1">
@@ -375,7 +371,15 @@ export default function TeacherPortraitCollectionsAdmin({
             type="button"
             size="sm"
             disabled={!USE_CLOUD_STORAGE || !yearId || busy}
-            onClick={() => setCreateDialogOpen(true)}
+            onClick={() => {
+              const problem = validateCollectionBlocks(normalizeCollectionBlocks(newBlocks), isZh);
+              if (problem) {
+                setError(problem);
+                return;
+              }
+              setError(null);
+              setCreateDialogOpen(true);
+            }}
           >
             {isZh ? '创建模版' : 'Create template'}
           </Button>
@@ -388,12 +392,12 @@ export default function TeacherPortraitCollectionsAdmin({
             <DialogTitle>{isZh ? '模版预览' : 'Template preview'}</DialogTitle>
             <DialogDescription>
               {isZh
-                ? `即将创建「${newTitle.trim() || newTypeDefaultTitle}」信息采集模版，请确认教师填写内容。`
-                : `You are about to create “${newTitle.trim() || newTypeDefaultTitle}”. Review the teacher form below.`}
+                ? `即将创建「${previewTitle}」，请确认教师填写内容。`
+                : `You are about to create “${previewTitle}”. Review the teacher form below.`}
             </DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-4">
-            <TeacherPortraitCollectionFormPreview collectionType={newCollectionType} isZh={isZh} />
+            <TeacherPortraitCollectionFormPreview blocks={normalizeCollectionBlocks(newBlocks)} isZh={isZh} />
           </div>
           <DialogFooter className="px-6 py-4 border-t border-slate-100 shrink-0 sm:justify-end">
             <Button type="button" variant="outline" onClick={() => setCreateDialogOpen(false)} disabled={busy}>
@@ -407,7 +411,7 @@ export default function TeacherPortraitCollectionsAdmin({
       </Dialog>
 
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>{isZh ? '编辑模版' : 'Edit template'}</DialogTitle>
           </DialogHeader>
@@ -421,6 +425,12 @@ export default function TeacherPortraitCollectionsAdmin({
                 placeholder={isZh ? '模版名称' : 'Template name'}
               />
             </div>
+            {editIsDraft && editBlocks && (
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">{isZh ? '题目' : 'Questions'}</label>
+                <TeacherCollectionBlockEditor blocks={editBlocks} onChange={setEditBlocks} isZh={isZh} />
+              </div>
+            )}
             {editIsDraft && (
               <div>
                 <label className="block text-xs text-slate-500 mb-1">{isZh ? '部门筛选' : 'Departments'}</label>
@@ -539,7 +549,7 @@ export default function TeacherPortraitCollectionsAdmin({
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium text-slate-800 truncate">{displayTitle}</div>
                       <div className="text-[11px] text-slate-500 mt-0.5">
-                        {typeLabel} · {statusLabel(tpl.status, isZh)}
+                        {collectionBlockSummary(tpl.formBlocks, typeLabel, isZh)} · {statusLabel(tpl.status, isZh)}
                         {' · '}
                         {isZh ? '范围：' : 'Scope: '}
                         {targetDepartmentsLabel(tpl.targetDepartments, isZh)}
@@ -549,6 +559,12 @@ export default function TeacherPortraitCollectionsAdmin({
                       <Button size="sm" variant="outline" disabled={busy} onClick={() => openEditDialog(tpl)}>
                         {isZh ? '编辑' : 'Edit'}
                       </Button>
+                      <TeacherCollectionExchangeButtons
+                        templateId={tpl.id}
+                        title={displayTitle}
+                        isZh={isZh}
+                        onImported={() => void loadList()}
+                      />
                       <Button
                         size="sm"
                         variant="outline"

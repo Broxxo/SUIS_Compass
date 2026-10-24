@@ -3,7 +3,11 @@ export * from './courseDomains.js';
 export {
   TEACHER_PORTRAIT_COLLECTION_TYPES,
   teacherPortraitCollectionTypeLabel,
+  parseTeacherCollectionBlocks,
+  collectionTypeForBlocks,
+  templateIncludesKiss,
   type TeacherPortraitCollectionType,
+  type TeacherCollectionBlock,
 } from './teacherPortraitCollections.js';
 export * from './constants.js';
 export {

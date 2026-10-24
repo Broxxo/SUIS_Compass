@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { pickPreferredPublishedTask, teacherPortraitCollectionTypeLabel } from '@repo/shared';
+import { pickPreferredPublishedTask, teacherPortraitCollectionTypeLabel, type TeacherCollectionBlock } from '@repo/shared';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import type {
   AcademicYear,
@@ -8,7 +8,7 @@ import type {
   Term,
 } from '../types/classManagement';
 import { AcademicYearSelectField, FilterField, FilterSelect, FilterToolbar, TermSelectField } from './academicPeriodSelectors';
-import TeachingDiagnosisKissForm from './TeachingDiagnosisKissForm';
+import TeacherCollectionAnswerForm from './TeacherCollectionAnswerForm';
 import { Button } from './ui/button';
 
 const emptyDiagnosis = (): ReportTeachingDiagnosis => ({
@@ -42,6 +42,8 @@ export default function TeacherPortraitCollectionFill({
   const [list, setList] = useState<TeacherPortraitCollectionTemplateSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [diagnosis, setDiagnosis] = useState<ReportTeachingDiagnosis>(emptyDiagnosis());
+  const [blocks, setBlocks] = useState<TeacherCollectionBlock[] | null>(null);
+  const [textAnswers, setTextAnswers] = useState<Record<string, string>>({});
   const [canEdit, setCanEdit] = useState(false);
   const [status, setStatus] = useState<string>('published');
   const [loading, setLoading] = useState(false);
@@ -117,6 +119,8 @@ export default function TeacherPortraitCollectionFill({
   useEffect(() => {
     if (!USE_CLOUD_STORAGE || !selectedId) {
       setDiagnosis(emptyDiagnosis());
+      setBlocks(null);
+      setTextAnswers({});
       setCanEdit(false);
       return;
     }
@@ -127,6 +131,8 @@ export default function TeacherPortraitCollectionFill({
       .then((data) => {
         if (cancelled) return;
         setDiagnosis(data.submission.diagnosis);
+        setBlocks(data.template.formBlocks ?? null);
+        setTextAnswers(data.submission.textAnswers ?? {});
         setCanEdit(data.template.canEdit === true);
         setStatus(data.template.status);
       })
@@ -146,7 +152,7 @@ export default function TeacherPortraitCollectionFill({
     setError(null);
     setSavedHint(null);
     try {
-      await api.saveTeacherPortraitCollection(selectedId, { diagnosis });
+      await api.saveTeacherPortraitCollection(selectedId, { diagnosis, textAnswers });
       setSavedHint(isZh ? '已保存' : 'Saved');
       await loadList();
     } catch (e: unknown) {
@@ -177,7 +183,7 @@ export default function TeacherPortraitCollectionFill({
             onTermChange(t);
           }}
         />
-        <FilterField label={isZh ? '教学诊断' : 'Teaching diagnosis'}>
+        <FilterField label={isZh ? '收集任务' : 'Collection'}>
           <FilterSelect
             width="report"
             value={selectedId}
@@ -193,8 +199,8 @@ export default function TeacherPortraitCollectionFill({
                   ? '当前学期暂无已发布任务'
                   : 'No published tasks this term'
                 : isZh
-                  ? '选择教学诊断'
-                  : 'Select diagnosis'}
+                  ? '选择收集任务'
+                  : 'Select a collection'}
             </option>
             {list.map((tpl) => (
               <option key={tpl.id} value={tpl.id}>
@@ -227,9 +233,14 @@ export default function TeacherPortraitCollectionFill({
               <p className="text-xs text-slate-500 mt-1">{isZh ? '已截止（只读）' : 'Closed (read-only)'}</p>
             ) : null}
           </div>
-          <TeachingDiagnosisKissForm
-            value={diagnosis}
-            onChange={setDiagnosis}
+          <TeacherCollectionAnswerForm
+            blocks={blocks}
+            diagnosis={diagnosis}
+            textAnswers={textAnswers}
+            onDiagnosisChange={setDiagnosis}
+            onTextAnswerChange={(blockId, value) =>
+              setTextAnswers((prev) => ({ ...prev, [blockId]: value }))
+            }
             disabled={!canEdit}
             isZh={isZh}
           />

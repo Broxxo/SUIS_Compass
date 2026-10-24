@@ -7,13 +7,24 @@ import {
 import { api, USE_CLOUD_STORAGE } from './api';
 import { loadAcademicYears } from './classStorage';
 import { latestAcademicYear } from './academicPeriodDefault';
+import { fetchSchoolCalendar, type SchoolCalendarBoard, type SchoolCalendarEvent } from './schoolCalendarApi';
 import type { HubTeacherTodoItem } from '../types/hubNavigation';
-import type { Term } from '../types/classManagement';
+import type { AcademicYear, Term } from '../types/classManagement';
 import type { OpenLesson } from '../types/openLesson';
 
-function termLabel(term: Term, isZh: boolean): string {
-  if (term === 'Semester 1') return isZh ? '上学期' : 'Semester 1';
-  return isZh ? '下学期' : 'Semester 2';
+/** 2026-2027 上学期 → 26-27-1 */
+function compactPeriod(yearName: string, term: Term): string {
+  const years = yearName.match(/\d{4}/g) ?? [];
+  const start = years[0];
+  const end = years[1];
+  const termNo = term === 'Semester 2' ? '2' : '1';
+  if (start && end) return `${start.slice(2)}-${end.slice(2)}-${termNo}`;
+  if (start) return `${start.slice(2)}-${termNo}`;
+  return `${yearName}-${termNo}`;
+}
+
+function pendingCountLabel(count: number, isZh: boolean): string {
+  return isZh ? `余${count}位` : `${count} left`;
 }
 
 function collectionTypeFromRaw(raw: string): TeacherPortraitCollectionType {
@@ -21,12 +32,73 @@ function collectionTypeFromRaw(raw: string): TeacherPortraitCollectionType {
   return 'teaching-diagnosis-kiss';
 }
 
+function currentAcademicYear(years: AcademicYear[]): AcademicYear | null {
+  return years.find((year) => year.isCurrent) ?? latestAcademicYear(years);
+}
+
 async function resolveHubTodoYearContext(isZh: boolean) {
   const years = await loadAcademicYears();
-  const year = latestAcademicYear(years);
+  const year = currentAcademicYear(years);
   const yearId = year?.id || '';
   const yearName = year?.name?.trim() || (isZh ? '本学年' : 'This year');
   return { yearId, yearName };
+}
+
+type TimedReminder = {
+  date: string;
+  minutes: number;
+  item: HubTeacherTodoItem;
+};
+
+function sortTimedReminders(items: TimedReminder[]): HubTeacherTodoItem[] {
+  return [...items]
+    .sort((a, b) => {
+      const byDate = a.date.localeCompare(b.date);
+      if (byDate !== 0) return byDate;
+      if (a.minutes !== b.minutes) return a.minutes - b.minutes;
+      return a.item.label.localeCompare(b.item.label, 'zh');
+    })
+    .map((entry) => entry.item);
+}
+
+function calendarModuleLabel(board: SchoolCalendarBoard, event: SchoolCalendarEvent, isZh: boolean): string {
+  if (event.shared) return isZh ? '全学部' : 'Whole school';
+  const mod = board.modules.find((item) => item.id === event.moduleId);
+  if (!mod) return '';
+  return isZh ? mod.nameZh : mod.nameEn;
+}
+
+/** 当前学年周历里今天的事项（已取消的不进提醒）。 */
+async function fetchTodayCalendarEvents(yearId: string, isZh: boolean): Promise<TimedReminder[]> {
+  if (!yearId) return [];
+  let board: SchoolCalendarBoard;
+  try {
+    board = await fetchSchoolCalendar(yearId);
+  } catch {
+    return [];
+  }
+  return board.events
+    .filter((event) => event.eventDate === board.today && event.status !== 'cancelled' && event.title.trim())
+    .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.title.localeCompare(b.title, 'zh'))
+    .map((event) => {
+      const when = `${isZh ? '今天' : 'Today'} ${lessonStartClock(event.startTime)}`.trim();
+      const label = [when, event.title.trim(), event.location.trim()].filter((part) => part.trim()).join(' ');
+      return {
+        date: event.eventDate,
+        minutes: timeStartMinutes(event.startTime),
+        item: {
+          key: `calendar-${event.id}`,
+          label,
+          subtitle: calendarModuleLabel(board, event, isZh),
+          publishedAt: null,
+          target: {
+            type: 'school-calendar' as const,
+            academicYearId: board.academicYearId,
+            eventId: event.id,
+          },
+        },
+      };
+    });
 }
 
 function localDateKey(date: Date): string {
@@ -61,7 +133,7 @@ function lessonStartClock(timeText: string): string {
 }
 
 /** 今日、明日的公开课，按日期和时间由近到远。日常课由接口按创建者和上课教师过滤。 */
-async function fetchNearbyOpenLessons(yearId: string, isZh: boolean): Promise<HubTeacherTodoItem[]> {
+async function fetchNearbyOpenLessons(yearId: string, isZh: boolean): Promise<TimedReminder[]> {
   const today = localDateKey(new Date());
   const tomorrowDate = new Date();
   tomorrowDate.setDate(tomorrowDate.getDate() + 1);
@@ -90,16 +162,20 @@ async function fetchNearbyOpenLessons(yearId: string, isZh: boolean): Promise<Hu
     const classPlace = className && location ? `${className}(${location})` : className || location;
     const label = [when, subject, teacher, classPlace].filter((part) => part.trim()).join(' ');
     return {
-      key: `open-lesson-${lesson.id}`,
-      label,
-      subtitle: '',
-      publishedAt: null,
-      target: {
-        type: 'open-lesson' as const,
-        academicYearId: lesson.academicYearId,
-        term: lesson.term,
-        lessonKind: lesson.lessonKind,
-        lessonId: lesson.id,
+      date: lesson.lessonDate,
+      minutes: timeStartMinutes(lesson.timeText),
+      item: {
+        key: `open-lesson-${lesson.id}`,
+        label,
+        subtitle: '',
+        publishedAt: null,
+        target: {
+          type: 'open-lesson' as const,
+          academicYearId: lesson.academicYearId,
+          term: lesson.term,
+          lessonKind: lesson.lessonKind,
+          lessonId: lesson.id,
+        },
       },
     };
   });
@@ -142,7 +218,7 @@ export async function fetchHubTeacherTodos(isZh: boolean): Promise<HubTeacherTod
       items.push({
         key: `portrait-${tpl.id}`,
         label,
-        subtitle: `${yearName} · ${termLabel(term, isZh)}`,
+        subtitle: compactPeriod(yearName, term),
         publishedAt: tpl.publishedAt,
         target: {
           type: 'teacher-portrait-collection',
@@ -172,7 +248,7 @@ export async function fetchHubTeacherTodos(isZh: boolean): Promise<HubTeacherTod
       items.push({
         key: `report-${tpl.id}`,
         label,
-        subtitle: `${yearName} · ${termLabel(term, isZh)}`,
+        subtitle: compactPeriod(yearName, term),
         publishedAt: tpl.publishedAt ?? null,
         target: {
           type: 'academic-report',
@@ -185,8 +261,11 @@ export async function fetchHubTeacherTodos(isZh: boolean): Promise<HubTeacherTod
   }
 
   const tasks = sortHubTodoItems(items);
-  const lessons = await fetchNearbyOpenLessons(yearId, isZh);
-  return [...tasks, ...lessons];
+  const [lessons, calendarEvents] = await Promise.all([
+    fetchNearbyOpenLessons(yearId, isZh),
+    fetchTodayCalendarEvents(yearId, isZh),
+  ]);
+  return [...tasks, ...sortTimedReminders([...lessons, ...calendarEvents])];
 }
 
 /** 管理员：全校仍有未完成进度的已发布任务 */
@@ -218,13 +297,10 @@ export async function fetchHubAdminTodos(isZh: boolean): Promise<HubTeacherTodoI
         isZh,
       );
       const label = (tpl.title ?? '').trim() || typeLabel;
-      const pendingLabel = isZh
-        ? `余 ${progress.pendingTeachers} 位教师`
-        : `${progress.pendingTeachers} teachers left`;
       items.push({
         key: `portrait-${tpl.id}`,
         label,
-        subtitle: `${yearName} · ${termLabel(term, isZh)} · ${pendingLabel}`,
+        subtitle: `${compactPeriod(yearName, term)} · ${pendingCountLabel(progress.pendingTeachers, isZh)}`,
         publishedAt: tpl.publishedAt,
         target: {
           type: 'teacher-portrait-collection',
@@ -247,13 +323,10 @@ export async function fetchHubAdminTodos(isZh: boolean): Promise<HubTeacherTodoI
   for (const { tpl, progress } of reportProgressRows) {
     if (progress.pendingStudents <= 0) continue;
     const label = (tpl.title ?? progress.title ?? '').trim() || (isZh ? '学业报告' : 'Academic report');
-    const pendingLabel = isZh
-      ? `余 ${progress.pendingStudents} 人`
-      : `${progress.pendingStudents} students left`;
     items.push({
       key: `report-${tpl.id}`,
       label,
-      subtitle: `${yearName} · ${termLabel(tpl.term, isZh)} · ${pendingLabel}`,
+      subtitle: `${compactPeriod(yearName, tpl.term)} · ${pendingCountLabel(progress.pendingStudents, isZh)}`,
       publishedAt: tpl.publishedAt ?? null,
       target: {
         type: 'academic-report',
@@ -265,6 +338,9 @@ export async function fetchHubAdminTodos(isZh: boolean): Promise<HubTeacherTodoI
   }
 
   const tasks = sortHubTodoItems(items);
-  const lessons = await fetchNearbyOpenLessons(yearId, isZh);
-  return [...tasks, ...lessons];
+  const [lessons, calendarEvents] = await Promise.all([
+    fetchNearbyOpenLessons(yearId, isZh),
+    fetchTodayCalendarEvents(yearId, isZh),
+  ]);
+  return [...tasks, ...sortTimedReminders([...lessons, ...calendarEvents])];
 }

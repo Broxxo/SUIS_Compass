@@ -2,7 +2,7 @@
  * 全局 AI 上下文：当前选中的“应用”及 payload，供 AI 面板组 context 字符串。
  * 子应用（如 CurriculumRoadmap）通过 setContextFromApp 上报；用户可在 AI 内用上下文选择器切换。
  */
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useMemo, type ReactNode } from 'react';
 import { Course, Semester } from '../types';
 import { loadCoursesSync, loadKeyConceptsSync } from '../lib/storage';
 import type { StudentPortraitAIPayload } from '../lib/studentPortraitAIContext';
@@ -109,21 +109,27 @@ export function AIContextProvider({ children }: { children: ReactNode }) {
   const [contextPayload, setContextPayload] = useState<AIContextPayload>({});
 
   const setContextFromApp = useCallback((id: AIScreenId, payload: AIContextPayload) => {
-    setScreenId(id);
-    setContextPayload(payload);
+    setScreenId((current) => (current === id ? current : id));
+    setContextPayload((current) => {
+      try {
+        if (JSON.stringify(current) === JSON.stringify(payload)) return current;
+      } catch {
+        // 无法比较时照常写入
+      }
+      return payload;
+    });
   }, []);
 
-  return (
-    <AIContext.Provider
-      value={{
-        screenId,
-        setScreenId,
-        contextPayload,
-        setContextPayload,
-        setContextFromApp,
-      }}
-    >
-      {children}
-    </AIContext.Provider>
+  const value = useMemo(
+    () => ({
+      screenId,
+      setScreenId,
+      contextPayload,
+      setContextPayload,
+      setContextFromApp,
+    }),
+    [screenId, contextPayload, setContextFromApp],
   );
+
+  return <AIContext.Provider value={value}>{children}</AIContext.Provider>;
 }

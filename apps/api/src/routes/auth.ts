@@ -72,6 +72,15 @@ async function toUserRow(row: {
     canManageCurriculum = canManageCurriculum || moduleGrants.includes('curriculum');
     canEditCurriculumUnits = canManageCurriculum;
   }
+  let isRootSystemAdmin = false;
+  if (row.role === 'system-admin') {
+    try {
+      const { isRootSystemAdmin: isRoot } = await import('../lib/rootSystemAdmin.js');
+      isRootSystemAdmin = await isRoot(row.id);
+    } catch {
+      isRootSystemAdmin = false;
+    }
+  }
   return {
     id: row.id,
     username: row.username,
@@ -85,6 +94,7 @@ async function toUserRow(row: {
     canManageCurriculum,
     /** 编辑单元格子（含学科组长） */
     canEditCurriculumUnits,
+    isRootSystemAdmin,
   };
 }
 

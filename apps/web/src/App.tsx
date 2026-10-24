@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import CurriculumRoadmap from './components/CurriculumRoadmap'
 import CompassHub from './components/CompassHub'
 import LoginDialog from './components/LoginDialog'
@@ -12,6 +12,7 @@ import HubMoreApps from './components/HubMoreApps'
 import OpenLessons from './components/OpenLessons'
 import SchoolCalendar from './components/SchoolCalendar'
 import XieheLighthouse from './components/XieheLighthouse'
+import ProjectCenter from './components/ProjectCenter'
 import MailboxInbox from './components/MailboxInbox'
 import StudentPortrait from './components/StudentPortrait'
 import TeacherPortrait from './components/TeacherPortrait'
@@ -27,6 +28,7 @@ type HubView =
   | 'open-lessons'
   | 'school-calendar'
   | 'lighthouse'
+  | 'project-center'
   | 'more'
   | 'admin'
   | 'mailbox';
@@ -52,6 +54,7 @@ function AppContent() {
   const [portraitNav, setPortraitNav] = useState<HubPortraitNavigation | null>(null);
   const [aiOverlayOpen, setAiOverlayOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT);
+  const onToggleAI = useCallback(() => setAiOverlayOpen((open) => !open), []);
 
   useEffect(() => {
     const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
@@ -142,7 +145,7 @@ function AppContent() {
             surface="hub"
             onBackToHub={() => setView('hub')}
             isAIOpen={aiOverlayOpen}
-            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+            onToggleAI={onToggleAI}
           />
         </div>
         {aiOverlayOpen && (
@@ -167,7 +170,12 @@ function AppContent() {
           className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
-          <AdminPanel onBackToHub={() => setView('hub')} isAIOpen={aiOverlayOpen} onToggleAI={() => setAiOverlayOpen((open) => !open)} />
+          <AdminPanel
+            onBackToHub={() => setView('hub')}
+            onOpenInbox={() => setView('mailbox')}
+            isAIOpen={aiOverlayOpen}
+            onToggleAI={onToggleAI}
+          />
         </div>
         {aiOverlayOpen && (
           <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
@@ -194,7 +202,7 @@ function AppContent() {
           className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
-          <ClassAssistant onBackToHub={() => setView('more')} isAIOpen={aiOverlayOpen} onToggleAI={() => setAiOverlayOpen((open) => !open)} />
+          <ClassAssistant onBackToHub={() => setView('more')} isAIOpen={aiOverlayOpen} onToggleAI={onToggleAI} />
         </div>
         {aiOverlayOpen && (
           <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
@@ -215,7 +223,7 @@ function AppContent() {
           <XieheLighthouse
             onBackToHub={() => setView('hub')}
             isAIOpen={aiOverlayOpen}
-            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+            onToggleAI={onToggleAI}
           />
         </div>
         {aiOverlayOpen && (
@@ -228,6 +236,7 @@ function AppContent() {
   }
 
   if (view === 'school-calendar') {
+    const calendarNav = portraitNav?.view === 'school-calendar' ? portraitNav : null;
     return (
       <div className={`${APP_FRAME} relative`}>
         <div
@@ -235,9 +244,14 @@ function AppContent() {
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
           <SchoolCalendar
-            onBackToHub={() => setView('hub')}
+            onBackToHub={() => {
+              setPortraitNav(null);
+              setView('hub');
+            }}
+            initialYearId={calendarNav?.academicYearId}
+            initialEventId={calendarNav?.eventId}
             isAIOpen={aiOverlayOpen}
-            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+            onToggleAI={onToggleAI}
           />
         </div>
         {aiOverlayOpen && (
@@ -273,7 +287,7 @@ function AppContent() {
             initialLessonKind={nav?.lessonKind}
             initialLessonId={nav?.lessonId}
             isAIOpen={aiOverlayOpen}
-            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+            onToggleAI={onToggleAI}
           />
         </div>
         {aiOverlayOpen && (
@@ -303,7 +317,7 @@ function AppContent() {
             initialReportYearId={nav?.academicYearId}
             initialReportTerm={nav?.term}
             isAIOpen={aiOverlayOpen}
-            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+            onToggleAI={onToggleAI}
           />
         </div>
         {aiOverlayOpen && (
@@ -339,7 +353,7 @@ function AppContent() {
             initialTerm={nav?.term}
             initialCollectionTemplateId={nav?.templateId}
             isAIOpen={aiOverlayOpen}
-            onToggleAI={() => setAiOverlayOpen((open) => !open)}
+            onToggleAI={onToggleAI}
           />
         </div>
         {aiOverlayOpen && (
@@ -357,6 +371,24 @@ function AppContent() {
     );
   }
 
+  if (view === 'project-center') {
+    return (
+      <div className={`${APP_FRAME} relative`}>
+        <div
+          className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
+          style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
+        >
+          <ProjectCenter onBackToHub={() => setView('hub')} isAIOpen={aiOverlayOpen} onToggleAI={onToggleAI} />
+        </div>
+        {aiOverlayOpen && (
+          <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>
+            <AIPanel fullScreen={isMobile} fromHub={false} onClose={() => setAiOverlayOpen(false)} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (view === 'mailbox') {
     return (
       <div className={`${APP_FRAME} relative`}>
@@ -364,7 +396,7 @@ function AppContent() {
           className={aiOverlayOpen && !isMobile ? AI_DOCK_MAIN_OPEN_FULL : 'w-full h-full'}
           style={aiOverlayOpen && isMobile ? { display: 'none' } : undefined}
         >
-          <MailboxInbox onBack={() => setView('hub')} isAIOpen={aiOverlayOpen} onToggleAI={() => setAiOverlayOpen((open) => !open)} />
+          <MailboxInbox onBack={() => setView('hub')} isAIOpen={aiOverlayOpen} onToggleAI={onToggleAI} />
         </div>
         {aiOverlayOpen && (
           <div className={isMobile ? 'fixed inset-0 z-30 bg-white flex flex-col' : AI_DOCK_PANEL}>

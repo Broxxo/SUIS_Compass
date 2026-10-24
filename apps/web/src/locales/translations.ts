@@ -105,6 +105,9 @@ export type TranslationKey =
   | 'ai.panel.contextClassAssistant'
   | 'ai.panel.back'
   | 'ai.panel.upload'
+  | 'ai.panel.fileTooLarge'
+  | 'ai.panel.fileType'
+  | 'ai.panel.removeFile'
   | 'ai.panel.mode'
   | 'ai.panel.modeThink'
   | 'ai.panel.modeWeb'
@@ -260,6 +263,9 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.contextClassAssistant': '课堂助手',
     'ai.panel.back': '返回',
     'ai.panel.upload': '上传',
+    'ai.panel.fileTooLarge': '文件不能超过 10MB',
+    'ai.panel.fileType': '请上传 TXT 或 PDF',
+    'ai.panel.removeFile': '移除文件',
     'ai.panel.mode': '模式',
     'ai.panel.modeThink': '思考',
     'ai.panel.modeWeb': '联网',
@@ -414,6 +420,9 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.contextClassAssistant': 'Class Assistant',
     'ai.panel.back': 'Back',
     'ai.panel.upload': 'Upload',
+    'ai.panel.fileTooLarge': 'Files must be 10MB or smaller',
+    'ai.panel.fileType': 'Upload a TXT or PDF file',
+    'ai.panel.removeFile': 'Remove file',
     'ai.panel.mode': 'Mode',
     'ai.panel.modeThink': 'Think',
     'ai.panel.modeWeb': 'Web',

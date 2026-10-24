@@ -1,13 +1,14 @@
 import crypto from 'crypto';
 import pool from '../config/database.js';
-import { getTeacherGradeHeadScopeKeys } from './gradeHeadAccess.js';
+import { coordinatorSegmentIds } from './divisionCoordinators.js';
+import { listFunctionalRoleAssignments } from './functionalRoleAssignments.js';
 import { userHasModuleGrant } from './modulePermissionGrants.js';
 import { loadSchoolGradeStructure, type GradeConfigSegment } from './schoolGradeStructure.js';
-import { listHeadedSubjectGroupIds } from './subjectGroupPortraitDashboard.js';
 
 export type CalendarPhase = 'autumn_prep' | 'autumn' | 'winter' | 'spring_prep' | 'spring' | 'summer';
 export type DayOverrideKind = 'makeup' | 'off';
 export type CalendarEventStatus = 'planned' | 'done' | 'cancelled';
+export type MeetingPeriod = 'morning' | 'noon' | 'afternoon';
 
 export type CalendarSettings = {
   firstSchoolDate: string;
@@ -281,6 +282,22 @@ export async function ensureSchoolCalendarTables(): Promise<void> {
       fetched_at TIMESTAMPTZ NOT NULL,
       payload JSONB NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS school_calendar_meetings (
+      id VARCHAR(50) PRIMARY KEY,
+      academic_year_id VARCHAR(50) NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+      weekday INTEGER NOT NULL CHECK (weekday BETWEEN 1 AND 5),
+      period VARCHAR(20) NOT NULL CHECK (period IN ('morning', 'noon', 'afternoon')),
+      start_time VARCHAR(5) NOT NULL,
+      end_time VARCHAR(5) NOT NULL,
+      title VARCHAR(200) NOT NULL,
+      location VARCHAR(200) NOT NULL DEFAULT '',
+      created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+      updated_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    ALTER TABLE school_calendar_settings
+      ADD COLUMN IF NOT EXISTS meetings_initialized BOOLEAN NOT NULL DEFAULT false;
   `);
   await pool.query(`
     DO $$
@@ -339,37 +356,33 @@ async function callerIsAdmin(userId: string): Promise<boolean> {
   return row?.role === 'admin' || row?.role === 'system-admin';
 }
 
-async function gradeHeadEditableModuleIds(
+/** 真正的年级组长、学科组长（不含协调员岗位换算）。 */
+async function actualLeaderIds(academicYearId: string): Promise<Set<string>> {
+  const roles = await listFunctionalRoleAssignments(academicYearId);
+  const ids = new Set<string>();
+  for (const role of roles) {
+    if (!role.teacherId) continue;
+    if (role.roleType === 'grade-head' || role.roleType === 'subject-group-head') ids.add(role.teacherId);
+  }
+  return ids;
+}
+
+async function isActualGroupLeader(userId: string, academicYearId: string): Promise<boolean> {
+  return (await actualLeaderIds(academicYearId)).has(userId);
+}
+
+/** 协调员分管的校历模块：绑定其学部的模块。教师发展、行政后勤不因协调员身份放开。 */
+async function coordinatorModuleIds(
   userId: string,
   academicYearId: string,
   modules: CalendarModule[],
 ): Promise<string[]> {
-  const scopes = await getTeacherGradeHeadScopeKeys(userId, academicYearId);
-  if (scopes.size === 0) return [];
-  const gradeConfig = await loadSchoolGradeStructure();
-  const segments = gradeConfig.segments ?? [];
-  const byId = new Map(segments.map((s) => [s.id, s]));
-  return modules
-    .filter((mod) => {
-      if (!mod.segmentId) return false;
-      const segment = byId.get(mod.segmentId);
-      return !!segment && segment.gradeIds.some((id) => scopes.has(id));
-    })
-    .map((m) => m.id);
+  const segments = await coordinatorSegmentIds(userId, academicYearId);
+  if (segments.size === 0) return [];
+  return modules.filter((mod) => mod.segmentId && segments.has(mod.segmentId)).map((mod) => mod.id);
 }
 
-/** 周历事项：学科组长 / 教学管理协调员可写全部模块（含未绑定学部的「课程教学」等） */
-async function subjectLeadEditableModuleIds(
-  userId: string,
-  academicYearId: string,
-  modules: CalendarModule[],
-): Promise<string[]> {
-  const headed = await listHeadedSubjectGroupIds(academicYearId, userId);
-  if (headed.size === 0) return [];
-  return modules.map((m) => m.id);
-}
-
-/** 周历事项：管理员 / 周历额外授权 / 年级组长与年级协调员 / 学科组长与教学协调员 */
+/** 周历新建：管理员与额外授权可写全部模块；组长不限模块；协调员只写分管学部模块。 */
 async function editableEventModuleIdsFor(
   userId: string,
   academicYearId: string,
@@ -377,19 +390,66 @@ async function editableEventModuleIdsFor(
 ): Promise<string[]> {
   if (await callerIsAdmin(userId)) return modules.map((m) => m.id);
   if (await userHasModuleGrant(userId, 'calendar-week')) return modules.map((m) => m.id);
-  const fromGrade = await gradeHeadEditableModuleIds(userId, academicYearId, modules);
-  const fromSubject = await subjectLeadEditableModuleIds(userId, academicYearId, modules);
-  return [...new Set([...fromGrade, ...fromSubject])];
+  if (await isActualGroupLeader(userId, academicYearId)) return modules.map((m) => m.id);
+  return coordinatorModuleIds(userId, academicYearId, modules);
 }
 
-/** 月历焦点：仅管理员 / 月历额外授权可改 */
+async function canWritePastWeekEvents(userId: string, academicYearId: string): Promise<boolean> {
+  if (await callerIsAdmin(userId)) return true;
+  if (await isActualGroupLeader(userId, academicYearId)) return true;
+  return (await coordinatorSegmentIds(userId, academicYearId)).size > 0;
+}
+
+type EventPeople = {
+  moduleId: string;
+  ownerUserId: string | null;
+  participantIds: string[];
+  createdBy: string | null;
+};
+
+/**
+ * 修改已有周历事项：管理员与周历额外授权可改全部。
+ * 组长可改自己创建的事项（不限模块，含过往）。
+ * 协调员可改自己创建的，以及分管模块里组长创建的事项。
+ */
+async function canEditExistingCalendarEvent(
+  userId: string,
+  academicYearId: string,
+  event: EventPeople,
+): Promise<boolean> {
+  if (await callerIsAdmin(userId)) return true;
+  if (await userHasModuleGrant(userId, 'calendar-week')) return true;
+  const leaders = await actualLeaderIds(academicYearId);
+  if (leaders.has(userId) && event.createdBy === userId) return true;
+  const modules = await calendarModules();
+  const coordModules = new Set(await coordinatorModuleIds(userId, academicYearId, modules));
+  if (coordModules.size === 0) return false;
+  if (event.createdBy === userId) return true;
+  return Boolean(event.createdBy && leaders.has(event.createdBy) && coordModules.has(event.moduleId));
+}
+
+async function assertCanEditExistingCalendarEvent(
+  userId: string,
+  academicYearId: string,
+  event: EventPeople,
+): Promise<{ ok: true } | { error: 'forbidden' }> {
+  if (await canEditExistingCalendarEvent(userId, academicYearId, event)) return { ok: true };
+  return { error: 'forbidden' as const };
+}
+
+/** 月历：管理员、协调员、月历额外授权可改全部模块。 */
+async function canManageMonthCalendar(userId: string, academicYearId: string): Promise<boolean> {
+  if (await callerIsAdmin(userId)) return true;
+  if (await userHasModuleGrant(userId, 'calendar-month')) return true;
+  return (await coordinatorSegmentIds(userId, academicYearId)).size > 0;
+}
+
 async function editableFocusModuleIdsFor(
   userId: string,
-  _academicYearId: string,
+  academicYearId: string,
   modules: CalendarModule[],
 ): Promise<string[]> {
-  if (await callerIsAdmin(userId)) return modules.map((m) => m.id);
-  if (await userHasModuleGrant(userId, 'calendar-month')) return modules.map((m) => m.id);
+  if (await canManageMonthCalendar(userId, academicYearId)) return modules.map((m) => m.id);
   return [];
 }
 
@@ -452,6 +512,55 @@ async function loadSettings(academicYearId: string, startYear: number): Promise<
     springTermStart: row.spring_term_start,
     summerBreakStart: row.summer_break_start,
   };
+}
+
+/** 合肥协和每周固定例会。只在该学年第一次打开校历时写入，之后删除不会再自动补回。 */
+const DEFAULT_STANDING_MEETINGS: Array<{
+  weekday: number;
+  period: MeetingPeriod;
+  startTime: string;
+  endTime: string;
+  title: string;
+  location: string;
+}> = [
+  { weekday: 1, period: 'morning', startTime: '08:30', endTime: '09:10', title: 'PE 体育', location: 'PS Music 1' },
+  { weekday: 1, period: 'morning', startTime: '09:00', endTime: '10:00', title: '中学人文', location: 'MS C103 一楼办公室' },
+  { weekday: 1, period: 'afternoon', startTime: '13:40', endTime: '16:00', title: '校协调会', location: 'Meeting Room 1 会议室1' },
+  { weekday: 1, period: 'afternoon', startTime: '16:10', endTime: '16:50', title: '学部协调会', location: 'PS 308' },
+  { weekday: 2, period: 'morning', startTime: '08:30', endTime: '10:05', title: 'Music 音乐', location: 'PS Music 2' },
+  { weekday: 2, period: 'noon', startTime: '12:40', endTime: '13:20', title: 'MS All 中学全员会', location: 'C207' },
+  { weekday: 2, period: 'afternoon', startTime: '13:25', endTime: '15:00', title: 'PS English 小英', location: 'PS P2G' },
+  { weekday: 2, period: 'afternoon', startTime: '13:30', endTime: '16:00', title: 'MS Chinese 中语', location: 'MS C206' },
+  { weekday: 3, period: 'morning', startTime: '08:30', endTime: '10:05', title: 'Art 美术', location: 'PS Carpentry 木工' },
+  { weekday: 3, period: 'morning', startTime: '10:35', endTime: '12:10', title: 'PS Math 小数', location: 'PS STEAM' },
+  { weekday: 3, period: 'afternoon', startTime: '16:20', endTime: '17:20', title: 'All Staff 全员会', location: 'PS 308' },
+  { weekday: 4, period: 'morning', startTime: '10:50', endTime: '12:10', title: 'PS Chinese 小语', location: 'PS STEAM' },
+  { weekday: 4, period: 'afternoon', startTime: '13:30', endTime: '15:00', title: 'MS Math 中数', location: 'MS C301' },
+  { weekday: 4, period: 'afternoon', startTime: '13:30', endTime: '15:30', title: 'MS English 中英', location: 'MS English Classroom' },
+];
+
+async function ensureDefaultMeetings(academicYearId: string): Promise<void> {
+  const claimed = await pool.query(
+    `UPDATE school_calendar_settings
+     SET meetings_initialized = true
+     WHERE academic_year_id = $1 AND meetings_initialized = false
+     RETURNING academic_year_id`,
+    [academicYearId],
+  );
+  if ((claimed.rowCount ?? 0) === 0) return;
+  const count = await pool.query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM school_calendar_meetings WHERE academic_year_id = $1`,
+    [academicYearId],
+  );
+  if (Number(count.rows[0]?.n ?? 0) > 0) return;
+  for (const item of DEFAULT_STANDING_MEETINGS) {
+    await pool.query(
+      `INSERT INTO school_calendar_meetings
+         (id, academic_year_id, weekday, period, start_time, end_time, title, location)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [newId('scm'), academicYearId, item.weekday, item.period, item.startTime, item.endTime, item.title, item.location],
+    );
+  }
 }
 
 async function syncWeeks(academicYearId: string, settings: CalendarSettings): Promise<CalendarWeek[]> {
@@ -541,7 +650,7 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
   const events = (
     await pool.query(
       `SELECT id, module_id, week_id, event_date::text, start_time, end_time, title, location, owner_user_id,
-              participant_ids, status, note, shared
+              participant_ids, status, note, shared, created_by
        FROM school_calendar_events WHERE academic_year_id = $1
        ORDER BY event_date ASC, start_time ASC`,
       [academicYearId],
@@ -560,6 +669,7 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
     status: CalendarEventStatus;
     note: string;
     shared: boolean;
+    created_by: string | null;
   }>;
   const overrides = (
     await pool.query(
@@ -574,15 +684,41 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
        ORDER BY name_zh ASC, name_en ASC`,
     )
   ).rows as Array<{ id: string; name_zh: string; name_en: string }>;
+  await ensureDefaultMeetings(academicYearId);
+  const meetings = (
+    await pool.query(
+      `SELECT id, weekday, period, start_time, end_time, title, location
+       FROM school_calendar_meetings
+       WHERE academic_year_id = $1
+       ORDER BY weekday,
+         CASE period WHEN 'morning' THEN 1 WHEN 'noon' THEN 2 ELSE 3 END,
+         start_time, end_time, title`,
+      [academicYearId],
+    )
+  ).rows as Array<{
+    id: string;
+    weekday: number;
+    period: MeetingPeriod;
+    start_time: string;
+    end_time: string;
+    title: string;
+    location: string;
+  }>;
   const isAdmin = await callerIsAdmin(userId);
-  const canManageMonth = isAdmin || (await userHasModuleGrant(userId, 'calendar-month'));
+  const canManageMonth = await canManageMonthCalendar(userId, academicYearId);
   const editableModuleIds = await editableEventModuleIdsFor(userId, academicYearId, modules);
   const editableFocusModuleIds = await editableFocusModuleIdsFor(userId, academicYearId, modules);
+  const weekGrant = isAdmin || (await userHasModuleGrant(userId, 'calendar-week'));
+  const leaderIds = await actualLeaderIds(academicYearId);
+  const coordModules = new Set(await coordinatorModuleIds(userId, academicYearId, modules));
+  const viewerIsLeader = leaderIds.has(userId);
+  const canWritePastWeek = await canWritePastWeekEvents(userId, academicYearId);
   return {
     academicYearId,
     today: todayShanghai(),
     isAdmin,
     canManageMonth,
+    canWritePastWeek,
     editableModuleIds,
     editableFocusModuleIds,
     settings,
@@ -596,23 +732,44 @@ export async function getSchoolCalendarBoard(userId: string, academicYearId: str
       theme: row.theme,
       focus: row.focus,
     })),
-    events: events.map((row) => ({
+    events: events.map((row) => {
+      const participantIds = Array.isArray(row.participant_ids) ? row.participant_ids.map(String) : [];
+      const createdBy = row.created_by;
+      const canEdit =
+        weekGrant ||
+        (viewerIsLeader && createdBy === userId) ||
+        (coordModules.size > 0 &&
+          (createdBy === userId ||
+            (Boolean(createdBy) && leaderIds.has(createdBy as string) && coordModules.has(row.module_id))));
+      return {
+        id: row.id,
+        moduleId: row.module_id,
+        weekId: row.week_id,
+        eventDate: row.event_date,
+        startTime: row.start_time,
+        endTime: row.end_time,
+        title: row.title,
+        location: row.location ?? '',
+        ownerUserId: row.owner_user_id,
+        participantIds,
+        status: row.status,
+        note: row.note,
+        shared: Boolean(row.shared),
+        canEdit,
+      };
+    }),
+    overrides: overrides.map((row) => ({ date: row.day, kind: row.kind })),
+    staff: staff.map((row) => ({ id: row.id, nameZh: row.name_zh, nameEn: row.name_en })),
+    canEditMeetings: weekGrant,
+    meetings: meetings.map((row) => ({
       id: row.id,
-      moduleId: row.module_id,
-      weekId: row.week_id,
-      eventDate: row.event_date,
+      weekday: row.weekday,
+      period: row.period,
       startTime: row.start_time,
       endTime: row.end_time,
       title: row.title,
       location: row.location ?? '',
-      ownerUserId: row.owner_user_id,
-      participantIds: Array.isArray(row.participant_ids) ? row.participant_ids.map(String) : [],
-      status: row.status,
-      note: row.note,
-      shared: Boolean(row.shared),
     })),
-    overrides: overrides.map((row) => ({ date: row.day, kind: row.kind })),
-    staff: staff.map((row) => ({ id: row.id, nameZh: row.name_zh, nameEn: row.name_en })),
   };
 }
 
@@ -747,7 +904,7 @@ async function assertCanWriteEventModule(
   const modules = await calendarModules();
   const editable = new Set(await editableEventModuleIdsFor(userId, academicYearId, modules));
   if (!editable.has(moduleId)) return { error: 'forbidden' as const };
-  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await callerIsAdmin(userId))) {
+  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await canWritePastWeekEvents(userId, academicYearId))) {
     return { error: 'past_locked' as const };
   }
   return { ok: true as const };
@@ -762,7 +919,7 @@ async function assertCanWriteFocusModule(
   const modules = await calendarModules();
   const editable = new Set(await editableFocusModuleIdsFor(userId, academicYearId, modules));
   if (!editable.has(moduleId)) return { error: 'forbidden' as const };
-  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await callerIsAdmin(userId))) {
+  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await canManageMonthCalendar(userId, academicYearId))) {
     return { error: 'past_locked' as const };
   }
   return { ok: true as const };
@@ -773,7 +930,7 @@ async function assertCanWriteAnyDivision(userId: string, academicYearId: string,
   const modules = await calendarModules();
   const editable = new Set(await editableEventModuleIdsFor(userId, academicYearId, modules));
   if (!modules.some((mod) => mod.segmentId && editable.has(mod.id))) return { error: 'forbidden' as const };
-  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await callerIsAdmin(userId))) {
+  if (eventDate && isCalendarDatePastLocked(eventDate) && !(await canWritePastWeekEvents(userId, academicYearId))) {
     return { error: 'past_locked' as const };
   }
   return { ok: true as const };
@@ -921,31 +1078,36 @@ export async function updateCalendarEvent(
   await ensureSchoolCalendarTables();
   const existing = (
     await pool.query(
-      `SELECT academic_year_id, event_date::text FROM school_calendar_events WHERE id = $1`,
+      `SELECT academic_year_id, module_id, event_date::text, owner_user_id, participant_ids, created_by
+       FROM school_calendar_events WHERE id = $1`,
       [id],
     )
-  ).rows[0] as { academic_year_id: string; event_date: string } | undefined;
+  ).rows[0] as {
+    academic_year_id: string;
+    module_id: string;
+    event_date: string;
+    owner_user_id: string | null;
+    participant_ids: unknown;
+    created_by: string | null;
+  } | undefined;
   if (!existing) return { error: 'not_found' as const };
   if (!isDate(input.eventDate) || !isTime(input.startTime) || !isTime(input.endTime) || input.startTime >= input.endTime) {
     return { error: 'invalid_time' as const };
   }
   const title = input.title.trim();
   if (!title) return { error: 'title_required' as const };
-  const isAdmin = await callerIsAdmin(userId);
-  if (
-    !isAdmin &&
-    (isCalendarDatePastLocked(existing.event_date) || isCalendarDatePastLocked(input.eventDate))
-  ) {
-    return { error: 'past_locked' as const };
-  }
+  const people: EventPeople = {
+    moduleId: existing.module_id,
+    ownerUserId: existing.owner_user_id,
+    participantIds: Array.isArray(existing.participant_ids) ? existing.participant_ids.map(String) : [],
+    createdBy: existing.created_by,
+  };
+  const gate = await assertCanEditExistingCalendarEvent(userId, existing.academic_year_id, people);
+  if ('error' in gate) return gate;
   const shared = Boolean(input.shared);
   const module = (await calendarModules()).find((item) => item.id === input.moduleId);
   if (!module) return { error: 'not_found' as const };
   if (shared && !module.segmentId) return { error: 'shared_module' as const };
-  const gate = shared
-    ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
-    : await assertCanWriteEventModule(userId, existing.academic_year_id, input.moduleId, null);
-  if ('error' in gate) return gate;
   const weeks = (
     await pool.query(
       `SELECT id, week_index, monday::text, friday::text, phase FROM school_calendar_weeks WHERE academic_year_id = $1`,
@@ -995,36 +1157,53 @@ export async function deleteCalendarEvent(userId: string, id: string) {
   await ensureSchoolCalendarTables();
   const existing = (
     await pool.query(
-      `SELECT academic_year_id, module_id, event_date::text, shared FROM school_calendar_events WHERE id = $1`,
+      `SELECT academic_year_id, module_id, owner_user_id, participant_ids, created_by
+       FROM school_calendar_events WHERE id = $1`,
       [id],
     )
-  ).rows[0] as { academic_year_id: string; module_id: string; event_date: string; shared: boolean } | undefined;
+  ).rows[0] as {
+    academic_year_id: string;
+    module_id: string;
+    owner_user_id: string | null;
+    participant_ids: unknown;
+    created_by: string | null;
+  } | undefined;
   if (!existing) return { error: 'not_found' as const };
-  if (isCalendarDatePastLocked(existing.event_date) && !(await callerIsAdmin(userId))) {
-    return { error: 'past_locked' as const };
-  }
-  const gate = existing.shared
-    ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
-    : await assertCanWriteEventModule(userId, existing.academic_year_id, existing.module_id, null);
+  const gate = await assertCanEditExistingCalendarEvent(userId, existing.academic_year_id, {
+    moduleId: existing.module_id,
+    ownerUserId: existing.owner_user_id,
+    participantIds: Array.isArray(existing.participant_ids) ? existing.participant_ids.map(String) : [],
+    createdBy: existing.created_by,
+  });
   if ('error' in gate) return gate;
   await pool.query(`DELETE FROM school_calendar_events WHERE id = $1`, [id]);
   return { ok: true as const };
 }
 
-/** 只改完成状态。复盘上一周时，已经过去的事项也允许改状态，内容仍按原来的规则锁定。 */
+/** 只改完成状态；权限与修改事项内容相同。 */
 export async function setCalendarEventStatus(userId: string, id: string, status: CalendarEventStatus) {
   await ensureSchoolCalendarTables();
   if (status !== 'planned' && status !== 'done' && status !== 'cancelled') return { error: 'invalid_status' as const };
   const existing = (
     await pool.query(
-      `SELECT academic_year_id, module_id, shared FROM school_calendar_events WHERE id = $1`,
+      `SELECT academic_year_id, module_id, owner_user_id, participant_ids, created_by
+       FROM school_calendar_events WHERE id = $1`,
       [id],
     )
-  ).rows[0] as { academic_year_id: string; module_id: string; shared: boolean } | undefined;
+  ).rows[0] as {
+    academic_year_id: string;
+    module_id: string;
+    owner_user_id: string | null;
+    participant_ids: unknown;
+    created_by: string | null;
+  } | undefined;
   if (!existing) return { error: 'not_found' as const };
-  const gate = existing.shared
-    ? await assertCanWriteAnyDivision(userId, existing.academic_year_id, null)
-    : await assertCanWriteEventModule(userId, existing.academic_year_id, existing.module_id, null);
+  const gate = await assertCanEditExistingCalendarEvent(userId, existing.academic_year_id, {
+    moduleId: existing.module_id,
+    ownerUserId: existing.owner_user_id,
+    participantIds: Array.isArray(existing.participant_ids) ? existing.participant_ids.map(String) : [],
+    createdBy: existing.created_by,
+  });
   if ('error' in gate) return gate;
   await pool.query(
     `UPDATE school_calendar_events SET status = $2, updated_by = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -1033,9 +1212,82 @@ export async function setCalendarEventStatus(userId: string, id: string, status:
   return { ok: true as const };
 }
 
+export type MeetingInput = {
+  weekday: number;
+  period: MeetingPeriod;
+  startTime: string;
+  endTime: string;
+  title: string;
+  location: string;
+};
+
+async function assertCanEditMeetings(userId: string): Promise<{ error: 'forbidden' } | null> {
+  if (await callerIsAdmin(userId)) return null;
+  if (await userHasModuleGrant(userId, 'calendar-week')) return null;
+  return { error: 'forbidden' };
+}
+
+function meetingInputError(input: MeetingInput): string | null {
+  if (![1, 2, 3, 4, 5].includes(input.weekday)) return 'invalid_weekday';
+  if (input.period !== 'morning' && input.period !== 'noon' && input.period !== 'afternoon') return 'invalid_period';
+  if (!isTime(input.startTime) || !isTime(input.endTime) || input.startTime >= input.endTime) return 'invalid_time';
+  const title = input.title.trim();
+  if (!title) return 'title_required';
+  if (title.length > 200) return 'title_too_long';
+  if (input.location.trim().length > 200) return 'location_too_long';
+  return null;
+}
+
+export async function createCalendarMeeting(userId: string, academicYearId: string, input: MeetingInput) {
+  await ensureSchoolCalendarTables();
+  const denied = await assertCanEditMeetings(userId);
+  if (denied) return denied;
+  if (!(await yearRow(academicYearId))) return { error: 'year_not_found' as const };
+  const invalid = meetingInputError(input);
+  if (invalid) return { error: invalid };
+  const id = newId('scm');
+  await pool.query(
+    `INSERT INTO school_calendar_meetings
+       (id, academic_year_id, weekday, period, start_time, end_time, title, location, created_by, updated_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`,
+    [id, academicYearId, input.weekday, input.period, input.startTime, input.endTime, input.title.trim(), input.location.trim(), userId],
+  );
+  await pool.query(
+    `UPDATE school_calendar_settings SET meetings_initialized = true WHERE academic_year_id = $1`,
+    [academicYearId],
+  );
+  return { id };
+}
+
+export async function updateCalendarMeeting(userId: string, id: string, input: MeetingInput) {
+  await ensureSchoolCalendarTables();
+  const denied = await assertCanEditMeetings(userId);
+  if (denied) return denied;
+  const invalid = meetingInputError(input);
+  if (invalid) return { error: invalid };
+  const updated = await pool.query(
+    `UPDATE school_calendar_meetings
+     SET weekday = $2, period = $3, start_time = $4, end_time = $5, title = $6, location = $7,
+         updated_by = $8, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [id, input.weekday, input.period, input.startTime, input.endTime, input.title.trim(), input.location.trim(), userId],
+  );
+  if ((updated.rowCount ?? 0) === 0) return { error: 'not_found' as const };
+  return { ok: true as const };
+}
+
+export async function deleteCalendarMeeting(userId: string, id: string) {
+  await ensureSchoolCalendarTables();
+  const denied = await assertCanEditMeetings(userId);
+  if (denied) return denied;
+  const removed = await pool.query(`DELETE FROM school_calendar_meetings WHERE id = $1`, [id]);
+  if ((removed.rowCount ?? 0) === 0) return { error: 'not_found' as const };
+  return { ok: true as const };
+}
+
 export type CalendarImportIssue = {
   row: number;
-  sheet: 'month' | 'week';
+  sheet: 'month' | 'week' | 'meeting';
   code: string;
   detail?: string;
 };
@@ -1060,6 +1312,16 @@ export type CalendarImportEvent = {
   participantNames: string[];
   status: string;
   note: string;
+};
+
+export type CalendarImportMeeting = {
+  row: number;
+  weekday: number;
+  period: string;
+  startTime: string;
+  endTime: string;
+  title: string;
+  location: string;
 };
 
 function normName(value: string): string {
@@ -1115,8 +1377,11 @@ const STATUS_FROM_LABEL: Record<string, CalendarEventStatus> = {
 export async function importSchoolCalendar(
   userId: string,
   academicYearId: string,
-  input: { weeks: CalendarImportWeek[]; events: CalendarImportEvent[] | null },
-): Promise<{ weekCount: number; eventCount: number; eventsReplaced: boolean } | { error: string; issues?: CalendarImportIssue[] }> {
+  input: { weeks: CalendarImportWeek[]; events: CalendarImportEvent[] | null; meetings: CalendarImportMeeting[] | null },
+): Promise<
+  | { weekCount: number; eventCount: number; eventsReplaced: boolean; meetingCount: number; meetingsReplaced: boolean }
+  | { error: string; issues?: CalendarImportIssue[] }
+> {
   const board = await getSchoolCalendarBoard(userId, academicYearId);
   if (board.error) return { error: board.error };
   if (!board.isAdmin) return { error: 'forbidden' };
@@ -1251,6 +1516,41 @@ export async function importSchoolCalendar(
     }
   }
 
+  const resolvedMeetings: Array<{
+    weekday: number;
+    period: MeetingPeriod;
+    startTime: string;
+    endTime: string;
+    title: string;
+    location: string;
+  }> = [];
+  if (input.meetings) {
+    for (const item of input.meetings) {
+      const period = item.period === 'morning' || item.period === 'noon' || item.period === 'afternoon' ? item.period : null;
+      const title = item.title.trim();
+      if (![1, 2, 3, 4, 5].includes(item.weekday)) {
+        issues.push({ row: item.row, sheet: 'meeting', code: 'invalid_weekday', detail: String(item.weekday) });
+      }
+      if (!period) issues.push({ row: item.row, sheet: 'meeting', code: 'invalid_period', detail: item.period });
+      if (!title) issues.push({ row: item.row, sheet: 'meeting', code: 'title_required' });
+      if (title.length > 200) issues.push({ row: item.row, sheet: 'meeting', code: 'title_too_long' });
+      if (!isTime(item.startTime) || !isTime(item.endTime) || item.startTime >= item.endTime) {
+        issues.push({ row: item.row, sheet: 'meeting', code: 'invalid_time', detail: `${item.startTime}-${item.endTime}` });
+      }
+      if (item.location.trim().length > 200) issues.push({ row: item.row, sheet: 'meeting', code: 'location_too_long' });
+      if (![1, 2, 3, 4, 5].includes(item.weekday) || !period || !title) continue;
+      if (!isTime(item.startTime) || !isTime(item.endTime) || item.startTime >= item.endTime) continue;
+      resolvedMeetings.push({
+        weekday: item.weekday,
+        period,
+        startTime: item.startTime,
+        endTime: item.endTime,
+        title: title.slice(0, 200),
+        location: item.location.trim().slice(0, 200),
+      });
+    }
+  }
+
   if (issues.length > 0) return { error: 'import_invalid', issues };
 
   const client = await pool.connect();
@@ -1310,8 +1610,40 @@ export async function importSchoolCalendar(
         );
       }
     }
+    const meetingsReplaced = input.meetings != null;
+    if (meetingsReplaced) {
+      await client.query(`DELETE FROM school_calendar_meetings WHERE academic_year_id = $1`, [academicYearId]);
+      for (const meeting of resolvedMeetings) {
+        await client.query(
+          `INSERT INTO school_calendar_meetings
+             (id, academic_year_id, weekday, period, start_time, end_time, title, location, created_by, updated_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`,
+          [
+            newId('scm'),
+            academicYearId,
+            meeting.weekday,
+            meeting.period,
+            meeting.startTime,
+            meeting.endTime,
+            meeting.title,
+            meeting.location,
+            userId,
+          ],
+        );
+      }
+      await client.query(
+        `UPDATE school_calendar_settings SET meetings_initialized = true WHERE academic_year_id = $1`,
+        [academicYearId],
+      );
+    }
     await client.query('COMMIT');
-    return { weekCount: resolvedWeeks.length, eventCount: eventsReplaced ? resolvedEvents.length : 0, eventsReplaced };
+    return {
+      weekCount: resolvedWeeks.length,
+      eventCount: eventsReplaced ? resolvedEvents.length : 0,
+      eventsReplaced,
+      meetingCount: meetingsReplaced ? resolvedMeetings.length : 0,
+      meetingsReplaced,
+    };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

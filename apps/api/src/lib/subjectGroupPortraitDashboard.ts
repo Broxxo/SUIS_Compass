@@ -489,6 +489,16 @@ async function loadMemberDiagnoses(
       await pool.query(
         `SELECT id FROM teacher_portrait_collection_templates
          WHERE academic_year_id = $1 AND term = $2 AND status IN ('published', 'closed')
+           AND (
+             form_blocks IS NULL
+             OR (
+               jsonb_typeof(form_blocks) = 'array'
+               AND EXISTS (
+                 SELECT 1 FROM jsonb_array_elements(form_blocks) elem
+                 WHERE elem->>'kind' = 'kiss'
+               )
+             )
+           )
          ORDER BY updated_at DESC NULLS LAST
          LIMIT 1`,
         [academicYearId, term],

@@ -1244,6 +1244,36 @@ export const api = {
     return (data.templates ?? []) as ReportTemplate[];
   },
 
+  async exportAdminTeacherPortraitCollection(
+    templateId: string,
+  ): Promise<import('./teacherCollectionExcel').TeacherCollectionExchangePayload> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/exchange`),
+      { headers: getHeaders() },
+    );
+    if (!response.ok) throw new Error('Failed to export teacher collection');
+    return response.json();
+  },
+
+  async importAdminTeacherPortraitCollection(
+    templateId: string,
+    payload: import('./teacherCollectionExcel').TeacherCollectionExchangePayload,
+  ): Promise<{ importedTeachers: number; warnings: string[] }> {
+    const response = await fetch(
+      apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}/exchange`),
+      {
+        method: 'POST',
+        headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teachers: payload.teachers }),
+      },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || 'Failed to import teacher collection');
+    }
+    return response.json();
+  },
+
   async exportAcademicReport(templateId: string): Promise<import('./academicReportExcel').AcademicReportExchangePayload> {
     const response = await fetch(
       apiUrl(`/api/classes/reports/templates/${encodeURIComponent(templateId)}/exchange`),
@@ -2217,6 +2247,7 @@ export const api = {
     title?: string | null;
     collectionType?: string;
     targetDepartments?: string[] | null;
+    formBlocks?: import('@repo/shared').TeacherCollectionBlock[];
   }): Promise<TeacherPortraitCollectionTemplateSummary> {
     const response = await fetch(apiUrl('/api/admin/teacher-portrait/templates'), {
       method: 'POST',
@@ -2233,7 +2264,11 @@ export const api = {
 
   async putAdminTeacherPortraitTemplate(
     templateId: string,
-    input: { title?: string | null; targetDepartments?: string[] | null },
+    input: {
+      title?: string | null;
+      targetDepartments?: string[] | null;
+      formBlocks?: import('@repo/shared').TeacherCollectionBlock[];
+    },
   ): Promise<TeacherPortraitCollectionTemplateSummary> {
     const response = await fetch(
       apiUrl(`/api/admin/teacher-portrait/templates/${encodeURIComponent(templateId)}`),
@@ -2347,6 +2382,7 @@ export const api = {
     template: TeacherPortraitCollectionTemplateSummary & { canEdit?: boolean };
     submission: {
       diagnosis: ReportTeachingDiagnosis;
+      textAnswers?: Record<string, string>;
       hasContent: boolean;
       updatedAt: string | null;
     };
@@ -2364,6 +2400,7 @@ export const api = {
       template: TeacherPortraitCollectionTemplateSummary & { canEdit?: boolean };
       submission: {
         diagnosis: ReportTeachingDiagnosis;
+        textAnswers?: Record<string, string>;
         hasContent: boolean;
         updatedAt: string | null;
       };
@@ -2372,7 +2409,7 @@ export const api = {
 
   async saveTeacherPortraitCollection(
     templateId: string,
-    payload: { diagnosis: ReportTeachingDiagnosis },
+    payload: { diagnosis: ReportTeachingDiagnosis; textAnswers?: Record<string, string> },
   ): Promise<void> {
     const response = await fetch(
       apiUrl(`/api/classes/teacher-portrait/collections/${encodeURIComponent(templateId)}`),

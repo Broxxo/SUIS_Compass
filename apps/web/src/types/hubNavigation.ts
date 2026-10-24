@@ -19,6 +19,11 @@ export type HubTeacherTodoTarget =
       term: Term;
       lessonKind: 'group' | 'routine' | 'school';
       lessonId: string;
+    }
+  | {
+      type: 'school-calendar';
+      academicYearId: string;
+      eventId: string;
     };
 
 export interface HubTeacherTodoItem {
@@ -49,4 +54,9 @@ export type HubPortraitNavigation =
       term: Term;
       lessonKind: 'group' | 'routine' | 'school';
       lessonId: string;
+    }
+  | {
+      view: 'school-calendar';
+      academicYearId: string;
+      eventId: string;
     };

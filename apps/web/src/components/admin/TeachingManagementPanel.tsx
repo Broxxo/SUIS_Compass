@@ -8,9 +8,11 @@ import { loadGradeConfigSync } from '../../lib/storage';
 import {
   filterTeachersForSubjectGroup,
   formatTeachingGroupSubjectLabels,
+  listTeachersForSubjectGroupPicker,
   type SubjectOption,
 } from '../../lib/teachingSubjectGroupUtils';
 import type { ClassItem, StaffingAssignment } from '../../types/classManagement';
+import MultiSelectPersonGrid from '../MultiSelectPersonGrid';
 import { Button } from '../ui/button';
 import {
   Dialog,
@@ -28,6 +30,7 @@ type TeachingManagementPanelProps = {
   assignments: StaffingAssignment[];
   classes: ClassItem[];
   displayKeyToSubjectKeys: Map<string, Set<string>>;
+  subjectMatchTexts: Map<string, string[]>;
   functionalTeacherByKey: Map<string, string>;
   membersByGroupId: Map<string, string[]>;
   savingGroupId: string | null;
@@ -112,6 +115,7 @@ export default function TeachingManagementPanel({
   assignments,
   classes,
   displayKeyToSubjectKeys,
+  subjectMatchTexts,
   functionalTeacherByKey,
   membersByGroupId,
   savingGroupId,
@@ -165,17 +169,51 @@ export default function TeachingManagementPanel({
     };
   }, [draft]);
 
-  const candidateTeachers = useMemo(() => {
+  const relatedTeachers = useMemo(() => {
     if (!draftGroupShape) return [] as AdminUser[];
-    return filterTeachersForSubjectGroup(
+    const matched = filterTeachersForSubjectGroup(
       draftGroupShape,
       teachers,
       assignments,
       classes,
       gradeConfig,
       displayKeyToSubjectKeys,
+      subjectMatchTexts,
     );
-  }, [draftGroupShape, teachers, assignments, classes, gradeConfig, displayKeyToSubjectKeys]);
+    const matchedIds = new Set(matched.map((teacher) => teacher.id));
+    const keptIds = [...(draft?.memberTeacherIds ?? [])];
+    if (draft?.leadTeacherId && !keptIds.includes(draft.leadTeacherId)) keptIds.push(draft.leadTeacherId);
+    const kept = keptIds
+      .filter((id) => !matchedIds.has(id))
+      .map((id) => teachers.find((teacher) => teacher.id === id))
+      .filter((teacher): teacher is AdminUser => Boolean(teacher));
+    return [...matched, ...kept];
+  }, [draft, draftGroupShape, teachers, assignments, classes, gradeConfig, displayKeyToSubjectKeys, subjectMatchTexts]);
+
+  const candidateTeachers = useMemo(() => {
+    if (!draftGroupShape) return [] as AdminUser[];
+    return listTeachersForSubjectGroupPicker(
+      draftGroupShape,
+      teachers,
+      assignments,
+      classes,
+      gradeConfig,
+      displayKeyToSubjectKeys,
+      subjectMatchTexts,
+      draft?.memberTeacherIds ?? [],
+      membersByGroupId,
+    );
+  }, [
+    draft,
+    draftGroupShape,
+    teachers,
+    assignments,
+    classes,
+    gradeConfig,
+    displayKeyToSubjectKeys,
+    subjectMatchTexts,
+    membersByGroupId,
+  ]);
 
   const toggleSegment = (segmentId: string) => {
     setDraft((prev) => {
@@ -390,7 +428,7 @@ export default function TeachingManagementPanel({
       )}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
               {draft && groups.some((g) => g.id === draft.id)
@@ -491,20 +529,20 @@ export default function TeachingManagementPanel({
                   onChange={(e) => setDraft({ ...draft, leadTeacherId: e.target.value })}
                   className={selectClassName}
                   style={selectChevronStyle}
-                  disabled={candidateTeachers.length === 0}
+                  disabled={relatedTeachers.length === 0 && !draft.leadTeacherId}
                 >
                   <option value="">—</option>
-                  {candidateTeachers.map((t) => (
+                  {relatedTeachers.map((t) => (
                     <option key={t.id} value={t.id}>
                       {teacherDisplayName(t, isZh)}
                     </option>
                   ))}
                 </MenuSelect>
-                {draft.subjectKeys.length > 0 && candidateTeachers.length === 0 ? (
+                {draft.subjectKeys.length > 0 && relatedTeachers.length === 0 ? (
                   <p className="text-[11px] text-amber-700 mt-1">
                     {isZh
-                      ? '所选学段与学科在课程岗位中暂无任课教师，请先在课程岗位排课。'
-                      : 'No teachers found for selected segments and subjects in course staffing.'}
+                      ? '所选学科下还没有相关教师。组员名单仍会列出尚未加入任何学科组的老师。'
+                      : 'No related teachers yet. Ungrouped staff still appear in the member list.'}
                   </p>
                 ) : null}
               </div>
@@ -512,25 +550,18 @@ export default function TeachingManagementPanel({
                 <label className="block text-xs font-medium text-slate-600 mb-1">
                   {isZh ? '组员（可多选）' : 'Members'}
                 </label>
-                {candidateTeachers.length === 0 ? (
-                  <p className="text-xs text-slate-500">—</p>
-                ) : (
-                  <div className="max-h-40 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1">
-                    {candidateTeachers.map((t) => (
-                      <label
-                        key={t.id}
-                        className="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 cursor-pointer text-sm"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={draft.memberTeacherIds.includes(t.id)}
-                          onChange={() => toggleMember(t.id)}
-                        />
-                        <span>{teacherDisplayName(t, isZh)}</span>
-                      </label>
-                    ))}
-                  </div>
-                )}
+                <p className="mb-1.5 text-[11px] text-slate-500">
+                  {isZh
+                    ? '已进组的在最前，其次是学科相关，再是尚未进组的老师。'
+                    : 'Current members first, then related subjects, then ungrouped staff.'}
+                </p>
+                <MultiSelectPersonGrid
+                  people={candidateTeachers}
+                  selectedIds={draft.memberTeacherIds}
+                  onToggle={toggleMember}
+                  getLabel={(t) => teacherDisplayName(t, isZh)}
+                  emptyLabel={isZh ? '暂无可选教师' : 'No teachers'}
+                />
               </div>
             </div>
           ) : null}

@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
-import { sortPublishedTasksNewestFirst, teacherPortraitCollectionTypeLabel } from '@repo/shared';
+import { sortPublishedTasksNewestFirst, teacherPortraitCollectionTypeLabel, templateIncludesKiss, type TeacherCollectionBlock } from '@repo/shared';
 import { api, USE_CLOUD_STORAGE } from '../lib/api';
 import type { ReportTeachingDiagnosis, Term } from '../types/classManagement';
+import TeacherCollectionAnswerForm from './TeacherCollectionAnswerForm';
 import TeachingDiagnosisKissDisplay from './TeachingDiagnosisKissDisplay';
 
 type ReflectionItem = {
   id: string;
   title: string | null;
   status: string;
+  formBlocks: TeacherCollectionBlock[] | null;
   diagnosis: ReportTeachingDiagnosis;
+  textAnswers: Record<string, string>;
   hasContent: boolean;
   updatedAt: string | null;
 };
@@ -35,12 +38,16 @@ export default function TeachingSelfReflectionBlock({
       return;
     }
     setLoading(true);
+    setItems([]);
     setError(null);
     try {
       const templates = teacherId
         ? await api.getAdminTeacherPortraitTemplates({ academicYearId: yearId, term })
         : await api.getTeacherPortraitCollections({ academicYearId: yearId, term });
-      const open = templates.filter((t) => t.status === 'published' || t.status === 'closed');
+      const open = templates.filter((t) => {
+        if (t.status !== 'published' && t.status !== 'closed') return false;
+        return teacherId ? true : templateIncludesKiss(t);
+      });
       const sortedTemplates = sortPublishedTasksNewestFirst(
         open.map((t) => ({
           tpl: t,
@@ -52,14 +59,18 @@ export default function TeachingSelfReflectionBlock({
       ).map((row) => row.tpl);
 
       const entries = await Promise.all(
-        sortedTemplates.map(async (tpl) => {
+        sortedTemplates.map(async (tpl): Promise<ReflectionItem | null> => {
           if (teacherId) {
-            const submission = await api.getAdminTeacherPortraitTeacherSubmission(tpl.id, teacherId);
+            const submissions = await api.getAdminTeacherPortraitTemplateSubmissions(tpl.id);
+            const submission = submissions.find((row) => row.teacherId === teacherId);
+            if (!submission) return null;
             return {
               id: tpl.id,
               title: tpl.title,
               status: tpl.status,
+              formBlocks: tpl.formBlocks ?? null,
               diagnosis: submission.diagnosis,
+              textAnswers: submission.textAnswers ?? {},
               hasContent: submission.hasContent,
               updatedAt: submission.updatedAt,
             } satisfies ReflectionItem;
@@ -69,13 +80,15 @@ export default function TeachingSelfReflectionBlock({
             id: tpl.id,
             title: data.template.title,
             status: data.template.status,
+            formBlocks: data.template.formBlocks ?? null,
             diagnosis: data.submission.diagnosis,
+            textAnswers: data.submission.textAnswers ?? {},
             hasContent: data.submission.hasContent,
             updatedAt: data.submission.updatedAt,
           } satisfies ReflectionItem;
         }),
       );
-      setItems(entries);
+      setItems(entries.filter((item): item is ReflectionItem => item != null));
     } catch (e: unknown) {
       setError((e as Error)?.message || 'Failed to load diagnosis');
       setItems([]);
@@ -99,7 +112,13 @@ export default function TeachingSelfReflectionBlock({
 
       {!loading && items.length === 0 && (
         <p className="text-sm text-slate-500">
-          {isZh ? '当前学期暂无已发布的教学诊断采集任务。' : 'No published teaching diagnosis collection for this term.'}
+          {teacherId
+            ? isZh
+              ? '这个学期没有向这位教师发布的任务。'
+              : 'No published task for this teacher this term.'
+            : isZh
+              ? '当前学期暂无已发布的教学诊断采集任务。'
+              : 'No published teaching diagnosis collection for this term.'}
         </p>
       )}
 
@@ -108,15 +127,35 @@ export default function TeachingSelfReflectionBlock({
           {items.map((item, idx) => (
             <div key={item.id} className={idx > 0 ? 'pt-5 border-t border-slate-100' : ''}>
               <p className="text-xs text-slate-500 mb-3">
-                {item.title || teacherPortraitCollectionTypeLabel('teaching-diagnosis-kiss', isZh)} · KISS
+                {item.title || teacherPortraitCollectionTypeLabel('teaching-diagnosis-kiss', isZh)}
+                {teacherId ? '' : ' · KISS'}
                 {item.status === 'closed' ? (isZh ? ' · 已截止' : ' · Closed') : ''}
-                {item.hasContent && item.updatedAt
-                  ? ` · ${isZh ? '更新于' : 'Updated'} ${new Date(item.updatedAt).toLocaleString(isZh ? 'zh-CN' : undefined)}`
+                {item.hasContent
+                  ? isZh
+                    ? ' · 已提交'
+                    : ' · Submitted'
                   : isZh
-                    ? ' · 未填写'
+                    ? ' · 未提交'
                     : ' · Not submitted'}
+                {item.hasContent && item.updatedAt
+                  ? ` · ${new Date(item.updatedAt).toLocaleString(isZh ? 'zh-CN' : undefined)}`
+                  : ''}
               </p>
-              <TeachingDiagnosisKissDisplay value={item.diagnosis} isZh={isZh} />
+              {teacherId ? (
+                item.hasContent ? (
+                  <TeacherCollectionAnswerForm
+                    blocks={item.formBlocks}
+                    diagnosis={item.diagnosis}
+                    textAnswers={item.textAnswers}
+                    onDiagnosisChange={() => {}}
+                    onTextAnswerChange={() => {}}
+                    disabled
+                    isZh={isZh}
+                  />
+                ) : null
+              ) : (
+                <TeachingDiagnosisKissDisplay value={item.diagnosis} isZh={isZh} />
+              )}
             </div>
           ))}
           {hasUnfilled && (

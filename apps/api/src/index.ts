@@ -16,6 +16,7 @@ import openLessonRoutes from './routes/openLessons.js';
 import schoolCalendarRoutes from './routes/schoolCalendar.js';
 import mailboxRoutes from './routes/mailbox.js';
 import lighthouseRoutes from './routes/lighthouse.js';
+import schoolProjectRoutes from './routes/schoolProjects.js';
 import { requireValidUser } from './middleware/requireUser.js';
 import { forbidStudentAccounts } from './middleware/forbidStudent.js';
 
@@ -43,6 +44,7 @@ app.use('/api/open-lessons', requireValidUser, forbidStudentAccounts, openLesson
 app.use('/api/school-calendar', requireValidUser, forbidStudentAccounts, schoolCalendarRoutes);
 app.use('/api/mailbox', requireValidUser, forbidStudentAccounts, mailboxRoutes);
 app.use('/api/lighthouse', requireValidUser, forbidStudentAccounts, lighthouseRoutes);
+app.use('/api/projects', requireValidUser, forbidStudentAccounts, schoolProjectRoutes);
 app.use('/api/classes', requireValidUser, classesRoutes);
 
 app.get('/health', (_, res) => {

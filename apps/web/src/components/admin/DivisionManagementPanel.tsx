@@ -39,15 +39,15 @@ const PERMISSIONS: Array<{ id: CoordinatorPermission; zh: string; en: string; hi
     id: 'grade-management',
     zh: '年级管理',
     en: 'Grade management',
-    hintZh: '等同于所选学部里全部年级组长：可查看这些年级的学生，并编辑校历中绑定该学部的模块。',
-    hintEn: 'Same as every grade head in the selected divisions: student records for those grades, and calendar modules bound to the division.',
+    hintZh: '等同于所选学部里全部年级组长：可查看这些年级的学生。周历可在这些学部的模块新建，并修改其中组长创建的事项；月历可改全部。',
+    hintEn: 'Same as every grade head in the selected divisions for student records. Week calendar: create on those division modules and edit events leads created there. Month calendar: full edit.',
   },
   {
     id: 'teaching-management',
     zh: '教学管理',
     en: 'Teaching management',
-    hintZh: '等同于所选学部里的学科组长：可查看这些学科组的教师画像，并在公开课中管理这些学科组。',
-    hintEn: 'Same as subject-group leads covering the selected divisions: group portraits and open-lesson groups.',
+    hintZh: '等同于所选学部里的学科组长：可查看这些学科组的教师画像，并在公开课中管理这些学科组。周历可在这些学部的模块新建，并修改其中组长创建的事项；月历可改全部。',
+    hintEn: 'Same as subject-group leads covering the selected divisions: group portraits and open lessons. Week calendar: create on those division modules and edit events leads created there. Month calendar: full edit.',
   },
 ];
 

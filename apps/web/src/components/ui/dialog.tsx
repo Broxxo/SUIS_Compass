@@ -152,6 +152,8 @@ const DialogContent = React.forwardRef<
         className={cn(
           "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg outline-none sm:rounded-lg",
           className,
+          // 手机全屏，避免小屏上弹窗又矮又挤；放在最后盖过调用方的 max-w / max-h。
+          "max-md:inset-0 max-md:left-0 max-md:top-0 max-md:h-dvh max-md:max-h-none max-md:w-full max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-none max-md:overflow-y-auto",
         )}
         {...props}
       >

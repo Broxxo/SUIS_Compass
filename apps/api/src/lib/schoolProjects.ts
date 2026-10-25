@@ -4,6 +4,7 @@ import { createRunOnce } from './runOnce.js';
 const ensureOnce = createRunOnce();
 
 export type ProjectStatus = 'active' | 'done' | 'paused';
+export type ProjectVisibility = 'all' | 'members';
 
 export type ProjectOwner = { id: string; name: string };
 
@@ -25,11 +26,13 @@ export type SchoolProject = {
   title: string;
   summary: string;
   status: ProjectStatus;
+  visibility: ProjectVisibility;
   startDate: string | null;
   endDate: string | null;
-  lead: ProjectOwner | null;
+  leads: ProjectOwner[];
   participants: ProjectOwner[];
   canEditProject: boolean;
+  canManageLeads: boolean;
   canEditItems: boolean;
   sortOrder: number;
   items: SchoolProjectItem[];
@@ -41,8 +44,10 @@ type ProjectInput = {
   title: string;
   summary: string;
   status: ProjectStatus;
+  visibility: ProjectVisibility;
   startDate: string | null;
   endDate: string | null;
+  leadIds: string[] | null;
   participantIds: string[];
 };
 
@@ -91,6 +96,10 @@ function asStatus(raw: unknown): ProjectStatus {
   return raw === 'done' || raw === 'paused' ? raw : 'active';
 }
 
+function asVisibility(raw: unknown): ProjectVisibility {
+  return raw === 'members' ? 'members' : 'all';
+}
+
 function asDate(raw: unknown): string | null {
   const text = String(raw ?? '').trim();
   if (!text) return null;
@@ -102,14 +111,26 @@ function asDate(raw: unknown): string | null {
   return text;
 }
 
-function asOwnerIds(raw: unknown): string[] {
+function asOwnerIds(raw: unknown, max = 12): string[] {
   if (!Array.isArray(raw)) return [];
   const ids = [...new Set(raw.map((id) => String(id ?? '').trim()).filter(Boolean))];
-  if (ids.length > 12) {
+  if (ids.length > max) {
     const error = new Error('too_many_owners') as Error & { status?: number };
     error.status = 400;
     throw error;
   }
+  return ids;
+}
+
+function asLeadIds(raw: unknown): string[] | null {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) {
+    const error = new Error('invalid_leads') as Error & { status?: number };
+    error.status = 400;
+    throw error;
+  }
+  const ids = [...new Set(raw.map((id) => String(id ?? '').trim()).filter(Boolean))];
+  if (ids.length === 0) return null;
   return ids;
 }
 
@@ -138,8 +159,10 @@ export function parseProjectInput(body: unknown): ProjectInput {
     title,
     summary,
     status: asStatus(rec.status),
+    visibility: asVisibility(rec.visibility),
     startDate,
     endDate,
+    leadIds: asLeadIds(rec.leadIds),
     participantIds: asOwnerIds(rec.participantIds),
   };
 }
@@ -191,9 +214,7 @@ async function assertItemOwners(projectId: string, ownerIds: string[], keptIds: 
   await assertOwners(ownerIds);
   const access = await projectAccess(projectId);
   if (!access) reject('not_found', 404);
-  const allowed = new Set(access.participantIds);
-  if (access.leadId) allowed.add(access.leadId);
-  for (const id of keptIds) allowed.add(id);
+  const allowed = new Set([...access.leadIds, ...access.participantIds, ...keptIds]);
   if (ownerIds.some((id) => !allowed.has(id))) reject('owner_not_member', 400);
 }
 
@@ -244,6 +265,14 @@ export async function ensureSchoolProjectTables(): Promise<void> {
         ADD COLUMN IF NOT EXISTS participant_ids JSONB NOT NULL DEFAULT '[]'::jsonb
     `);
     await pool.query(`
+      ALTER TABLE school_projects
+        ADD COLUMN IF NOT EXISTS lead_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+    `);
+    await pool.query(`
+      ALTER TABLE school_projects
+        ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'all'
+    `);
+    await pool.query(`
       UPDATE school_projects
       SET lead_id = created_by
       WHERE lead_id IS NULL AND created_by IS NOT NULL
@@ -258,14 +287,28 @@ export async function ensureSchoolProjectTables(): Promise<void> {
       )
       WHERE lead_id IS NULL
     `);
+    await pool.query(`
+      UPDATE school_projects
+      SET lead_ids = jsonb_build_array(lead_id)
+      WHERE (lead_ids IS NULL OR lead_ids = '[]'::jsonb) AND lead_id IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE school_projects
+      SET visibility = 'all'
+      WHERE visibility IS NULL OR visibility NOT IN ('all', 'members')
+    `);
     const count = (await pool.query(`SELECT COUNT(*)::int AS n FROM school_projects`)).rows[0] as { n: number };
     if (Number(count.n) > 0) return;
     const projectId = 'spj-curriculum-guide';
     await pool.query(
       `INSERT INTO school_projects
-         (id, title, summary, status, start_date, end_date, owner_ids, participant_ids, lead_id, sort_order)
+         (id, title, summary, status, visibility, start_date, end_date, owner_ids, participant_ids, lead_ids, lead_id, sort_order)
        VALUES (
-         $1, $2, $3, 'active', '2026-09-01', '2027-06-30', '[]'::jsonb, '[]'::jsonb,
+         $1, $2, $3, 'active', 'all', '2026-09-01', '2027-06-30', '[]'::jsonb, '[]'::jsonb,
+         COALESCE(
+           (SELECT jsonb_build_array(id) FROM users WHERE role = 'system-admin' ORDER BY created_at ASC NULLS LAST, id ASC LIMIT 1),
+           '[]'::jsonb
+         ),
          (SELECT id FROM users WHERE role = 'system-admin' ORDER BY created_at ASC NULLS LAST, id ASC LIMIT 1),
          0
        )`,
@@ -303,25 +346,56 @@ function dateText(raw: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
 }
 
-type ProjectAccess = { leadId: string | null; participantIds: string[] };
+type ProjectAccess = { leadIds: string[]; participantIds: string[]; visibility: ProjectVisibility };
 
 async function projectAccess(projectId: string): Promise<ProjectAccess | null> {
   const row = (
-    await pool.query(`SELECT lead_id, participant_ids FROM school_projects WHERE id = $1`, [projectId])
-  ).rows[0] as { lead_id: string | null; participant_ids: unknown } | undefined;
+    await pool.query(`SELECT lead_id, lead_ids, participant_ids, visibility FROM school_projects WHERE id = $1`, [
+      projectId,
+    ])
+  ).rows[0] as
+    | { lead_id: string | null; lead_ids: unknown; participant_ids: unknown; visibility: unknown }
+    | undefined;
   if (!row) return null;
-  return { leadId: row.lead_id, participantIds: parseIds(row.participant_ids) };
+  let leadIds = parseIds(row.lead_ids);
+  if (leadIds.length === 0 && row.lead_id) leadIds = [row.lead_id];
+  return {
+    leadIds,
+    participantIds: parseIds(row.participant_ids),
+    visibility: asVisibility(row.visibility),
+  };
+}
+
+export async function userIsSchoolAdmin(userId: string): Promise<boolean> {
+  const role = (
+    await pool.query(`SELECT role FROM users WHERE id = $1`, [userId])
+  ).rows[0] as { role?: string } | undefined;
+  return role?.role === 'system-admin' || role?.role === 'admin';
 }
 
 export async function userLeadsProject(projectId: string, userId: string): Promise<boolean> {
   const access = await projectAccess(projectId);
-  return access?.leadId === userId;
+  return Boolean(access?.leadIds.includes(userId));
+}
+
+export async function userCanEditProject(projectId: string, userId: string): Promise<boolean> {
+  if (await userIsSchoolAdmin(userId)) return true;
+  return userLeadsProject(projectId, userId);
 }
 
 export async function userCanEditItems(projectId: string, userId: string): Promise<boolean> {
+  if (await userIsSchoolAdmin(userId)) return true;
   const access = await projectAccess(projectId);
   if (!access) return false;
-  return access.leadId === userId || access.participantIds.includes(userId);
+  return access.leadIds.includes(userId) || access.participantIds.includes(userId);
+}
+
+export async function userCanViewProject(projectId: string, userId: string): Promise<boolean> {
+  const access = await projectAccess(projectId);
+  if (!access) return false;
+  if (await userIsSchoolAdmin(userId)) return true;
+  if (access.visibility === 'all') return true;
+  return access.leadIds.includes(userId) || access.participantIds.includes(userId);
 }
 
 export async function listProjectStaff(): Promise<ProjectStaff[]> {
@@ -340,19 +414,17 @@ export async function listProjectStaff(): Promise<ProjectStaff[]> {
 
 export async function listSchoolProjects(userId: string): Promise<SchoolProject[]> {
   await ensureSchoolProjectTables();
+  const isAdmin = await userIsSchoolAdmin(userId);
   const staff = await listProjectStaff();
   const byId = new Map(staff.map((person) => [person.id, person]));
   const peopleOf = (raw: unknown): ProjectOwner[] =>
     parseIds(raw).map((id) => byId.get(id) ?? { id, name: id });
-  const personOf = (id: unknown): ProjectOwner | null => {
-    const text = String(id ?? '').trim();
-    if (!text) return null;
-    return byId.get(text) ?? { id: text, name: text };
-  };
+  const peopleFromIds = (ids: string[]): ProjectOwner[] =>
+    ids.map((id) => byId.get(id) ?? { id, name: id });
 
   const projects = (
     await pool.query(
-      `SELECT id, title, summary, status, start_date, end_date, lead_id, participant_ids, sort_order
+      `SELECT id, title, summary, status, visibility, start_date, end_date, lead_id, lead_ids, participant_ids, sort_order
        FROM school_projects
        ORDER BY sort_order ASC, created_at ASC`,
     )
@@ -382,70 +454,135 @@ export async function listSchoolProjects(userId: string): Promise<SchoolProject[
     });
     itemsByProject.set(projectId, list);
   }
-  return projects.map((row) => {
-    const lead = personOf(row.lead_id);
-    const participants = peopleOf(row.participant_ids).filter((person) => person.id !== lead?.id);
-    const canEditProject = lead?.id === userId;
-    return {
+
+  const result: SchoolProject[] = [];
+  for (const row of projects) {
+    let leadIds = parseIds(row.lead_ids);
+    if (leadIds.length === 0) {
+      const legacy = String(row.lead_id ?? '').trim();
+      if (legacy) leadIds = [legacy];
+    }
+    const leads = peopleFromIds(leadIds);
+    const leadIdSet = new Set(leadIds);
+    const participants = peopleOf(row.participant_ids).filter((person) => !leadIdSet.has(person.id));
+    const visibility = asVisibility(row.visibility);
+    const member = leadIdSet.has(userId) || participants.some((person) => person.id === userId);
+    if (!isAdmin && visibility === 'members' && !member) continue;
+
+    const canManageLeads = isAdmin;
+    const canEditProject = isAdmin || leadIdSet.has(userId);
+    result.push({
       id: String(row.id),
       title: String(row.title),
       summary: String(row.summary ?? ''),
       status: asStatus(row.status),
+      visibility,
       startDate: dateText(row.start_date),
       endDate: dateText(row.end_date),
-      lead,
+      leads,
       participants,
       canEditProject,
+      canManageLeads,
       canEditItems: canEditProject || participants.some((person) => person.id === userId),
       sortOrder: Number(row.sort_order ?? 0),
       items: itemsByProject.get(String(row.id)) ?? [],
-    };
-  });
+    });
+  }
+  return result;
+}
+
+async function resolveLeadIdsForWrite(
+  userId: string,
+  isAdmin: boolean,
+  requested: string[] | null,
+  fallback: string[],
+): Promise<string[]> {
+  if (isAdmin && requested) {
+    await assertOwners(requested);
+    return requested;
+  }
+  if (fallback.length > 0) return fallback;
+  return [userId];
 }
 
 export async function createSchoolProject(userId: string, input: ProjectInput): Promise<void> {
   await ensureSchoolProjectTables();
-  const participantIds = input.participantIds.filter((id) => id !== userId);
+  const isAdmin = await userIsSchoolAdmin(userId);
+  const leadIds = await resolveLeadIdsForWrite(userId, isAdmin, isAdmin ? input.leadIds : null, [userId]);
+  const leadSet = new Set(leadIds);
+  const participantIds = input.participantIds.filter((id) => !leadSet.has(id));
   await assertOwners(participantIds);
   const sort = (await pool.query(`SELECT COALESCE(MAX(sort_order), -1)::int AS n FROM school_projects`)).rows[0] as {
     n: number;
   };
   await pool.query(
     `INSERT INTO school_projects
-       (id, title, summary, status, start_date, end_date, lead_id, participant_ids, sort_order, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $7, $7)`,
+       (id, title, summary, status, visibility, start_date, end_date, lead_id, lead_ids, participant_ids, sort_order, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $12)`,
     [
       newId('spj'),
       input.title,
       input.summary,
       input.status,
+      input.visibility,
       input.startDate,
       input.endDate,
-      userId,
+      leadIds[0] ?? userId,
+      JSON.stringify(leadIds),
       JSON.stringify(participantIds),
       Number(sort.n) + 1,
+      userId,
     ],
   );
 }
 
 export async function updateSchoolProject(projectId: string, userId: string, input: ProjectInput): Promise<boolean> {
   await ensureSchoolProjectTables();
-  if (!(await userLeadsProject(projectId, userId))) return false;
-  const participantIds = input.participantIds.filter((id) => id !== userId);
+  if (!(await userCanEditProject(projectId, userId))) return false;
+  const access = await projectAccess(projectId);
+  if (!access) return false;
+  const isAdmin = await userIsSchoolAdmin(userId);
+  const leadIds = await resolveLeadIdsForWrite(
+    userId,
+    isAdmin,
+    isAdmin ? input.leadIds : null,
+    access.leadIds,
+  );
+  const leadSet = new Set(leadIds);
+  const participantIds = input.participantIds.filter((id) => !leadSet.has(id));
   await assertOwners(participantIds);
   const result = await pool.query(
     `UPDATE school_projects
-     SET title = $2, summary = $3, status = $4, start_date = $5, end_date = $6,
-         participant_ids = $7::jsonb, updated_by = $8, updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1 AND lead_id = $8`,
-    [projectId, input.title, input.summary, input.status, input.startDate, input.endDate, JSON.stringify(participantIds), userId],
+     SET title = $2, summary = $3, status = $4, visibility = $5, start_date = $6, end_date = $7,
+         lead_id = $8, lead_ids = $9::jsonb, participant_ids = $10::jsonb,
+         updated_by = $11, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [
+      projectId,
+      input.title,
+      input.summary,
+      input.status,
+      input.visibility,
+      input.startDate,
+      input.endDate,
+      leadIds[0] ?? null,
+      JSON.stringify(leadIds),
+      JSON.stringify(participantIds),
+      userId,
+    ],
   );
   return (result.rowCount ?? 0) > 0;
 }
 
 export async function deleteSchoolProject(projectId: string, userId: string): Promise<boolean> {
   await ensureSchoolProjectTables();
-  const result = await pool.query(`DELETE FROM school_projects WHERE id = $1 AND lead_id = $2`, [projectId, userId]);
+  if (!(await userCanEditProject(projectId, userId))) return false;
+  const { listEntityFiles, deleteStoredFile, PROJECT_MODULE_KEY } = await import('./storedFiles.js');
+  const assets = await listEntityFiles(PROJECT_MODULE_KEY, projectId);
+  for (const asset of assets) {
+    await deleteStoredFile(asset.id);
+  }
+  const result = await pool.query(`DELETE FROM school_projects WHERE id = $1`, [projectId]);
   return (result.rowCount ?? 0) > 0;
 }
 

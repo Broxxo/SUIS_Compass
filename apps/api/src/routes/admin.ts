@@ -740,6 +740,70 @@ async function requireAdmin(req: AuthedRequest, res: Response, next: NextFunctio
 
 router.use(requireAdmin);
 
+// 全站上传文件管理：仅 system-admin
+router.get('/stored-files', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const { listAllStoredFilesForAdmin } = await import('../lib/storedFiles.js');
+    const files = await listAllStoredFilesForAdmin();
+    return res.json({ files });
+  } catch (error) {
+    console.error('List stored files error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/stored-files/:fileId/file', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const { getStoredFile, absolutePathForStoredFile } = await import('../lib/storedFiles.js');
+    const fs = await import('fs');
+    const file = await getStoredFile(String(req.params.fileId ?? '').trim());
+    if (!file) return res.status(404).json({ error: 'not_found' });
+    if (file.kind === 'text') {
+      return res.json({
+        id: file.id,
+        kind: file.kind,
+        title: file.title,
+        bodyText: file.bodyText,
+      });
+    }
+    const abs = absolutePathForStoredFile(file);
+    if (!abs || !fs.existsSync(abs)) return res.status(404).json({ error: 'file_missing' });
+    res.setHeader('Content-Type', file.mimeType || 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename*=UTF-8''${encodeURIComponent(file.originalName || 'document.pdf')}`,
+    );
+    return fs.createReadStream(abs).pipe(res);
+  } catch (error) {
+    console.error('Get stored file error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/stored-files/:fileId', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const { deleteStoredFile, listAllStoredFilesForAdmin } = await import('../lib/storedFiles.js');
+    const ok = await deleteStoredFile(String(req.params.fileId ?? '').trim());
+    if (!ok) return res.status(404).json({ error: 'not_found' });
+    return res.json({ files: await listAllStoredFilesForAdmin() });
+  } catch (error) {
+    console.error('Delete stored file error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // 数据库浏览（只读）：仅 system-admin 可见
 router.get('/database/tables', async (req: AuthedRequest, res: Response) => {
   try {

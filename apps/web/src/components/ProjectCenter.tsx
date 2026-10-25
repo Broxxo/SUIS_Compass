@@ -17,18 +17,22 @@ import {
   type ProjectDraft,
   type ProjectPerson,
   type ProjectStatus,
+  type ProjectVisibility,
   type SchoolProject,
   type SchoolProjectItem,
 } from '../lib/schoolProjectsApi';
 import MultiSelectPersonGrid from './MultiSelectPersonGrid';
+import ProjectPreviewSection from './ProjectPreviewSection';
 
 const EMPTY_DRAFT: ProjectDraft = {
   title: '',
   summary: '',
   groupLabel: '',
   status: 'active',
+  visibility: 'all',
   startDate: '',
   endDate: '',
+  leadIds: [],
   ownerIds: [],
   participantIds: [],
 };
@@ -43,6 +47,29 @@ function statusClass(status: ProjectStatus): string {
   if (status === 'done') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
   if (status === 'paused') return 'bg-amber-50 text-amber-800 ring-amber-200';
   return 'bg-sky-50 text-sky-800 ring-sky-200';
+}
+
+function visibilityLabel(visibility: ProjectVisibility, isZh: boolean): string {
+  return visibility === 'members'
+    ? isZh
+      ? '仅负责人可见'
+      : 'Leads only'
+    : isZh
+      ? '全员可见'
+      : 'Everyone';
+}
+
+/** 总负责人在前，其余负责人随后，去重后同一行展示 */
+function projectPeopleLine(project: Pick<SchoolProject, 'leads' | 'participants'>, isZh: boolean): string {
+  const seen = new Set<string>();
+  const people: ProjectPerson[] = [];
+  for (const person of [...project.leads, ...project.participants]) {
+    if (seen.has(person.id)) continue;
+    seen.add(person.id);
+    people.push(person);
+  }
+  if (people.length === 0) return isZh ? '负责人待定' : 'No leads yet';
+  return `${isZh ? '负责人' : 'Leads'}：${people.map((person) => person.name).join(isZh ? '、' : ', ')}`;
 }
 
 function periodText(start: string | null, end: string | null, isZh: boolean): string {
@@ -68,8 +95,10 @@ function draftFromProject(project: SchoolProject): ProjectDraft {
     title: project.title,
     summary: project.summary,
     status: project.status,
+    visibility: project.visibility ?? 'all',
     startDate: project.startDate ?? '',
     endDate: project.endDate ?? '',
+    leadIds: project.leads.map((person) => person.id),
     participantIds: project.participants.map((person) => person.id),
     ownerIds: [],
   };
@@ -89,7 +118,7 @@ function draftFromItem(item: SchoolProjectItem): ProjectDraft {
 }
 
 type Editor =
-  | { kind: 'project'; projectId: string | null; draft: ProjectDraft }
+  | { kind: 'project'; projectId: string | null; draft: ProjectDraft; canManageLeads: boolean }
   | { kind: 'item'; projectId: string; itemId: string | null; draft: ProjectDraft };
 
 export default function ProjectCenter({
@@ -104,6 +133,7 @@ export default function ProjectCenter({
   const { language } = useLanguage();
   const { user } = useAuth();
   const isZh = language === 'zh';
+  const isAdmin = user?.role === 'admin' || user?.role === 'system-admin';
   const [projects, setProjects] = useState<SchoolProject[]>([]);
   const [staff, setStaff] = useState<ProjectPerson[]>([]);
   const [openIds, setOpenIds] = useState<string[]>([]);
@@ -112,6 +142,9 @@ export default function ProjectCenter({
   const [editor, setEditor] = useState<Editor | null>(null);
   const [saving, setSaving] = useState(false);
   const [ownerQuery, setOwnerQuery] = useState('');
+  const [personPick, setPersonPick] = useState<'leads' | 'participants' | 'owners'>('participants');
+  const [customGroup, setCustomGroup] = useState(false);
+  const [previewRevision, setPreviewRevision] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,11 +170,18 @@ export default function ProjectCenter({
     const q = ownerQuery.trim().toLowerCase();
     let source = staff;
     if (editor?.kind === 'project') {
-      source = staff.filter((person) => person.id !== user?.id);
+      if (personPick === 'leads') {
+        source = staff;
+      } else {
+        const leadIds = new Set(editor.draft.leadIds);
+        source = staff.filter((person) => !leadIds.has(person.id));
+      }
     } else if (editor?.kind === 'item') {
       const project = projects.find((item) => item.id === editor.projectId);
       const members: ProjectPerson[] = [];
-      if (project?.lead) members.push(project.lead);
+      for (const person of project?.leads ?? []) {
+        if (!members.some((member) => member.id === person.id)) members.push(person);
+      }
       for (const person of project?.participants ?? []) {
         if (!members.some((member) => member.id === person.id)) members.push(person);
       }
@@ -156,7 +196,18 @@ export default function ProjectCenter({
     }
     if (!q) return source;
     return source.filter((person) => person.name.toLowerCase().includes(q));
-  }, [editor, ownerQuery, projects, staff, user?.id]);
+  }, [editor, ownerQuery, personPick, projects, staff]);
+
+  const existingGroups = useMemo(() => {
+    if (editor?.kind !== 'item') return [] as string[];
+    const project = projects.find((item) => item.id === editor.projectId);
+    const labels: string[] = [];
+    for (const item of project?.items ?? []) {
+      const label = String(item.groupLabel ?? '').trim();
+      if (label && !labels.includes(label)) labels.push(label);
+    }
+    return labels;
+  }, [editor, projects]);
 
   const applyProjects = (next: SchoolProject[]) => {
     setProjects(next);
@@ -165,6 +216,10 @@ export default function ProjectCenter({
 
   const saveEditor = async () => {
     if (!editor || !editor.draft.title.trim()) return;
+    if (editor.kind === 'project' && editor.canManageLeads && editor.draft.leadIds.length === 0) {
+      setError(isZh ? '请至少选择一位总负责人' : 'Choose at least one chief lead');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -186,8 +241,8 @@ export default function ProjectCenter({
       setError(
         code === 'owner_not_member'
           ? isZh
-            ? '子项目负责人只能从项目负责人和参与人里选'
-            : 'Subproject owners must be the project lead or a participant'
+            ? '子项目负责人必须是总负责人或负责人'
+            : 'Subproject owners must be a chief lead or a project lead'
           : code || (isZh ? '保存失败' : 'Save failed'),
       );
     } finally {
@@ -219,10 +274,27 @@ export default function ProjectCenter({
   const togglePerson = (id: string) => {
     setEditor((current) => {
       if (!current) return current;
-      const key = current.kind === 'project' ? 'participantIds' : 'ownerIds';
-      const selected = current.draft[key];
+      if (current.kind === 'item') {
+        const selected = current.draft.ownerIds;
+        const next = selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
+        return { ...current, draft: { ...current.draft, ownerIds: next } };
+      }
+      if (personPick === 'leads') {
+        const selected = current.draft.leadIds;
+        const next = selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
+        const leadSet = new Set(next);
+        return {
+          ...current,
+          draft: {
+            ...current.draft,
+            leadIds: next,
+            participantIds: current.draft.participantIds.filter((pid) => !leadSet.has(pid)),
+          },
+        };
+      }
+      const selected = current.draft.participantIds;
       const next = selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
-      return { ...current, draft: { ...current.draft, [key]: next } };
+      return { ...current, draft: { ...current.draft, participantIds: next } };
     });
   };
 
@@ -235,6 +307,20 @@ export default function ProjectCenter({
     }
   };
 
+  const openNewProject = () => {
+    setOwnerQuery('');
+    setPersonPick(isAdmin ? 'leads' : 'participants');
+    setEditor({
+      kind: 'project',
+      projectId: null,
+      canManageLeads: Boolean(isAdmin),
+      draft: {
+        ...EMPTY_DRAFT,
+        leadIds: isAdmin && user?.id ? [user.id] : user?.id ? [user.id] : [],
+      },
+    });
+  };
+
   return (
     <div className="min-h-dvh bg-slate-50 pt-[var(--app-topbar-height)]">
       <AppTopBar
@@ -244,14 +330,7 @@ export default function ProjectCenter({
         onToggleAI={onToggleAI}
         isAIOpen={isAIOpen}
         rightChildren={
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => {
-              setOwnerQuery('');
-              setEditor({ kind: 'project', projectId: null, draft: { ...EMPTY_DRAFT } });
-            }}
-          >
+          <Button type="button" size="sm" onClick={openNewProject}>
             <Plus className="mr-1 h-4 w-4" />
             {isZh ? '新建项目' : 'New project'}
           </Button>
@@ -262,7 +341,7 @@ export default function ProjectCenter({
         {error ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
         {loading ? <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p> : null}
         {!loading && projects.length === 0 ? (
-          <p className="text-sm text-slate-500">{isZh ? '还没有项目。' : 'No projects yet.'}</p>
+          <p className="text-sm text-slate-500">{isZh ? '还没有可见的项目。' : 'No visible projects yet.'}</p>
         ) : null}
 
         {projects.map((project) => {
@@ -290,12 +369,11 @@ export default function ProjectCenter({
                     <span className={`rounded-full px-2 py-0.5 text-xs ring-1 ${statusClass(project.status)}`}>
                       {statusLabel(project.status, isZh)}
                     </span>
+                    <span className="rounded-full bg-slate-50 px-2 py-0.5 text-xs text-slate-600 ring-1 ring-slate-200">
+                      {visibilityLabel(project.visibility ?? 'all', isZh)}
+                    </span>
                   </div>
-                  <p className="mt-1 text-sm text-slate-600">
-                    {isZh ? '项目负责人' : 'Project lead'}：{project.lead?.name || (isZh ? '待定' : 'Unassigned')}
-                    {' · '}
-                    {isZh ? '参与人' : 'Participants'}：{namesOf(project.participants, isZh)}
-                  </p>
+                  <p className="mt-1 text-sm text-slate-600">{projectPeopleLine(project, isZh)}</p>
                   {project.summary ? <p className="mt-1 text-sm leading-6 text-slate-500">{project.summary}</p> : null}
                   <div className="mt-3 flex items-center gap-3">
                     <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-100">
@@ -313,6 +391,12 @@ export default function ProjectCenter({
 
               {open ? (
                 <div className="border-t border-slate-100 px-4 py-3">
+                  <ProjectPreviewSection
+                    projectId={project.id}
+                    mode="view"
+                    isZh={isZh}
+                    revision={previewRevision}
+                  />
                   {project.canEditProject || project.canEditItems ? (
                     <div className="mb-3 flex justify-end gap-2">
                       {project.canEditProject ? (
@@ -322,7 +406,13 @@ export default function ProjectCenter({
                           size="sm"
                           onClick={() => {
                             setOwnerQuery('');
-                            setEditor({ kind: 'project', projectId: project.id, draft: draftFromProject(project) });
+                            setPersonPick(project.canManageLeads ? 'leads' : 'participants');
+                            setEditor({
+                              kind: 'project',
+                              projectId: project.id,
+                              canManageLeads: project.canManageLeads,
+                              draft: draftFromProject(project),
+                            });
                           }}
                         >
                           {isZh ? '编辑项目' : 'Edit project'}
@@ -334,11 +424,17 @@ export default function ProjectCenter({
                           size="sm"
                           onClick={() => {
                             setOwnerQuery('');
+                            setPersonPick('owners');
+                            setCustomGroup(false);
                             setEditor({
                               kind: 'item',
                               projectId: project.id,
                               itemId: null,
-                              draft: { ...EMPTY_DRAFT, ownerIds: user?.id ? [user.id] : [], groupLabel: groups[0]?.label ?? '' },
+                              draft: {
+                                ...EMPTY_DRAFT,
+                                ownerIds: user?.id ? [user.id] : [],
+                                groupLabel: groups[0]?.label ?? '',
+                              },
                             });
                           }}
                         >
@@ -363,6 +459,9 @@ export default function ProjectCenter({
                                 onClick={() => {
                                   if (!project.canEditItems) return;
                                   setOwnerQuery('');
+                                  setPersonPick('owners');
+                                  const label = String(item.groupLabel ?? '').trim();
+                                  setCustomGroup(Boolean(label) && !groups.some((entry) => entry.label === label));
                                   setEditor({
                                     kind: 'item',
                                     projectId: project.id,
@@ -436,16 +535,60 @@ export default function ProjectCenter({
                 />
               </label>
               {editor.kind === 'item' ? (
-                <label className="block text-sm">
+                <div className="space-y-2 text-sm">
                   <span className="mb-1 block text-slate-600">{isZh ? '分组' : 'Group'}</span>
-                  <input
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                    value={editor.draft.groupLabel ?? ''}
-                    onChange={(event) =>
-                      setEditor({ ...editor, draft: { ...editor.draft, groupLabel: event.target.value } })
-                    }
-                  />
-                </label>
+                  {(() => {
+                    const currentGroup = String(editor.draft.groupLabel ?? '').trim();
+                    const pickingCustom =
+                      customGroup || (Boolean(currentGroup) && !existingGroups.includes(currentGroup));
+                    return (
+                      <>
+                        <select
+                          className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                          value={pickingCustom ? '__custom__' : currentGroup}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            if (value === '__custom__') {
+                              setCustomGroup(true);
+                              setEditor({
+                                ...editor,
+                                draft: {
+                                  ...editor.draft,
+                                  groupLabel: existingGroups.includes(currentGroup) ? '' : editor.draft.groupLabel,
+                                },
+                              });
+                              return;
+                            }
+                            setCustomGroup(false);
+                            setEditor({ ...editor, draft: { ...editor.draft, groupLabel: value } });
+                          }}
+                        >
+                          <option value="">{isZh ? '未分组' : 'Ungrouped'}</option>
+                          {existingGroups.map((label) => (
+                            <option key={label} value={label}>
+                              {label}
+                            </option>
+                          ))}
+                          <option value="__custom__">{isZh ? '新建分组…' : 'New group…'}</option>
+                        </select>
+                        {pickingCustom ? (
+                          <input
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                            placeholder={isZh ? '输入新分组名称' : 'New group name'}
+                            value={editor.draft.groupLabel ?? ''}
+                            onChange={(event) => {
+                              setCustomGroup(true);
+                              setEditor({
+                                ...editor,
+                                draft: { ...editor.draft, groupLabel: event.target.value },
+                              });
+                            }}
+                          />
+                        ) : null}
+                      </>
+                    );
+                  })()}
+                </div>
               ) : null}
               <label className="block text-sm">
                 <span className="mb-1 block text-slate-600">{isZh ? '说明' : 'Notes'}</span>
@@ -474,6 +617,24 @@ export default function ProjectCenter({
                   <option value="done">{statusLabel('done', isZh)}</option>
                 </select>
               </label>
+              {editor.kind === 'project' ? (
+                <label className="block text-sm">
+                  <span className="mb-1 block text-slate-600">{isZh ? '可见范围' : 'Visibility'}</span>
+                  <select
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    value={editor.draft.visibility}
+                    onChange={(event) =>
+                      setEditor({
+                        ...editor,
+                        draft: { ...editor.draft, visibility: event.target.value as ProjectVisibility },
+                      })
+                    }
+                  >
+                    <option value="all">{visibilityLabel('all', isZh)}</option>
+                    <option value="members">{visibilityLabel('members', isZh)}</option>
+                  </select>
+                </label>
+              ) : null}
               <div className="grid grid-cols-2 gap-3">
                 <label className="block text-sm">
                   <span className="mb-1 block text-slate-600">{isZh ? '开始' : 'Start'}</span>
@@ -498,38 +659,102 @@ export default function ProjectCenter({
                   />
                 </label>
               </div>
-              {editor.kind === 'project' ? (
-                <p className="text-sm text-slate-600">
-                  {isZh ? '项目负责人' : 'Project lead'}：
-                  {(editor.projectId
-                    ? projects.find((project) => project.id === editor.projectId)?.lead?.name
-                    : user?.displayName || user?.username) || (isZh ? '当前用户' : 'You')}
-                </p>
+              {editor.kind === 'project' && editor.projectId ? (
+                <ProjectPreviewSection
+                  projectId={editor.projectId}
+                  mode="edit"
+                  isZh={isZh}
+                  revision={previewRevision}
+                  onChanged={() => setPreviewRevision((n) => n + 1)}
+                />
               ) : null}
-              <div>
-                <div className="mb-1 text-sm text-slate-600">
-                  {editor.kind === 'project'
-                    ? isZh
-                      ? '参与人（可多选）'
-                      : 'Participants'
-                    : isZh
-                      ? '负责人（从项目负责人和参与人中选）'
-                      : 'Owners (project lead and participants)'}
+              {editor.kind === 'project' ? (
+                editor.canManageLeads ? (
+                  <div>
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={personPick === 'leads' ? 'default' : 'outline'}
+                        onClick={() => setPersonPick('leads')}
+                      >
+                        {isZh ? `总负责人（${editor.draft.leadIds.length}）` : `Chief (${editor.draft.leadIds.length})`}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={personPick === 'participants' ? 'default' : 'outline'}
+                        onClick={() => setPersonPick('participants')}
+                      >
+                        {isZh
+                          ? `负责人（${editor.draft.participantIds.length}）`
+                          : `Leads (${editor.draft.participantIds.length})`}
+                      </Button>
+                    </div>
+                    <input
+                      className="mb-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      placeholder={isZh ? '搜索姓名' : 'Search names'}
+                      value={ownerQuery}
+                      onChange={(event) => setOwnerQuery(event.target.value)}
+                    />
+                    <MultiSelectPersonGrid
+                      people={filteredStaff}
+                      selectedIds={personPick === 'leads' ? editor.draft.leadIds : editor.draft.participantIds}
+                      onToggle={togglePerson}
+                      getLabel={(person) => person.name}
+                      emptyLabel={isZh ? '没有匹配的人' : 'No matches'}
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <p className="mb-2 text-sm text-slate-600">
+                      {isZh ? '总负责人' : 'Chief leads'}：
+                      {namesOf(
+                        editor.draft.leadIds
+                          .map((id) => staff.find((person) => person.id === id) ?? { id, name: id })
+                          .filter(Boolean),
+                        isZh,
+                      )}
+                      <span className="ml-1 text-xs text-slate-400">
+                        {isZh ? '（由管理员调整）' : '(set by admins)'}
+                      </span>
+                    </p>
+                    <div className="mb-1 text-sm text-slate-600">{isZh ? '负责人（可多选）' : 'Leads'}</div>
+                    <input
+                      className="mb-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      placeholder={isZh ? '搜索姓名' : 'Search names'}
+                      value={ownerQuery}
+                      onChange={(event) => setOwnerQuery(event.target.value)}
+                    />
+                    <MultiSelectPersonGrid
+                      people={filteredStaff}
+                      selectedIds={editor.draft.participantIds}
+                      onToggle={togglePerson}
+                      getLabel={(person) => person.name}
+                      emptyLabel={isZh ? '没有匹配的人' : 'No matches'}
+                    />
+                  </div>
+                )
+              ) : (
+                <div>
+                  <div className="mb-1 text-sm text-slate-600">
+                    {isZh ? '子项目负责人' : 'Subproject owners'}
+                  </div>
+                  <input
+                    className="mb-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    placeholder={isZh ? '搜索姓名' : 'Search names'}
+                    value={ownerQuery}
+                    onChange={(event) => setOwnerQuery(event.target.value)}
+                  />
+                  <MultiSelectPersonGrid
+                    people={filteredStaff}
+                    selectedIds={editor.draft.ownerIds}
+                    onToggle={togglePerson}
+                    getLabel={(person) => person.name}
+                    emptyLabel={isZh ? '没有匹配的人' : 'No matches'}
+                  />
                 </div>
-                <input
-                  className="mb-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  placeholder={isZh ? '搜索姓名' : 'Search names'}
-                  value={ownerQuery}
-                  onChange={(event) => setOwnerQuery(event.target.value)}
-                />
-                <MultiSelectPersonGrid
-                  people={filteredStaff}
-                  selectedIds={editor.kind === 'project' ? editor.draft.participantIds : editor.draft.ownerIds}
-                  onToggle={togglePerson}
-                  getLabel={(person) => person.name}
-                  emptyLabel={isZh ? '没有匹配的人' : 'No matches'}
-                />
-              </div>
+              )}
             </div>
           ) : null}
           <DialogFooter className="gap-2 sm:justify-between">

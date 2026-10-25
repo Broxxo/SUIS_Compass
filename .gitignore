@@ -33,3 +33,6 @@ start-local-test.command
 
 # API static frontend build output (copied from apps/web/dist by npm run build)
 apps/api/public/
+
+# Local upload storage (Zeabur uses Volume at UPLOAD_DIR=/data/uploads)
+apps/api/uploads/

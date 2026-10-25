@@ -19,6 +19,7 @@ import lighthouseRoutes from './routes/lighthouse.js';
 import schoolProjectRoutes from './routes/schoolProjects.js';
 import { requireValidUser } from './middleware/requireUser.js';
 import { forbidStudentAccounts } from './middleware/forbidStudent.js';
+import { ensureUploadDir } from './lib/uploadDir.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -61,9 +62,12 @@ app.get('*', (req, res, next) => {
   });
 });
 
+const uploadDir = ensureUploadDir();
+
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Upload dir: ${uploadDir}${process.env.UPLOAD_DIR?.trim() ? ' (UPLOAD_DIR)' : ' (local default)'}`);
 });
 
 process.on('SIGTERM', () => {

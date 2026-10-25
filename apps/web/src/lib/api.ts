@@ -689,6 +689,95 @@ export const api = {
     }
   },
 
+  async getStoredFiles(): Promise<
+    Array<{
+      id: string;
+      moduleKey: string;
+      entityId: string;
+      kind: 'text' | 'pdf';
+      title: string;
+      bodyText: string;
+      originalName: string;
+      mimeType: string;
+      sizeBytes: number;
+      storagePath: string;
+      createdBy: string | null;
+      createdAt: string | null;
+      entityTitle?: string | null;
+      createdByName?: string | null;
+    }>
+  > {
+    const response = await fetch(apiUrl('/api/admin/stored-files'), { headers: getHeaders() });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to fetch stored files'));
+    }
+    const data = await readJsonOrThrow(response, 'Failed to fetch stored files');
+    return (data.files ?? []) as Array<{
+      id: string;
+      moduleKey: string;
+      entityId: string;
+      kind: 'text' | 'pdf';
+      title: string;
+      bodyText: string;
+      originalName: string;
+      mimeType: string;
+      sizeBytes: number;
+      storagePath: string;
+      createdBy: string | null;
+      createdAt: string | null;
+      entityTitle?: string | null;
+      createdByName?: string | null;
+    }>;
+  },
+
+  storedFileContentUrl(fileId: string): string {
+    return apiUrl(`/api/admin/stored-files/${encodeURIComponent(fileId)}/file`);
+  },
+
+  async deleteStoredFile(fileId: string): Promise<
+    Array<{
+      id: string;
+      moduleKey: string;
+      entityId: string;
+      kind: 'text' | 'pdf';
+      title: string;
+      bodyText: string;
+      originalName: string;
+      mimeType: string;
+      sizeBytes: number;
+      storagePath: string;
+      createdBy: string | null;
+      createdAt: string | null;
+      entityTitle?: string | null;
+      createdByName?: string | null;
+    }>
+  > {
+    const response = await fetch(apiUrl(`/api/admin/stored-files/${encodeURIComponent(fileId)}`), {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, 'Failed to delete stored file'));
+    }
+    const data = await readJsonOrThrow(response, 'Failed to delete stored file');
+    return (data.files ?? []) as Array<{
+      id: string;
+      moduleKey: string;
+      entityId: string;
+      kind: 'text' | 'pdf';
+      title: string;
+      bodyText: string;
+      originalName: string;
+      mimeType: string;
+      sizeBytes: number;
+      storagePath: string;
+      createdBy: string | null;
+      createdAt: string | null;
+      entityTitle?: string | null;
+      createdByName?: string | null;
+    }>;
+  },
+
   async getDatabaseTables(): Promise<Array<{ tableName: string; rowCount: number }>> {
     const response = await fetch(apiUrl('/api/admin/database/tables'), {
       headers: getHeaders(),

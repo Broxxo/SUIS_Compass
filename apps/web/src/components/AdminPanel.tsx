@@ -129,6 +129,7 @@ import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from './ui/segment
 import SelfStudyStaffingPanel from './admin/SelfStudyStaffingPanel';
 import ElectiveStaffingPanel from './admin/ElectiveStaffingPanel';
 import DatabaseSettingsPanel, { type DatabaseSubTab } from './admin/DatabaseSettingsPanel';
+import AdminStoredFilesPanel from './admin/AdminStoredFilesPanel';
 import ProgramDatabasePanel from './admin/ProgramDatabasePanel';
 import DingTalkApiPanel from './admin/DingTalkApiPanel';
 import DingTalkSyncDialog from './admin/DingTalkSyncDialog';
@@ -738,6 +739,7 @@ export default function AdminPanel({ onBackToHub, onOpenInbox, isAIOpen, onToggl
     | 'staffing'
     | 'report-settings'
     | 'teacher-portrait-settings'
+    | 'stored-files'
     | 'database'
   >('users');
   const [foundationSubTab, setFoundationSubTab] = useState<FoundationSubTab>('structure');
@@ -5660,6 +5662,7 @@ export default function AdminPanel({ onBackToHub, onOpenInbox, isAIOpen, onToggl
       staffing: { zh: '岗位编制', en: 'Staffing' },
       'report-settings': { zh: '学生中心', en: 'Student center' },
       'teacher-portrait-settings': { zh: '教师中心', en: 'Teacher center' },
+      'stored-files': { zh: '文件管理', en: 'Files' },
       database: { zh: '数据库', en: 'Database' },
     };
     const label = tabLabels[adminTab]?.[isZh ? 'zh' : 'en'] ?? adminTab;
@@ -5743,6 +5746,15 @@ export default function AdminPanel({ onBackToHub, onOpenInbox, isAIOpen, onToggl
           >
             {isZh ? '教师中心' : 'Teacher center'}
           </button>
+          {isSystemAdmin && (
+            <button
+              type="button"
+              onClick={() => { setAdminTab('stored-files'); setError(null); }}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${adminTab === 'stored-files' ? 'border-slate-800 text-slate-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            >
+              {isZh ? '文件管理' : 'Files'}
+            </button>
+          )}
           {isSystemAdmin && (
             <button
               type="button"
@@ -7459,6 +7471,8 @@ export default function AdminPanel({ onBackToHub, onOpenInbox, isAIOpen, onToggl
             />
           </section>
         )}
+
+        {adminTab === 'stored-files' && isSystemAdmin && <AdminStoredFilesPanel isZh={isZh} />}
 
         {adminTab === 'database' && isSystemAdmin && (
           <DatabaseSettingsPanel

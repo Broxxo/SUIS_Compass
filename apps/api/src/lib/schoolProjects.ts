@@ -505,7 +505,7 @@ async function resolveLeadIdsForWrite(
   return [userId];
 }
 
-export async function createSchoolProject(userId: string, input: ProjectInput): Promise<void> {
+export async function createSchoolProject(userId: string, input: ProjectInput): Promise<string> {
   await ensureSchoolProjectTables();
   const isAdmin = await userIsSchoolAdmin(userId);
   const leadIds = await resolveLeadIdsForWrite(userId, isAdmin, isAdmin ? input.leadIds : null, [userId]);
@@ -515,12 +515,13 @@ export async function createSchoolProject(userId: string, input: ProjectInput): 
   const sort = (await pool.query(`SELECT COALESCE(MAX(sort_order), -1)::int AS n FROM school_projects`)).rows[0] as {
     n: number;
   };
+  const projectId = newId('spj');
   await pool.query(
     `INSERT INTO school_projects
        (id, title, summary, status, visibility, start_date, end_date, lead_id, lead_ids, participant_ids, sort_order, created_by, updated_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $12)`,
     [
-      newId('spj'),
+      projectId,
       input.title,
       input.summary,
       input.status,
@@ -534,6 +535,148 @@ export async function createSchoolProject(userId: string, input: ProjectInput): 
       userId,
     ],
   );
+  return projectId;
+}
+
+/** 导出包中的人员引用：优先按 id，其次按姓名匹配本库教职工 */
+export type ImportPersonRef = { id?: string; name?: string };
+
+export type ImportProjectItemPayload = {
+  groupLabel?: string;
+  title: string;
+  summary?: string;
+  status?: ProjectStatus;
+  startDate?: string | null;
+  endDate?: string | null;
+  owners?: ImportPersonRef[];
+};
+
+export type ImportProjectPayload = {
+  title: string;
+  summary?: string;
+  status?: ProjectStatus;
+  visibility?: ProjectVisibility;
+  startDate?: string | null;
+  endDate?: string | null;
+  leads?: ImportPersonRef[];
+  participants?: ImportPersonRef[];
+  items?: ImportProjectItemPayload[];
+};
+
+export type ImportProjectsResult = {
+  created: number;
+  skipped: number;
+  errors: string[];
+};
+
+function resolvePersonIds(
+  refs: ImportPersonRef[] | undefined,
+  byId: Map<string, string>,
+  byName: Map<string, string>,
+): string[] {
+  if (!Array.isArray(refs) || refs.length === 0) return [];
+  const ids: string[] = [];
+  for (const ref of refs) {
+    const id = String(ref?.id ?? '').trim();
+    const name = String(ref?.name ?? '').trim().toLowerCase();
+    const resolved = (id && byId.get(id)) || (name && byName.get(name)) || '';
+    if (resolved && !ids.includes(resolved)) ids.push(resolved);
+  }
+  return ids;
+}
+
+/**
+ * 一次性导入多个项目（含子项目）。
+ * 人员按 id → 姓名匹配；匹配不到则跳过该人。
+ * 若负责人全部匹配失败，则把当前用户设为总负责人。
+ * 项目文件（PDF/文本）不随导入包迁移。
+ */
+export async function importSchoolProjects(
+  userId: string,
+  projectsInput: unknown,
+): Promise<ImportProjectsResult> {
+  await ensureSchoolProjectTables();
+  if (!Array.isArray(projectsInput) || projectsInput.length === 0) {
+    reject('invalid_import', 400);
+  }
+  if (projectsInput.length > 50) reject('too_many_projects', 400);
+
+  const staff = await listProjectStaff();
+  const byId = new Map(staff.map((person) => [person.id, person.id]));
+  const byName = new Map<string, string>();
+  for (const person of staff) {
+    const key = person.name.trim().toLowerCase();
+    if (key && !byName.has(key)) byName.set(key, person.id);
+  }
+
+  const isAdmin = await userIsSchoolAdmin(userId);
+  const result: ImportProjectsResult = { created: 0, skipped: 0, errors: [] };
+
+  for (let index = 0; index < projectsInput.length; index++) {
+    const raw = projectsInput[index];
+    try {
+      const rec = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      const leadIds = resolvePersonIds(rec.leads as ImportPersonRef[] | undefined, byId, byName);
+      let participantIds = resolvePersonIds(rec.participants as ImportPersonRef[] | undefined, byId, byName);
+      const itemsRaw = Array.isArray(rec.items) ? rec.items : [];
+      if (itemsRaw.length > 200) reject('too_many_items', 400);
+
+      // 子项目负责人必须是项目成员：预先把匹配到的负责人并入参与人名单
+      const itemOwnerBuckets: string[][] = [];
+      for (const itemRaw of itemsRaw) {
+        const itemRec = itemRaw && typeof itemRaw === 'object' ? (itemRaw as Record<string, unknown>) : {};
+        const ownerIds = resolvePersonIds(itemRec.owners as ImportPersonRef[] | undefined, byId, byName);
+        itemOwnerBuckets.push(ownerIds);
+        for (const ownerId of ownerIds) {
+          if (!leadIds.includes(ownerId) && !participantIds.includes(ownerId)) {
+            participantIds = [...participantIds, ownerId];
+          }
+        }
+      }
+
+      const projectInput = parseProjectInput({
+        title: rec.title,
+        summary: rec.summary,
+        status: rec.status,
+        visibility: rec.visibility,
+        startDate: rec.startDate ?? null,
+        endDate: rec.endDate ?? null,
+        leadIds: isAdmin ? (leadIds.length > 0 ? leadIds : [userId]) : undefined,
+        participantIds,
+      });
+      // 非管理员导入时强制自己为总负责人（无法指定他人）
+      if (!isAdmin) {
+        projectInput.leadIds = null;
+      }
+      const projectId = await createSchoolProject(userId, projectInput);
+
+      for (let itemIndex = 0; itemIndex < itemsRaw.length; itemIndex++) {
+        const itemRaw = itemsRaw[itemIndex];
+        const itemRec = itemRaw && typeof itemRaw === 'object' ? (itemRaw as Record<string, unknown>) : {};
+        const itemInput = parseItemInput({
+          title: itemRec.title,
+          summary: itemRec.summary,
+          groupLabel: itemRec.groupLabel,
+          status: itemRec.status,
+          startDate: itemRec.startDate ?? null,
+          endDate: itemRec.endDate ?? null,
+          ownerIds: itemOwnerBuckets[itemIndex] ?? [],
+        });
+        const ok = await createSchoolProjectItem(projectId, userId, itemInput);
+        if (!ok) reject('item_create_failed', 500);
+      }
+      result.created += 1;
+    } catch (error) {
+      result.skipped += 1;
+      const message = (error as Error).message || 'unknown';
+      result.errors.push(`#${index + 1}: ${message}`);
+    }
+  }
+
+  if (result.created === 0 && result.skipped > 0) {
+    reject(result.errors[0] || 'import_failed', 400);
+  }
+  return result;
 }
 
 export async function updateSchoolProject(projectId: string, userId: string, input: ProjectInput): Promise<boolean> {
@@ -586,8 +729,7 @@ export async function deleteSchoolProject(projectId: string, userId: string): Pr
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function createSchoolProjectItem(projectId: string, userId: string, input: ItemInput): Promise<boolean> {
-  await ensureSchoolProjectTables();
+export async function createSchoolProjectItem(projectId: string, userId: string, input: ItemInput): Promise<boolean> {  await ensureSchoolProjectTables();
   if (!(await userCanEditItems(projectId, userId))) return false;
   await assertItemOwners(projectId, input.ownerIds);
   const sort = (

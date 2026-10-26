@@ -7,6 +7,7 @@ import {
   createSchoolProjectItem,
   deleteSchoolProject,
   deleteSchoolProjectItem,
+  importSchoolProjects,
   listProjectStaff,
   listSchoolProjects,
   parseItemInput,
@@ -88,6 +89,25 @@ router.post('/', async (req: ReqWithUserId, res: Response) => {
     return res.json({ projects: await listSchoolProjects(userId) });
   } catch (error) {
     return fail(res, error, 'projects create');
+  }
+});
+
+/** 一次性导入多个项目（含子项目）。须放在 /:projectId 之前。 */
+router.post('/import', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = requireUser(req, res);
+    if (!userId) return;
+    const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+    const projects = Array.isArray(body.projects) ? body.projects : Array.isArray(req.body) ? req.body : null;
+    if (!projects) return res.status(400).json({ error: 'invalid_import' });
+    const result = await importSchoolProjects(userId, projects);
+    return res.json({
+      ...result,
+      projects: await listSchoolProjects(userId),
+      staff: await listProjectStaff(),
+    });
+  } catch (error) {
+    return fail(res, error, 'projects import');
   }
 });
 

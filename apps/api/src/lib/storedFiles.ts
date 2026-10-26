@@ -103,11 +103,14 @@ export async function listEntityFiles(moduleKey: string, entityId: string): Prom
   await ensureStoredFilesTable();
   const rows = (
     await pool.query(
-      `SELECT id, module_key, entity_id, kind, title, body_text, original_name, mime_type,
-              size_bytes, storage_path, sort_order, created_by, created_at, updated_at
-       FROM stored_files
-       WHERE module_key = $1 AND entity_id = $2
-       ORDER BY sort_order ASC, created_at ASC`,
+      `SELECT f.id, f.module_key, f.entity_id, f.kind, f.title, f.body_text, f.original_name, f.mime_type,
+              f.size_bytes, f.storage_path, f.sort_order, f.created_by, f.created_at, f.updated_at,
+              COALESCE(NULLIF(TRIM(u.name_zh), ''), NULLIF(TRIM(u.name_en), ''),
+                       NULLIF(TRIM(u.display_name), ''), u.username) AS created_by_name
+       FROM stored_files f
+       LEFT JOIN users u ON u.id = f.created_by
+       WHERE f.module_key = $1 AND f.entity_id = $2
+       ORDER BY f.sort_order ASC, f.created_at ASC`,
       [moduleKey, entityId],
     )
   ).rows as Array<Record<string, unknown>>;

@@ -3,12 +3,21 @@ import { ChevronLeft, ChevronRight, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { Button } from './ui/button';
 import { fetchAuthedArrayBuffer } from '../lib/schoolProjectsApi';
 
+type PdfViewport = { width: number; height: number };
+
+type PdfRenderTask = {
+  promise: Promise<void>;
+  cancel: () => void;
+};
+
 type PdfPage = {
-  getViewport: (opts: { scale: number }) => { width: number; height: number };
+  getViewport: (opts: { scale: number }) => PdfViewport;
   render: (opts: {
     canvasContext: CanvasRenderingContext2D;
-    viewport: { width: number; height: number };
-  }) => { promise: Promise<void> };
+    viewport: PdfViewport;
+    /** pdf.js 官方高清方案：用 transform 把位图按 DPR 放大，viewport 仍按 CSS 尺寸 */
+    transform?: number[];
+  }) => PdfRenderTask;
 };
 
 type PdfDoc = {
@@ -16,6 +25,52 @@ type PdfDoc = {
   getPage: (n: number) => Promise<PdfPage>;
   destroy: () => Promise<void>;
 };
+
+/** 每个 canvas 上正在进行的渲染任务，用于再次渲染前取消，避免同 canvas 并发 render */
+const activeRenderTasks = new WeakMap<HTMLCanvasElement, PdfRenderTask>();
+
+/**
+ * 每个 canvas 一条串行链。
+ * pdf.js 只要发现同一 canvas 上还有未结束的 render() 就直接抛
+ * "Cannot use the same canvas during multiple render() operations"，
+ * 所以同一 canvas 的渲染必须排队，且新任务要等旧任务真正收尾后才能开始。
+ */
+const canvasChains = new WeakMap<HTMLCanvasElement, Promise<unknown>>();
+
+function chainFor(canvas: HTMLCanvasElement): Promise<unknown> {
+  const chain = canvasChains.get(canvas);
+  return chain ?? Promise.resolve();
+}
+
+function setChain(canvas: HTMLCanvasElement, chain: Promise<unknown>): void {
+  canvasChains.set(canvas, chain);
+}
+
+function cancelCanvasRender(canvas: HTMLCanvasElement | null): void {
+  if (!canvas) return;
+  const task = activeRenderTasks.get(canvas);
+  if (!task) return;
+  // 注意：这里只发取消信号，不删除 map 记录。
+  // 记录由该渲染任务的 finally 清理，保证后续渲染仍能看到“前任还没完全收尾”。
+  try {
+    task.cancel();
+  } catch {
+    /* ignore */
+  }
+  void task.promise.catch(() => undefined);
+}
+
+/** pdf.js 取消渲染时抛 RenderingCancelledException；这类异常不应当作错误展示 */
+function isRenderCancelled(error: unknown): boolean {
+  const name = (error as { name?: string } | null)?.name;
+  return name === 'RenderingCancelledException';
+}
+
+/** 位图按屏幕物理像素渲染，CSS 尺寸用逻辑像素，Retina / 高分屏才不会糊 */
+function getOutputScale(): number {
+  if (typeof window === 'undefined') return 1;
+  return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+}
 
 async function loadPdfDocument(data: ArrayBuffer): Promise<PdfDoc> {
   const pdfjsLib = await import('pdfjs-dist');
@@ -33,15 +88,45 @@ async function paintPage(
   canvas: HTMLCanvasElement,
   scale: number,
 ): Promise<void> {
-  const pdfPage = await doc.getPage(pageNum);
-  const viewport = pdfPage.getViewport({ scale });
-  const context = canvas.getContext('2d');
-  if (!context) return;
-  canvas.width = Math.floor(viewport.width);
-  canvas.height = Math.floor(viewport.height);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
-  await pdfPage.render({ canvasContext: context, viewport }).promise;
+  const previous = chainFor(canvas);
+  const run = previous.then(async () => {
+    // 排队到自己时，先取消并等待上一次在途渲染真正结束
+    const pending = activeRenderTasks.get(canvas);
+    if (pending) {
+      try {
+        pending.cancel();
+      } catch {
+        /* ignore */
+      }
+      await pending.promise.catch(() => undefined);
+      activeRenderTasks.delete(canvas);
+    }
+
+    const pdfPage = await doc.getPage(pageNum);
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    const viewport = pdfPage.getViewport({ scale });
+    const outputScale = getOutputScale();
+    canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
+    canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    const renderTask = pdfPage.render({
+      canvasContext: context,
+      viewport,
+      ...(outputScale === 1 ? {} : { transform: [outputScale, 0, 0, outputScale, 0, 0] }),
+    });
+    activeRenderTasks.set(canvas, renderTask);
+    try {
+      await renderTask.promise;
+    } finally {
+      if (activeRenderTasks.get(canvas) === renderTask) activeRenderTasks.delete(canvas);
+    }
+  });
+
+  // 用 catch 兜住，避免一次取消污染整条链，让后续翻页仍能继续渲染
+  setChain(canvas, run.catch(() => undefined));
+  return run;
 }
 
 export default function PdfReaderDialog({
@@ -58,6 +143,7 @@ export default function PdfReaderDialog({
   onClose: () => void;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const bookRef = useRef<HTMLDivElement>(null);
   const leftCanvasRef = useRef<HTMLCanvasElement>(null);
   const rightCanvasRef = useRef<HTMLCanvasElement>(null);
   const docRef = useRef<PdfDoc | null>(null);
@@ -74,6 +160,9 @@ export default function PdfReaderDialog({
   const [flipKey, setFlipKey] = useState(0);
 
   const cleanupDoc = useCallback(async () => {
+    // 销毁文档前先取消在途渲染，否则 pdf.js 会因 canvas 复用/文档销毁抛错
+    cancelCanvasRender(leftCanvasRef.current);
+    cancelCanvasRender(rightCanvasRef.current);
     const doc = docRef.current;
     docRef.current = null;
     if (doc) {
@@ -152,6 +241,16 @@ export default function PdfReaderDialog({
   }, [twoPage, leftPage]);
 
   useEffect(() => {
+    const book = bookRef.current;
+    if (!book || !open || flipKey === 0) return;
+    // 翻页时重播翻书动画：不用 key 重挂载 canvas，避免白闪与重复渲染
+    book.classList.remove('book-flip-in');
+    // 强制回流，让动画重新开始
+    void book.offsetWidth;
+    book.classList.add('book-flip-in');
+  }, [flipKey, open]);
+
+  useEffect(() => {
     if (!open) return;
     const updateLayout = () => {
       const wide = window.innerWidth >= 768;
@@ -191,16 +290,20 @@ export default function PdfReaderDialog({
     const token = ++renderToken.current;
     const doc = docRef.current;
     const scale = fitScale * zoom;
+    const leftCanvas = leftCanvasRef.current;
+    const rightCanvas = rightCanvasRef.current;
     void (async () => {
       try {
-        const leftCanvas = leftCanvasRef.current;
-        if (leftCanvas) await paintPage(doc, leftPage, leftCanvas, scale);
+        // 渲染前先检查：本轮已被后续操作取代，则不再触碰 canvas
         if (token !== renderToken.current) return;
-        const rightCanvas = rightCanvasRef.current;
+        if (leftCanvas) {
+          await paintPage(doc, leftPage, leftCanvas, scale);
+          if (token !== renderToken.current) return;
+        }
         if (twoPage && rightCanvas) {
-          if (rightPage) {
+          if (rightPage && token === renderToken.current) {
             await paintPage(doc, rightPage, rightCanvas, scale);
-          } else {
+          } else if (!rightPage) {
             const w = leftCanvasRef.current?.width || 400;
             const h = leftCanvasRef.current?.height || 560;
             const ctx = rightCanvas.getContext('2d');
@@ -215,12 +318,18 @@ export default function PdfReaderDialog({
           }
         }
       } catch (e: unknown) {
+        if (isRenderCancelled(e)) return;
         if (token === renderToken.current) {
           setError((e as Error).message || (isZh ? '渲染失败' : 'Render failed'));
         }
       }
     })();
-  }, [open, leftPage, rightPage, pageCount, fitScale, zoom, twoPage, isZh, flipKey]);
+    return () => {
+      // 本轮渲染被取代 / 关闭：取消在途任务，避免下一次 render 撞上同一个 canvas
+      cancelCanvasRender(leftCanvasRef.current);
+      cancelCanvasRender(rightCanvasRef.current);
+    };
+  }, [open, leftPage, rightPage, pageCount, fitScale, zoom, twoPage, isZh]);
 
   useEffect(() => {
     if (!open) return;
@@ -320,7 +429,7 @@ export default function PdfReaderDialog({
         </Button>
       </header>
 
-      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-hidden">
+      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-auto">
         {loading ? (
           <p className="absolute inset-0 flex items-center justify-center text-sm text-amber-100/60">
             {isZh ? '正在打开…' : 'Opening…'}
@@ -331,7 +440,7 @@ export default function PdfReaderDialog({
         ) : null}
 
         {!loading && !error ? (
-          <div className="absolute inset-0 flex items-center justify-center px-2 py-4 sm:px-6">
+          <div className="relative flex min-h-full min-w-full items-center justify-center px-2 py-4 sm:px-6">
             {/* 左右点击翻页热区 */}
             <button
               type="button"
@@ -349,14 +458,14 @@ export default function PdfReaderDialog({
             />
 
             <div
-              key={flipKey}
-              className="book-spread relative z-[1] flex max-h-full max-w-full animate-[bookIn_280ms_ease-out] overflow-hidden rounded-sm shadow-[0_25px_80px_rgba(0,0,0,0.55)]"
+              ref={bookRef}
+              className="book-spread relative z-[1] flex overflow-hidden rounded-sm shadow-[0_25px_80px_rgba(0,0,0,0.55)]"
               style={{
                 background: 'linear-gradient(90deg, #efe6d8 0%, #f7f1e6 48%, #e8dfd0 52%, #f7f1e6 100%)',
               }}
             >
               <div className="relative bg-white">
-                <canvas ref={leftCanvasRef} className="block max-h-[min(82vh,920px)] w-auto bg-white" />
+                <canvas ref={leftCanvasRef} className="block bg-white" />
                 <div
                   className="pointer-events-none absolute inset-y-0 right-0 w-8 opacity-40"
                   style={{ background: 'linear-gradient(90deg, transparent, rgba(60,40,20,0.18))' }}
@@ -374,7 +483,7 @@ export default function PdfReaderDialog({
                     aria-hidden
                   />
                   <div className="relative bg-white">
-                    <canvas ref={rightCanvasRef} className="block max-h-[min(82vh,920px)] w-auto bg-[#f7f1e6]" />
+                    <canvas ref={rightCanvasRef} className="block bg-[#f7f1e6]" />
                     <div
                       className="pointer-events-none absolute inset-y-0 left-0 w-8 opacity-40"
                       style={{ background: 'linear-gradient(270deg, transparent, rgba(60,40,20,0.16))' }}
@@ -404,6 +513,9 @@ export default function PdfReaderDialog({
         @keyframes bookIn {
           from { opacity: 0.55; transform: rotateY(-6deg) scale(0.985); }
           to { opacity: 1; transform: rotateY(0) scale(1); }
+        }
+        .book-flip-in {
+          animation: bookIn 280ms ease-out;
         }
       `}</style>
     </div>

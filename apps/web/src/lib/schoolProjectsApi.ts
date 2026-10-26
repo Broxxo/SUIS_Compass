@@ -108,6 +108,92 @@ export async function createProject(draft: ProjectDraft): Promise<SchoolProject[
   return (await readJson(response)).projects ?? [];
 }
 
+/** 导出包版本；导入时校验 */
+export const PROJECT_EXPORT_VERSION = 1;
+
+export type ProjectExportPerson = { id: string; name: string };
+
+export type ProjectExportItem = {
+  groupLabel: string;
+  title: string;
+  summary: string;
+  status: ProjectStatus;
+  startDate: string | null;
+  endDate: string | null;
+  owners: ProjectExportPerson[];
+};
+
+export type ProjectExportEntry = {
+  title: string;
+  summary: string;
+  status: ProjectStatus;
+  visibility: ProjectVisibility;
+  startDate: string | null;
+  endDate: string | null;
+  leads: ProjectExportPerson[];
+  participants: ProjectExportPerson[];
+  items: ProjectExportItem[];
+};
+
+export type ProjectExportBundle = {
+  version: number;
+  exportedAt: string;
+  projects: ProjectExportEntry[];
+};
+
+/** 把选中的项目打成可下载的导出包（不含 PDF/文本文件） */
+export function buildProjectExportBundle(projects: SchoolProject[]): ProjectExportBundle {
+  return {
+    version: PROJECT_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    projects: projects.map((project) => ({
+      title: project.title,
+      summary: project.summary,
+      status: project.status,
+      visibility: project.visibility,
+      startDate: project.startDate,
+      endDate: project.endDate,
+      leads: project.leads.map((person) => ({ id: person.id, name: person.name })),
+      participants: project.participants.map((person) => ({ id: person.id, name: person.name })),
+      items: project.items.map((item) => ({
+        groupLabel: item.groupLabel,
+        title: item.title,
+        summary: item.summary,
+        status: item.status,
+        startDate: item.startDate,
+        endDate: item.endDate,
+        owners: item.owners.map((person) => ({ id: person.id, name: person.name })),
+      })),
+    })),
+  };
+}
+
+export type ProjectImportResult = {
+  created: number;
+  skipped: number;
+  errors: string[];
+  projects: SchoolProject[];
+  staff: ProjectPerson[];
+};
+
+export async function importProjects(bundle: { projects: ProjectExportEntry[] } | ProjectExportEntry[]): Promise<ProjectImportResult> {
+  const projects = Array.isArray(bundle) ? bundle : bundle.projects;
+  const response = await fetch(apiUrl('/api/projects/import'), {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ projects }),
+  });
+  const data = (await response.json().catch(() => ({}))) as ProjectImportResult & { error?: string };
+  if (!response.ok) throw new Error(data.error || `import failed (${response.status})`);
+  return {
+    created: Number(data.created ?? 0),
+    skipped: Number(data.skipped ?? 0),
+    errors: Array.isArray(data.errors) ? data.errors : [],
+    projects: data.projects ?? [],
+    staff: data.staff ?? [],
+  };
+}
+
 export async function updateProject(projectId: string, draft: ProjectDraft): Promise<SchoolProject[]> {
   const response = await fetch(apiUrl(`/api/projects/${encodeURIComponent(projectId)}`), {
     method: 'PUT',
@@ -171,6 +257,7 @@ export type ProjectPreviewAsset = {
   sizeBytes: number;
   sortOrder: number;
   createdAt: string | null;
+  createdByName?: string | null;
 };
 
 export type ProjectPreviewBoard = {

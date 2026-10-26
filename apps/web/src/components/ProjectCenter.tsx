@@ -1,20 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, Download, Plus, Trash2, Upload } from 'lucide-react';
 import AppTopBar from './AppTopBar';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import {
+  buildProjectExportBundle,
   claimProjectItem,
   createProject,
   createProjectItem,
   deleteProject,
   deleteProjectItem,
   fetchProjectBoard,
+  importProjects,
+  PROJECT_EXPORT_VERSION,
   updateProject,
   updateProjectItem,
   type ProjectDraft,
+  type ProjectExportBundle,
   type ProjectPerson,
   type ProjectStatus,
   type ProjectVisibility,
@@ -22,7 +26,7 @@ import {
   type SchoolProjectItem,
 } from '../lib/schoolProjectsApi';
 import MultiSelectPersonGrid from './MultiSelectPersonGrid';
-import ProjectPreviewSection from './ProjectPreviewSection';
+import ProjectFilesSection from './ProjectFilesSection';
 
 const EMPTY_DRAFT: ProjectDraft = {
   title: '',
@@ -144,7 +148,11 @@ export default function ProjectCenter({
   const [ownerQuery, setOwnerQuery] = useState('');
   const [personPick, setPersonPick] = useState<'leads' | 'participants' | 'owners'>('participants');
   const [customGroup, setCustomGroup] = useState(false);
-  const [previewRevision, setPreviewRevision] = useState(0);
+  const [filesRevision, setFilesRevision] = useState(0);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportIds, setExportIds] = useState<string[]>([]);
+  const [ioBusy, setIoBusy] = useState(false);
+  const importFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -321,6 +329,77 @@ export default function ProjectCenter({
     });
   };
 
+  const openExportDialog = () => {
+    setExportIds(projects.map((project) => project.id));
+    setExportOpen(true);
+  };
+
+  const downloadExport = () => {
+    const selected = projects.filter((project) => exportIds.includes(project.id));
+    if (selected.length === 0) return;
+    const bundle = buildProjectExportBundle(selected);
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `suis-projects-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setExportOpen(false);
+  };
+
+  const onImportFile = async (file: File | null) => {
+    if (!file) return;
+    setIoBusy(true);
+    setError(null);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as ProjectExportBundle | ProjectExportBundle['projects'];
+      const projectsPayload = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray((parsed as ProjectExportBundle).projects)
+          ? (parsed as ProjectExportBundle).projects
+          : null;
+      if (!projectsPayload || projectsPayload.length === 0) {
+        throw new Error(isZh ? '导入文件里没有项目' : 'No projects in import file');
+      }
+      if (!Array.isArray(parsed) && typeof (parsed as ProjectExportBundle).version === 'number') {
+        const version = (parsed as ProjectExportBundle).version;
+        if (version !== PROJECT_EXPORT_VERSION) {
+          throw new Error(isZh ? `不支持的导出版本（${version}）` : `Unsupported export version (${version})`);
+        }
+      }
+      if (
+        !window.confirm(
+          isZh
+            ? `将导入 ${projectsPayload.length} 个项目（含子项目）。项目文件不会一并导入。继续？`
+            : `Import ${projectsPayload.length} project(s) (including sub-items). Project files are not included. Continue?`,
+        )
+      ) {
+        return;
+      }
+      const result = await importProjects({ projects: projectsPayload });
+      setProjects(result.projects);
+      setStaff(result.staff);
+      if (result.projects[0]) setOpenIds([result.projects[0].id]);
+      if (result.skipped > 0) {
+        setError(
+          isZh
+            ? `已导入 ${result.created} 个，跳过 ${result.skipped} 个：${result.errors.slice(0, 3).join('；')}`
+            : `Imported ${result.created}, skipped ${result.skipped}: ${result.errors.slice(0, 3).join('; ')}`,
+        );
+      }
+    } catch (e: unknown) {
+      setError((e as Error).message || (isZh ? '导入失败' : 'Import failed'));
+    } finally {
+      setIoBusy(false);
+      if (importFileRef.current) importFileRef.current.value = '';
+    }
+  };
+
   return (
     <div className="min-h-dvh bg-slate-50 pt-[var(--app-topbar-height)]">
       <AppTopBar
@@ -329,15 +408,57 @@ export default function ProjectCenter({
         onBack={onBackToHub}
         onToggleAI={onToggleAI}
         isAIOpen={isAIOpen}
-        rightChildren={
-          <Button type="button" size="sm" onClick={openNewProject}>
-            <Plus className="mr-1 h-4 w-4" />
-            {isZh ? '新建项目' : 'New project'}
-          </Button>
-        }
       />
 
       <div className="mx-auto max-w-5xl space-y-4 px-4 py-6">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-800">{isZh ? '项目列表' : 'Projects'}</h2>
+            <p className="text-[11px] text-slate-400">
+              {loading
+                ? isZh
+                  ? '加载中…'
+                  : 'Loading…'
+                : isZh
+                  ? `共 ${projects.length} 个可见项目`
+                  : `${projects.length} visible project(s)`}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={ioBusy || loading}
+              onClick={() => importFileRef.current?.click()}
+            >
+              <Upload className="mr-1 h-4 w-4" />
+              {isZh ? '导入' : 'Import'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={ioBusy || loading || projects.length === 0}
+              onClick={openExportDialog}
+            >
+              <Download className="mr-1 h-4 w-4" />
+              {isZh ? '导出' : 'Export'}
+            </Button>
+            <Button type="button" size="sm" disabled={ioBusy} onClick={openNewProject}>
+              <Plus className="mr-1 h-4 w-4" />
+              {isZh ? '新建项目' : 'New project'}
+            </Button>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => void onImportFile(event.target.files?.[0] ?? null)}
+            />
+          </div>
+        </div>
+
         {error ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
         {loading ? <p className="text-sm text-slate-500">{isZh ? '加载中…' : 'Loading…'}</p> : null}
         {!loading && projects.length === 0 ? (
@@ -391,11 +512,11 @@ export default function ProjectCenter({
 
               {open ? (
                 <div className="border-t border-slate-100 px-4 py-3">
-                  <ProjectPreviewSection
+                  <ProjectFilesSection
                     projectId={project.id}
                     mode="view"
                     isZh={isZh}
-                    revision={previewRevision}
+                    revision={filesRevision}
                   />
                   {project.canEditProject || project.canEditItems ? (
                     <div className="mb-3 flex justify-end gap-2">
@@ -660,12 +781,12 @@ export default function ProjectCenter({
                 </label>
               </div>
               {editor.kind === 'project' && editor.projectId ? (
-                <ProjectPreviewSection
+                <ProjectFilesSection
                   projectId={editor.projectId}
                   mode="edit"
                   isZh={isZh}
-                  revision={previewRevision}
-                  onChanged={() => setPreviewRevision((n) => n + 1)}
+                  revision={filesRevision}
+                  onChanged={() => setFilesRevision((n) => n + 1)}
                 />
               ) : null}
               {editor.kind === 'project' ? (
@@ -768,6 +889,71 @@ export default function ProjectCenter({
             )}
             <Button type="button" disabled={saving || !editor?.draft.title.trim()} onClick={() => void saveEditor()}>
               {isZh ? '保存' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={exportOpen} onOpenChange={(open) => !open && setExportOpen(false)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{isZh ? '导出项目' : 'Export projects'}</DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-slate-500">
+            {isZh
+              ? '勾选要导出的项目。导出为 JSON，含子项目与负责人信息；项目文件（PDF/文本）不包含在内。'
+              : 'Select projects to export as JSON (includes sub-items and people). Project files are not included.'}
+          </p>
+          <div className="mb-2 flex gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setExportIds(projects.map((project) => project.id))}
+            >
+              {isZh ? '全选' : 'Select all'}
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => setExportIds([])}>
+              {isZh ? '清空' : 'Clear'}
+            </Button>
+          </div>
+          <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-slate-200 p-2">
+            {projects.map((project) => {
+              const checked = exportIds.includes(project.id);
+              return (
+                <label
+                  key={project.id}
+                  className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-slate-50"
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-4 w-4"
+                    checked={checked}
+                    onChange={() =>
+                      setExportIds((ids) =>
+                        checked ? ids.filter((id) => id !== project.id) : [...ids, project.id],
+                      )
+                    }
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-slate-800">{project.title}</span>
+                    <span className="text-[11px] text-slate-400">
+                      {isZh
+                        ? `${project.items.length} 个子项目 · ${statusLabel(project.status, isZh)}`
+                        : `${project.items.length} items · ${statusLabel(project.status, isZh)}`}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setExportOpen(false)}>
+              {isZh ? '取消' : 'Cancel'}
+            </Button>
+            <Button type="button" disabled={exportIds.length === 0} onClick={downloadExport}>
+              <Download className="mr-1 h-4 w-4" />
+              {isZh ? `导出 ${exportIds.length} 个` : `Export ${exportIds.length}`}
             </Button>
           </DialogFooter>
         </DialogContent>

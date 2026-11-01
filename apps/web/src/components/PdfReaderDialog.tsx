@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { X, ZoomIn, ZoomOut } from 'lucide-react';
 import { Button } from './ui/button';
 import { fetchAuthedArrayBuffer } from '../lib/schoolProjectsApi';
 
@@ -15,7 +15,6 @@ type PdfPage = {
   render: (opts: {
     canvasContext: CanvasRenderingContext2D;
     viewport: PdfViewport;
-    /** pdf.js 官方高清方案：用 transform 把位图按 DPR 放大，viewport 仍按 CSS 尺寸 */
     transform?: number[];
   }) => PdfRenderTask;
 };
@@ -26,20 +25,19 @@ type PdfDoc = {
   destroy: () => Promise<void>;
 };
 
-/** 每个 canvas 上正在进行的渲染任务，用于再次渲染前取消，避免同 canvas 并发 render */
-const activeRenderTasks = new WeakMap<HTMLCanvasElement, PdfRenderTask>();
+type PageSlot = {
+  pageNum: number;
+  /** CSS 逻辑宽高（未乘 zoom），用于占位 */
+  baseWidth: number;
+  baseHeight: number;
+};
 
-/**
- * 每个 canvas 一条串行链。
- * pdf.js 只要发现同一 canvas 上还有未结束的 render() 就直接抛
- * "Cannot use the same canvas during multiple render() operations"，
- * 所以同一 canvas 的渲染必须排队，且新任务要等旧任务真正收尾后才能开始。
- */
+/** 每个 canvas 上正在进行的渲染任务 */
+const activeRenderTasks = new WeakMap<HTMLCanvasElement, PdfRenderTask>();
 const canvasChains = new WeakMap<HTMLCanvasElement, Promise<unknown>>();
 
 function chainFor(canvas: HTMLCanvasElement): Promise<unknown> {
-  const chain = canvasChains.get(canvas);
-  return chain ?? Promise.resolve();
+  return canvasChains.get(canvas) ?? Promise.resolve();
 }
 
 function setChain(canvas: HTMLCanvasElement, chain: Promise<unknown>): void {
@@ -50,8 +48,6 @@ function cancelCanvasRender(canvas: HTMLCanvasElement | null): void {
   if (!canvas) return;
   const task = activeRenderTasks.get(canvas);
   if (!task) return;
-  // 注意：这里只发取消信号，不删除 map 记录。
-  // 记录由该渲染任务的 finally 清理，保证后续渲染仍能看到“前任还没完全收尾”。
   try {
     task.cancel();
   } catch {
@@ -60,13 +56,10 @@ function cancelCanvasRender(canvas: HTMLCanvasElement | null): void {
   void task.promise.catch(() => undefined);
 }
 
-/** pdf.js 取消渲染时抛 RenderingCancelledException；这类异常不应当作错误展示 */
 function isRenderCancelled(error: unknown): boolean {
-  const name = (error as { name?: string } | null)?.name;
-  return name === 'RenderingCancelledException';
+  return (error as { name?: string } | null)?.name === 'RenderingCancelledException';
 }
 
-/** 位图按屏幕物理像素渲染，CSS 尺寸用逻辑像素，Retina / 高分屏才不会糊 */
 function getOutputScale(): number {
   if (typeof window === 'undefined') return 1;
   return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
@@ -90,7 +83,6 @@ async function paintPage(
 ): Promise<void> {
   const previous = chainFor(canvas);
   const run = previous.then(async () => {
-    // 排队到自己时，先取消并等待上一次在途渲染真正结束
     const pending = activeRenderTasks.get(canvas);
     if (pending) {
       try {
@@ -124,11 +116,14 @@ async function paintPage(
     }
   });
 
-  // 用 catch 兜住，避免一次取消污染整条链，让后续翻页仍能继续渲染
   setChain(canvas, run.catch(() => undefined));
   return run;
 }
 
+/**
+ * PDF 瀑布式阅读：与 Word 阅读器同一套壳与连续滚动体验。
+ * 可见页懒渲染，避免长文档一次画完卡死。
+ */
 export default function PdfReaderDialog({
   open,
   title,
@@ -142,27 +137,27 @@ export default function PdfReaderDialog({
   isZh: boolean;
   onClose: () => void;
 }) {
-  const stageRef = useRef<HTMLDivElement>(null);
-  const bookRef = useRef<HTMLDivElement>(null);
-  const leftCanvasRef = useRef<HTMLCanvasElement>(null);
-  const rightCanvasRef = useRef<HTMLCanvasElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pageElsRef = useRef<Map<number, HTMLDivElement>>(new Map());
+  const canvasElsRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const renderedScaleRef = useRef<Map<number, number>>(new Map());
+  const visiblePagesRef = useRef<Set<number>>(new Set());
   const docRef = useRef<PdfDoc | null>(null);
   const renderToken = useRef(0);
+  const observerRef = useRef<IntersectionObserver | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** 当前摊开左页页码（1、3、5…） */
-  const [leftPage, setLeftPage] = useState(1);
+  const [slots, setSlots] = useState<PageSlot[]>([]);
   const [pageCount, setPageCount] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1);
-  const [fitScale, setFitScale] = useState(1);
-  const [twoPage, setTwoPage] = useState(true);
-  const [flipKey, setFlipKey] = useState(0);
+  const [fitWidth, setFitWidth] = useState(720);
 
   const cleanupDoc = useCallback(async () => {
-    // 销毁文档前先取消在途渲染，否则 pdf.js 会因 canvas 复用/文档销毁抛错
-    cancelCanvasRender(leftCanvasRef.current);
-    cancelCanvasRender(rightCanvasRef.current);
+    for (const canvas of canvasElsRef.current.values()) {
+      cancelCanvasRender(canvas);
+    }
     const doc = docRef.current;
     docRef.current = null;
     if (doc) {
@@ -174,42 +169,69 @@ export default function PdfReaderDialog({
     }
   }, []);
 
-  const rightPage = twoPage && leftPage + 1 <= pageCount ? leftPage + 1 : null;
-  const canPrev = leftPage > 1;
-  const canNext = twoPage ? leftPage + 2 <= pageCount : leftPage < pageCount;
-
-  const goPrev = useCallback(() => {
-    setLeftPage((p) => {
-      const step = twoPage ? 2 : 1;
-      const next = Math.max(1, p - step);
-      if (twoPage && next % 2 === 0) return Math.max(1, next - 1);
-      return next;
-    });
-    setFlipKey((k) => k + 1);
-  }, [twoPage]);
-
-  const goNext = useCallback(() => {
-    setLeftPage((p) => {
-      const step = twoPage ? 2 : 1;
-      let next = p + step;
-      if (twoPage) {
-        if (next % 2 === 0) next -= 1;
-        if (next > pageCount) return p;
-        return next;
+  const paintVisible = useCallback(async () => {
+    const doc = docRef.current;
+    if (!doc || pageCount < 1) return;
+    const token = ++renderToken.current;
+    const visible = [...visiblePagesRef.current].sort((a, b) => a - b);
+    // 邻页预渲染，滚动更顺
+    const want = new Set<number>();
+    for (const n of visible) {
+      for (let d = -1; d <= 1; d += 1) {
+        const p = n + d;
+        if (p >= 1 && p <= pageCount) want.add(p);
       }
-      return Math.min(pageCount, next);
-    });
-    setFlipKey((k) => k + 1);
-  }, [twoPage, pageCount]);
+    }
+    const slotByPage = new Map(slots.map((s) => [s.pageNum, s]));
+
+    for (const pageNum of [...want].sort((a, b) => a - b)) {
+      if (token !== renderToken.current) return;
+      const canvas = canvasElsRef.current.get(pageNum);
+      const slot = slotByPage.get(pageNum);
+      if (!canvas || !slot) continue;
+      const scale = ((fitWidth * zoom) / Math.max(1, slot.baseWidth));
+      const prevScale = renderedScaleRef.current.get(pageNum);
+      if (prevScale != null && Math.abs(prevScale - scale) < 0.001) continue;
+      try {
+        await paintPage(doc, pageNum, canvas, scale);
+        if (token !== renderToken.current) return;
+        renderedScaleRef.current.set(pageNum, scale);
+      } catch (e: unknown) {
+        if (isRenderCancelled(e)) continue;
+        if (token === renderToken.current) {
+          setError((e as Error).message || (isZh ? '渲染失败' : 'Render failed'));
+          return;
+        }
+      }
+    }
+
+    // 远离视口的页释放位图，省内存
+    for (const [pageNum, canvas] of canvasElsRef.current) {
+      if (want.has(pageNum)) continue;
+      if (!renderedScaleRef.current.has(pageNum)) continue;
+      cancelCanvasRender(canvas);
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.width = 0;
+      canvas.height = 0;
+      renderedScaleRef.current.delete(pageNum);
+    }
+  }, [fitWidth, zoom, pageCount, slots, isZh]);
 
   useEffect(() => {
     if (!open || !fileUrl) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setLeftPage(1);
+    setSlots([]);
     setPageCount(0);
+    setCurrentPage(1);
     setZoom(1);
+    renderedScaleRef.current.clear();
+    visiblePagesRef.current.clear();
+    pageElsRef.current.clear();
+    canvasElsRef.current.clear();
+
     void (async () => {
       try {
         await cleanupDoc();
@@ -221,6 +243,18 @@ export default function PdfReaderDialog({
           return;
         }
         docRef.current = doc;
+        const nextSlots: PageSlot[] = [];
+        for (let n = 1; n <= doc.numPages; n += 1) {
+          const page = await doc.getPage(n);
+          if (cancelled) return;
+          const viewport = page.getViewport({ scale: 1 });
+          nextSlots.push({
+            pageNum: n,
+            baseWidth: viewport.width,
+            baseHeight: viewport.height,
+          });
+        }
+        setSlots(nextSlots);
         setPageCount(doc.numPages);
       } catch (e: unknown) {
         if (!cancelled) setError((e as Error).message || (isZh ? '无法打开 PDF' : 'Could not open PDF'));
@@ -228,140 +262,101 @@ export default function PdfReaderDialog({
         if (!cancelled) setLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
+      renderToken.current += 1;
+      observerRef.current?.disconnect();
+      observerRef.current = null;
       void cleanupDoc();
     };
   }, [open, fileUrl, isZh, cleanupDoc]);
 
-  useEffect(() => {
-    if (twoPage && leftPage > 1 && leftPage % 2 === 0) {
-      setLeftPage((p) => p - 1);
-    }
-  }, [twoPage, leftPage]);
-
-  useEffect(() => {
-    const book = bookRef.current;
-    if (!book || !open || flipKey === 0) return;
-    // 翻页时重播翻书动画：不用 key 重挂载 canvas，避免白闪与重复渲染
-    book.classList.remove('book-flip-in');
-    // 强制回流，让动画重新开始
-    void book.offsetWidth;
-    book.classList.add('book-flip-in');
-  }, [flipKey, open]);
-
+  // 内容区宽度 → 适配单栏纸宽（与 Word max-w-4xl 对齐）
   useEffect(() => {
     if (!open) return;
-    const updateLayout = () => {
-      const wide = window.innerWidth >= 768;
-      setTwoPage(wide);
-      const stage = stageRef.current;
-      if (!stage || !docRef.current) return;
-      void (async () => {
-        try {
-          const doc = docRef.current;
-          if (!doc) return;
-          const sample = await doc.getPage(Math.min(leftPage, doc.numPages));
-          const base = sample.getViewport({ scale: 1 });
-          const padX = 48;
-          const padY = 32;
-          const availW = Math.max(240, stage.clientWidth - padX);
-          const availH = Math.max(240, stage.clientHeight - padY);
-          const pagesWide = wide ? 2 : 1;
-          const fit = Math.min(availW / (base.width * pagesWide), availH / base.height);
-          setFitScale(Math.max(0.35, Math.min(fit, 2.2)));
-        } catch {
-          /* ignore */
-        }
-      })();
+    const update = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const pad = window.innerWidth >= 640 ? 48 : 24;
+      const maxPaper = 896; // max-w-4xl
+      setFitWidth(Math.max(280, Math.min(maxPaper, el.clientWidth - pad)));
     };
-    updateLayout();
-    const observer = new ResizeObserver(() => updateLayout());
-    if (stageRef.current) observer.observe(stageRef.current);
-    window.addEventListener('resize', updateLayout);
+    update();
+    const observer = new ResizeObserver(update);
+    if (scrollRef.current) observer.observe(scrollRef.current);
+    window.addEventListener('resize', update);
     return () => {
       observer.disconnect();
-      window.removeEventListener('resize', updateLayout);
+      window.removeEventListener('resize', update);
     };
-  }, [open, leftPage, pageCount]);
+  }, [open, loading, pageCount]);
 
+  // IntersectionObserver：哪些页在视口
   useEffect(() => {
-    if (!open || !docRef.current || pageCount < 1) return;
-    const token = ++renderToken.current;
-    const doc = docRef.current;
-    const scale = fitScale * zoom;
-    const leftCanvas = leftCanvasRef.current;
-    const rightCanvas = rightCanvasRef.current;
-    void (async () => {
-      try {
-        // 渲染前先检查：本轮已被后续操作取代，则不再触碰 canvas
-        if (token !== renderToken.current) return;
-        if (leftCanvas) {
-          await paintPage(doc, leftPage, leftCanvas, scale);
-          if (token !== renderToken.current) return;
-        }
-        if (twoPage && rightCanvas) {
-          if (rightPage && token === renderToken.current) {
-            await paintPage(doc, rightPage, rightCanvas, scale);
-          } else if (!rightPage) {
-            const w = leftCanvasRef.current?.width || 400;
-            const h = leftCanvasRef.current?.height || 560;
-            const ctx = rightCanvas.getContext('2d');
-            if (ctx) {
-              rightCanvas.width = w;
-              rightCanvas.height = h;
-              rightCanvas.style.width = leftCanvasRef.current?.style.width || `${w}px`;
-              rightCanvas.style.height = leftCanvasRef.current?.style.height || `${h}px`;
-              ctx.fillStyle = '#f7f1e6';
-              ctx.fillRect(0, 0, w, h);
+    if (!open || loading || pageCount < 1) return;
+    observerRef.current?.disconnect();
+    const root = scrollRef.current;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const pageNum = Number((entry.target as HTMLElement).dataset.pageNum || 0);
+          if (!pageNum) continue;
+          if (entry.isIntersecting) {
+            if (!visiblePagesRef.current.has(pageNum)) {
+              visiblePagesRef.current.add(pageNum);
+              changed = true;
             }
+          } else if (visiblePagesRef.current.delete(pageNum)) {
+            changed = true;
           }
         }
-      } catch (e: unknown) {
-        if (isRenderCancelled(e)) return;
-        if (token === renderToken.current) {
-          setError((e as Error).message || (isZh ? '渲染失败' : 'Render failed'));
+        if (visiblePagesRef.current.size > 0) {
+          const top = Math.min(...visiblePagesRef.current);
+          setCurrentPage(top);
         }
-      }
-    })();
-    return () => {
-      // 本轮渲染被取代 / 关闭：取消在途任务，避免下一次 render 撞上同一个 canvas
-      cancelCanvasRender(leftCanvasRef.current);
-      cancelCanvasRender(rightCanvasRef.current);
-    };
-  }, [open, leftPage, rightPage, pageCount, fitScale, zoom, twoPage, isZh]);
+        if (changed) void paintVisible();
+      },
+      { root, rootMargin: '200px 0px', threshold: 0.01 },
+    );
+    observerRef.current = observer;
+    for (const el of pageElsRef.current.values()) observer.observe(el);
+    return () => observer.disconnect();
+  }, [open, loading, pageCount, slots, paintVisible]);
+
+  // zoom / fitWidth 变化时重绘可见页
+  useEffect(() => {
+    if (!open || loading || pageCount < 1) return;
+    renderedScaleRef.current.clear();
+    void paintVisible();
+  }, [open, loading, pageCount, zoom, fitWidth, paintVisible]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
-      if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+      if (event.key === '+' || event.key === '=') {
         event.preventDefault();
-        goPrev();
+        setZoom((z) => Math.min(2, Number((z + 0.1).toFixed(2))));
       }
-      if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+      if (event.key === '-') {
         event.preventDefault();
-        goNext();
+        setZoom((z) => Math.max(0.7, Number((z - 0.1).toFixed(2))));
       }
-      if (event.key === '+' || event.key === '=') setZoom((z) => Math.min(2, Number((z + 0.1).toFixed(2))));
-      if (event.key === '-') setZoom((z) => Math.max(0.7, Number((z - 0.1).toFixed(2))));
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose, goPrev, goNext]);
+  }, [open, onClose]);
 
   if (!open) return null;
 
   const pageLabel =
     pageCount === 0
       ? '—'
-      : twoPage && rightPage
-        ? isZh
-          ? `${leftPage}–${rightPage} / ${pageCount}`
-          : `${leftPage}–${rightPage} / ${pageCount}`
-        : isZh
-          ? `${leftPage} / ${pageCount}`
-          : `${leftPage} / ${pageCount}`;
+      : isZh
+        ? `${currentPage} / ${pageCount}`
+        : `${currentPage} / ${pageCount}`;
 
   return (
     <div className="fixed inset-0 z-[80] flex flex-col bg-[#1a1410] text-amber-50">
@@ -369,6 +364,9 @@ export default function PdfReaderDialog({
         <div className="min-w-0 flex-1 truncate text-sm font-medium tracking-wide">
           {title || (isZh ? '阅读' : 'Reader')}
         </div>
+        <span className="hidden text-[11px] text-amber-100/50 sm:inline">
+          {isZh ? 'PDF 连续预览' : 'PDF continuous preview'}
+        </span>
         <div className="flex items-center gap-1">
           <Button
             type="button"
@@ -394,29 +392,7 @@ export default function PdfReaderDialog({
             <ZoomIn className="h-4 w-4" />
           </Button>
         </div>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="border-amber-100/20 bg-transparent text-amber-50 hover:bg-amber-100/10"
-            disabled={!canPrev}
-            onClick={goPrev}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <span className="min-w-[5.5rem] text-center text-xs tabular-nums text-amber-100/70">{pageLabel}</span>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="border-amber-100/20 bg-transparent text-amber-50 hover:bg-amber-100/10"
-            disabled={!canNext}
-            onClick={goNext}
-          >
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
+        <span className="min-w-[4.5rem] text-center text-xs tabular-nums text-amber-100/70">{pageLabel}</span>
         <Button
           type="button"
           size="sm"
@@ -429,7 +405,7 @@ export default function PdfReaderDialog({
         </Button>
       </header>
 
-      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-auto">
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
         {loading ? (
           <p className="absolute inset-0 flex items-center justify-center text-sm text-amber-100/60">
             {isZh ? '正在打开…' : 'Opening…'}
@@ -439,85 +415,52 @@ export default function PdfReaderDialog({
           <p className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-red-300">{error}</p>
         ) : null}
 
-        {!loading && !error ? (
-          <div className="relative flex min-h-full min-w-full items-center justify-center px-2 py-4 sm:px-6">
-            {/* 左右点击翻页热区 */}
-            <button
-              type="button"
-              className="absolute inset-y-0 left-0 z-10 w-[18%] cursor-w-resize bg-transparent disabled:cursor-default"
-              disabled={!canPrev}
-              aria-label={isZh ? '上一面' : 'Previous spread'}
-              onClick={goPrev}
-            />
-            <button
-              type="button"
-              className="absolute inset-y-0 right-0 z-10 w-[18%] cursor-e-resize bg-transparent disabled:cursor-default"
-              disabled={!canNext}
-              aria-label={isZh ? '下一面' : 'Next spread'}
-              onClick={goNext}
-            />
-
-            <div
-              ref={bookRef}
-              className="book-spread relative z-[1] flex overflow-hidden rounded-sm shadow-[0_25px_80px_rgba(0,0,0,0.55)]"
-              style={{
-                background: 'linear-gradient(90deg, #efe6d8 0%, #f7f1e6 48%, #e8dfd0 52%, #f7f1e6 100%)',
-              }}
-            >
-              <div className="relative bg-white">
-                <canvas ref={leftCanvasRef} className="block bg-white" />
-                <div
-                  className="pointer-events-none absolute inset-y-0 right-0 w-8 opacity-40"
-                  style={{ background: 'linear-gradient(90deg, transparent, rgba(60,40,20,0.18))' }}
-                />
-              </div>
-
-              {twoPage ? (
-                <>
-                  <div
-                    className="w-[3px] shrink-0 self-stretch"
-                    style={{
-                      background:
-                        'linear-gradient(90deg, rgba(40,25,10,0.35), rgba(255,255,255,0.25) 45%, rgba(40,25,10,0.28))',
-                    }}
-                    aria-hidden
-                  />
-                  <div className="relative bg-white">
-                    <canvas ref={rightCanvasRef} className="block bg-[#f7f1e6]" />
+        {!loading && !error && slots.length > 0 ? (
+          <div className="mx-auto min-h-full max-w-4xl px-3 py-6 sm:px-6">
+            <div className="overflow-hidden rounded-sm bg-[#f7f1e6] text-slate-900 shadow-[0_25px_80px_rgba(0,0,0,0.55)]">
+              <div className="space-y-5 px-0 py-6 sm:px-0">
+                {slots.map((slot) => {
+                  const cssW = fitWidth * zoom;
+                  const cssH = (slot.baseHeight / slot.baseWidth) * cssW;
+                  return (
                     <div
-                      className="pointer-events-none absolute inset-y-0 left-0 w-8 opacity-40"
-                      style={{ background: 'linear-gradient(270deg, transparent, rgba(60,40,20,0.16))' }}
-                    />
-                  </div>
-                </>
-              ) : null}
+                      key={slot.pageNum}
+                      data-page-num={slot.pageNum}
+                      ref={(el) => {
+                        if (el) pageElsRef.current.set(slot.pageNum, el);
+                        else pageElsRef.current.delete(slot.pageNum);
+                      }}
+                      className="mx-auto"
+                      style={{ width: cssW, maxWidth: '100%' }}
+                    >
+                      <div
+                        className="relative mx-auto overflow-hidden bg-white shadow-[0_8px_28px_rgba(40,25,10,0.12)]"
+                        style={{ width: cssW, height: cssH }}
+                      >
+                        <canvas
+                          ref={(el) => {
+                            if (el) canvasElsRef.current.set(slot.pageNum, el);
+                            else canvasElsRef.current.delete(slot.pageNum);
+                          }}
+                          className="block bg-white"
+                        />
+                        <span className="pointer-events-none absolute bottom-2 right-3 rounded bg-black/35 px-1.5 py-0.5 text-[10px] tabular-nums text-white/90">
+                          {slot.pageNum}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         ) : null}
       </div>
 
       <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-amber-100/10 bg-black/25 px-4 py-2 text-[11px] text-amber-100/55">
-        <span>{twoPage ? (isZh ? '摊开阅读 · 左右翻面' : 'Open book · flip spreads') : isZh ? '单页模式' : 'Single page'}</span>
-        <div className="flex items-center gap-4 sm:hidden">
-          <button type="button" className="inline-flex items-center gap-1 disabled:opacity-40" disabled={!canPrev} onClick={goPrev}>
-            <ChevronLeft className="h-3.5 w-3.5" /> {isZh ? '上一面' : 'Prev'}
-          </button>
-          <button type="button" className="inline-flex items-center gap-1 disabled:opacity-40" disabled={!canNext} onClick={goNext}>
-            {isZh ? '下一面' : 'Next'} <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        </div>
-        <span className="hidden sm:inline">{isZh ? '← → 翻面 · Esc 关闭' : '← → flip · Esc close'}</span>
+        <span>PDF</span>
+        <span className="hidden sm:inline">{isZh ? '滚轮连续浏览 · Esc 关闭' : 'Scroll continuously · Esc close'}</span>
       </footer>
-
-      <style>{`
-        @keyframes bookIn {
-          from { opacity: 0.55; transform: rotateY(-6deg) scale(0.985); }
-          to { opacity: 1; transform: rotateY(0) scale(1); }
-        }
-        .book-flip-in {
-          animation: bookIn 280ms ease-out;
-        }
-      `}</style>
     </div>
   );
 }

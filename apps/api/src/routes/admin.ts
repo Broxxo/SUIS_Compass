@@ -756,6 +756,35 @@ router.get('/stored-files', async (req: AuthedRequest, res: Response) => {
   }
 });
 
+router.get('/stored-files/:fileId/html', async (req: AuthedRequest, res: Response) => {
+  try {
+    const callerRole = await getCallerRole(req.userId);
+    if (callerRole !== 'system-admin') {
+      return res.status(403).json({ error: 'Forbidden: system-admin required' });
+    }
+    const { getStoredFile, absolutePathForStoredFile } = await import('../lib/storedFiles.js');
+    const fs = await import('fs');
+    const file = await getStoredFile(String(req.params.fileId ?? '').trim());
+    if (!file) return res.status(404).json({ error: 'not_found' });
+    if (file.kind !== 'doc' && file.kind !== 'docx') {
+      return res.status(400).json({ error: 'not_word' });
+    }
+    const abs = absolutePathForStoredFile(file);
+    if (!abs || !fs.existsSync(abs)) return res.status(404).json({ error: 'file_missing' });
+    const { renderWordBufferToHtml } = await import('../lib/wordPreview.js');
+    const preview = await renderWordBufferToHtml(file.kind, fs.readFileSync(abs));
+    return res.json({
+      id: file.id,
+      title: file.title,
+      originalName: file.originalName,
+      ...preview,
+    });
+  } catch (error) {
+    console.error('Get stored file html error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/stored-files/:fileId/file', async (req: AuthedRequest, res: Response) => {
   try {
     const callerRole = await getCallerRole(req.userId);
@@ -776,10 +805,11 @@ router.get('/stored-files/:fileId/file', async (req: AuthedRequest, res: Respons
     }
     const abs = absolutePathForStoredFile(file);
     if (!abs || !fs.existsSync(abs)) return res.status(404).json({ error: 'file_missing' });
-    res.setHeader('Content-Type', file.mimeType || 'application/pdf');
+    const disposition = file.kind === 'pdf' ? 'inline' : 'attachment';
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
     res.setHeader(
       'Content-Disposition',
-      `inline; filename*=UTF-8''${encodeURIComponent(file.originalName || 'document.pdf')}`,
+      `${disposition}; filename*=UTF-8''${encodeURIComponent(file.originalName || 'document')}`,
     );
     return fs.createReadStream(abs).pipe(res);
   } catch (error) {

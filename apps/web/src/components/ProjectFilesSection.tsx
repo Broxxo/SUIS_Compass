@@ -5,16 +5,31 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import {
   createProjectPreviewText,
   deleteProjectPreviewAsset,
+  detectProjectUploadKind,
   downloadAuthedFile,
   fetchProjectPreview,
+  PROJECT_FILE_LIMITS,
   projectPreviewFileUrl,
+  projectPreviewHtmlUrl,
   updateProjectPreviewText,
-  uploadProjectPreviewPdf,
+  uploadProjectFile,
   type ProjectPreviewAsset,
 } from '../lib/schoolProjectsApi';
 import PdfReaderDialog from './PdfReaderDialog';
+import WordReaderDialog from './WordReaderDialog';
 
-const PDF_MAX_BYTES = 50 * 1024 * 1024;
+function kindBadgeLabel(kind: ProjectPreviewAsset['kind'], isZh: boolean): string {
+  if (kind === 'pdf') return 'PDF';
+  if (kind === 'docx') return 'DOCX';
+  if (kind === 'doc') return 'DOC';
+  return isZh ? '文本' : 'TXT';
+}
+
+function kindBadgeClass(kind: ProjectPreviewAsset['kind']): string {
+  if (kind === 'pdf') return 'bg-rose-50 text-rose-600';
+  if (kind === 'doc' || kind === 'docx') return 'bg-indigo-50 text-indigo-600';
+  return 'bg-sky-50 text-sky-600';
+}
 
 function formatBytes(n: number): string {
   if (!n) return '—';
@@ -70,6 +85,12 @@ export default function ProjectFilesSection({
     null,
   );
   const [pdfReader, setPdfReader] = useState<{ title: string; url: string } | null>(null);
+  const [wordReader, setWordReader] = useState<{
+    title: string;
+    fileUrl: string;
+    htmlUrl: string;
+    kind: 'doc' | 'docx';
+  } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -113,28 +134,40 @@ export default function ProjectFilesSection({
     }
   };
 
-  const onUploadPdf = async (file: File | null) => {
+  const onUploadFile = async (file: File | null) => {
     if (!file) return;
-    if (file.size > PDF_MAX_BYTES) {
-      setError(isZh ? 'PDF 不能超过 50MB' : 'PDF must be 50MB or smaller');
+    const kind = detectProjectUploadKind(file.name);
+    if (!kind) {
+      setError(isZh ? '只支持 PDF / DOC / DOCX' : 'Only PDF / DOC / DOCX are supported');
+      if (fileRef.current) fileRef.current.value = '';
+      return;
+    }
+    const limit = PROJECT_FILE_LIMITS[kind];
+    const limitMb = Math.round(limit / (1024 * 1024));
+    if (file.size > limit) {
+      setError(
+        isZh
+          ? `${kind.toUpperCase()} 不能超过 ${limitMb}MB`
+          : `${kind.toUpperCase()} must be ${limitMb}MB or smaller`,
+      );
       if (fileRef.current) fileRef.current.value = '';
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      applyAssets(await uploadProjectPreviewPdf(projectId, file));
+      applyAssets(await uploadProjectFile(projectId, file));
     } catch (e: unknown) {
       const code = (e as Error).message;
       setError(
         code === 'file_too_large'
           ? isZh
-            ? 'PDF 不能超过 50MB'
-            : 'PDF must be 50MB or smaller'
-          : code === 'invalid_pdf'
+            ? `${kind.toUpperCase()} 不能超过 ${limitMb}MB`
+            : `${kind.toUpperCase()} must be ${limitMb}MB or smaller`
+          : code === 'invalid_file_type' || code === 'invalid_pdf'
             ? isZh
-              ? '只支持 PDF 文件'
-              : 'Only PDF files are supported'
+              ? '只支持 PDF / DOC / DOCX'
+              : 'Only PDF / DOC / DOCX are supported'
             : code || (isZh ? '上传失败' : 'Upload failed'),
       );
     } finally {
@@ -163,18 +196,19 @@ export default function ProjectFilesSection({
       downloadTextFile(asset);
       return;
     }
+    const ext = asset.kind === 'pdf' ? 'pdf' : asset.kind === 'docx' ? 'docx' : 'doc';
     setBusy(true);
     void downloadAuthedFile(
       projectPreviewFileUrl(projectId, asset.id),
-      asset.originalName || `${asset.title || 'document'}.pdf`,
+      asset.originalName || `${asset.title || 'document'}.${ext}`,
     )
       .catch((e: unknown) => setError((e as Error).message || (isZh ? '下载失败' : 'Download failed')))
       .finally(() => setBusy(false));
   };
 
-  // 展开卡片：无内容时整块不显示
+  // 展开卡片：无内容时整块不显示（加载中/空列表不占位；有文件时即使刷新失败也继续展示）
   if (mode === 'view') {
-    if (loading || error) return null;
+    if (loading) return null;
     if (assets.length === 0) return null;
   }
 
@@ -190,15 +224,6 @@ export default function ProjectFilesSection({
               </span>
             ) : null}
           </h3>
-          <p className="mt-0.5 text-[11px] text-slate-400">
-            {canEdit
-              ? isZh
-                ? '上传与本项目相关的 PDF 或编写文本资料，团队成员打开项目即可查看与下载。'
-                : 'Upload project PDFs or write notes; teammates can view and download them from the project.'
-              : isZh
-                ? '项目相关 PDF 与文本资料，可在线阅读或下载。'
-                : 'Project PDFs and notes — read online or download.'}
-          </p>
         </div>
         {canEdit ? (
           <div className="flex flex-wrap gap-2">
@@ -210,7 +235,7 @@ export default function ProjectFilesSection({
               onClick={() => fileRef.current?.click()}
             >
               <Upload className="mr-1 h-3.5 w-3.5" />
-              {isZh ? '上传 PDF' : 'Upload PDF'}
+              {isZh ? '上传文件' : 'Upload'}
             </Button>
             <Button
               type="button"
@@ -225,9 +250,9 @@ export default function ProjectFilesSection({
             <input
               ref={fileRef}
               type="file"
-              accept="application/pdf,.pdf"
+              accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               className="hidden"
-              onChange={(event) => void onUploadPdf(event.target.files?.[0] ?? null)}
+              onChange={(event) => void onUploadFile(event.target.files?.[0] ?? null)}
             />
           </div>
         ) : null}
@@ -237,7 +262,9 @@ export default function ProjectFilesSection({
       {canEdit && loading ? <p className="mt-2 text-xs text-slate-500">{isZh ? '加载文件…' : 'Loading files…'}</p> : null}
       {canEdit && !loading && assets.length === 0 ? (
         <p className="mt-2 text-xs text-slate-500">
-          {isZh ? '还没有项目文件，上传 PDF 或新建文本开始协作。' : 'No project files yet — upload a PDF or create a note.'}
+          {isZh
+            ? '还没有项目文件，上传 PDF / Word 或新建文本开始协作。'
+            : 'No project files yet — upload a PDF/Word or create a note.'}
         </p>
       ) : null}
 
@@ -259,11 +286,9 @@ export default function ProjectFilesSection({
                   <td className="px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <span
-                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                          asset.kind === 'pdf' ? 'bg-rose-50 text-rose-600' : 'bg-sky-50 text-sky-600'
-                        }`}
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${kindBadgeClass(asset.kind)}`}
                       >
-                        {asset.kind === 'pdf' ? 'PDF' : isZh ? '文本' : 'TXT'}
+                        {kindBadgeLabel(asset.kind, isZh)}
                       </span>
                       <div className="min-w-0">
                         <div className="truncate text-sm font-medium text-slate-800">
@@ -280,7 +305,7 @@ export default function ProjectFilesSection({
                     </div>
                   </td>
                   <td className="hidden px-3 py-2 text-xs text-slate-500 sm:table-cell">
-                    {asset.kind === 'pdf' ? formatBytes(asset.sizeBytes) : isZh ? '库内文本' : 'In DB'}
+                    {asset.kind === 'text' ? (isZh ? '库内文本' : 'In DB') : formatBytes(asset.sizeBytes)}
                   </td>
                   <td className="hidden px-3 py-2 text-xs text-slate-500 md:table-cell">
                     {asset.createdByName || '—'}
@@ -306,7 +331,26 @@ export default function ProjectFilesSection({
                           <FileText className="mr-1 h-3.5 w-3.5" />
                           {isZh ? '阅读' : 'Read'}
                         </Button>
-                      ) : (
+                      ) : asset.kind === 'doc' || asset.kind === 'docx' ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() => {
+                            const wordKind = asset.kind === 'doc' ? 'doc' : 'docx';
+                            setWordReader({
+                              title: asset.title || asset.originalName || wordKind.toUpperCase(),
+                              fileUrl: projectPreviewFileUrl(projectId, asset.id),
+                              htmlUrl: projectPreviewHtmlUrl(projectId, asset.id),
+                              kind: wordKind,
+                            });
+                          }}
+                        >
+                          <FileText className="mr-1 h-3.5 w-3.5" />
+                          {isZh ? '阅读' : 'Read'}
+                        </Button>
+                      ) : asset.kind === 'text' ? (
                         <Button
                           type="button"
                           size="sm"
@@ -317,7 +361,7 @@ export default function ProjectFilesSection({
                           <FileText className="mr-1 h-3.5 w-3.5" />
                           {canEdit ? (isZh ? '编辑' : 'Edit') : isZh ? '查看' : 'View'}
                         </Button>
-                      )}
+                      ) : null}
                       <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => onDownload(asset)}>
                         <Download className="h-3.5 w-3.5" />
                         <span className="sr-only">{isZh ? '下载' : 'Download'}</span>
@@ -343,6 +387,16 @@ export default function ProjectFilesSection({
         fileUrl={pdfReader?.url ?? null}
         isZh={isZh}
         onClose={() => setPdfReader(null)}
+      />
+
+      <WordReaderDialog
+        open={wordReader != null}
+        title={wordReader?.title || ''}
+        fileUrl={wordReader?.fileUrl ?? null}
+        htmlUrl={wordReader?.htmlUrl ?? null}
+        kind={wordReader?.kind ?? 'docx'}
+        isZh={isZh}
+        onClose={() => setWordReader(null)}
       />
 
       <Dialog open={textEditor != null} onOpenChange={(open) => !open && setTextEditor(null)}>

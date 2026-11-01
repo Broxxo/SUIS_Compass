@@ -7,7 +7,8 @@ import { decodeUploadFilename } from './uploadFilename.js';
 
 const ensureOnce = createRunOnce();
 
-export type StoredFileKind = 'text' | 'pdf';
+export type BinaryStoredFileKind = 'pdf' | 'doc' | 'docx';
+export type StoredFileKind = 'text' | BinaryStoredFileKind;
 
 export type StoredFileRecord = {
   id: string;
@@ -29,6 +30,19 @@ export type StoredFileRecord = {
   createdByName?: string | null;
 };
 
+/** PDF 50MB；DOC / DOCX 各 30MB */
+export const BINARY_UPLOAD_LIMITS: Record<BinaryStoredFileKind, number> = {
+  pdf: 50 * 1024 * 1024,
+  doc: 30 * 1024 * 1024,
+  docx: 30 * 1024 * 1024,
+};
+
+const DEFAULT_MIME: Record<BinaryStoredFileKind, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+
 function newId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -40,7 +54,27 @@ function reject(message: string, status: number): never {
 }
 
 function asKind(raw: unknown): StoredFileKind {
-  return raw === 'pdf' ? 'pdf' : 'text';
+  const value = String(raw ?? '');
+  if (value === 'pdf' || value === 'doc' || value === 'docx' || value === 'text') return value;
+  return 'text';
+}
+
+export function isBinaryStoredFileKind(kind: StoredFileKind): kind is BinaryStoredFileKind {
+  return kind === 'pdf' || kind === 'doc' || kind === 'docx';
+}
+
+/** 根据文件名 / MIME 判断二进制类型；无法识别则返回 null */
+export function detectBinaryKind(originalName: string, mimeType = ''): BinaryStoredFileKind | null {
+  const name = decodeUploadFilename(originalName).toLowerCase();
+  const mime = String(mimeType || '').toLowerCase();
+  if (name.endsWith('.docx') || mime.includes('wordprocessingml')) return 'docx';
+  if (name.endsWith('.doc') || mime === 'application/msword') return 'doc';
+  if (name.endsWith('.pdf') || mime.includes('pdf')) return 'pdf';
+  return null;
+}
+
+function stripBinaryExtension(name: string): string {
+  return name.replace(/\.(pdf|docx|doc)$/i, '');
 }
 
 function mapRow(row: Record<string, unknown>): StoredFileRecord {
@@ -52,7 +86,7 @@ function mapRow(row: Record<string, unknown>): StoredFileRecord {
     moduleKey: String(row.module_key ?? ''),
     entityId: String(row.entity_id ?? ''),
     kind: asKind(row.kind),
-    title: titleDecoded || originalName.replace(/\.pdf$/i, '') || titleRaw,
+    title: titleDecoded || stripBinaryExtension(originalName) || titleRaw,
     bodyText: String(row.body_text ?? ''),
     originalName,
     mimeType: String(row.mime_type ?? ''),
@@ -74,7 +108,7 @@ export async function ensureStoredFilesTable(): Promise<void> {
         id VARCHAR(100) PRIMARY KEY,
         module_key VARCHAR(40) NOT NULL,
         entity_id VARCHAR(100) NOT NULL,
-        kind VARCHAR(20) NOT NULL CHECK (kind IN ('text', 'pdf')),
+        kind VARCHAR(20) NOT NULL CHECK (kind IN ('text', 'pdf', 'doc', 'docx')),
         title VARCHAR(200) NOT NULL DEFAULT '',
         body_text TEXT NOT NULL DEFAULT '',
         original_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -87,6 +121,15 @@ export async function ensureStoredFilesTable(): Promise<void> {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+    // 已有库：放开 kind 约束以支持 Word 文档
+    await pool.query(`
+      ALTER TABLE stored_files DROP CONSTRAINT IF EXISTS stored_files_kind_check
+    `);
+    await pool.query(`
+      ALTER TABLE stored_files
+        ADD CONSTRAINT stored_files_kind_check
+        CHECK (kind IN ('text', 'pdf', 'doc', 'docx'))
     `);
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_stored_files_module_entity
@@ -178,7 +221,7 @@ export async function updateTextAsset(
   return getStoredFile(id);
 }
 
-export async function createPdfAsset(input: {
+export async function createBinaryAsset(input: {
   moduleKey: string;
   entityId: string;
   userId: string;
@@ -186,15 +229,24 @@ export async function createPdfAsset(input: {
   mimeType: string;
   buffer: Buffer;
   title?: string;
+  kind?: BinaryStoredFileKind;
 }): Promise<StoredFileRecord> {
   await ensureStoredFilesTable();
   ensureUploadDir();
   const originalName =
-    decodeUploadFilename(String(input.originalName ?? 'document.pdf')).trim().slice(0, 255) || 'document.pdf';
-  const mimeType = input.mimeType || 'application/pdf';
+    decodeUploadFilename(String(input.originalName ?? 'document')).trim().slice(0, 255) || 'document';
+  const kind = input.kind ?? detectBinaryKind(originalName, input.mimeType);
+  if (!kind) reject('invalid_file_type', 400);
+  const limit = BINARY_UPLOAD_LIMITS[kind];
   if (!input.buffer?.length) reject('empty_file', 400);
+  if (input.buffer.length > limit) reject('file_too_large', 400);
+  const mimeType = input.mimeType || DEFAULT_MIME[kind];
+  const ext = kind;
+  const safeName = originalName.toLowerCase().endsWith(`.${ext}`)
+    ? originalName
+    : `${stripBinaryExtension(originalName)}.${ext}`;
   const id = newId('sfile');
-  const relativePath = path.posix.join(input.moduleKey, input.entityId, `${id}.pdf`);
+  const relativePath = path.posix.join(input.moduleKey, input.entityId, `${id}.${ext}`);
   const absPath = resolveUnderUploadDir(relativePath);
   fs.mkdirSync(path.dirname(absPath), { recursive: true });
   fs.writeFileSync(absPath, input.buffer);
@@ -205,19 +257,19 @@ export async function createPdfAsset(input: {
     )
   ).rows[0] as { n: number };
   const title =
-    decodeUploadFilename(String(input.title ?? '')).trim().slice(0, 200) ||
-    originalName.replace(/\.pdf$/i, '');
+    decodeUploadFilename(String(input.title ?? '')).trim().slice(0, 200) || stripBinaryExtension(safeName);
   try {
     await pool.query(
       `INSERT INTO stored_files
          (id, module_key, entity_id, kind, title, original_name, mime_type, size_bytes, storage_path, sort_order, created_by, updated_by)
-       VALUES ($1, $2, $3, 'pdf', $4, $5, $6, $7, $8, $9, $10, $10)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)`,
       [
         id,
         input.moduleKey,
         input.entityId,
+        kind,
         title,
-        originalName,
+        safeName,
         mimeType,
         input.buffer.length,
         relativePath,
@@ -236,6 +288,19 @@ export async function createPdfAsset(input: {
   const created = await getStoredFile(id);
   if (!created) reject('internal', 500);
   return created;
+}
+
+/** @deprecated 使用 createBinaryAsset；保留兼容旧调用 */
+export async function createPdfAsset(input: {
+  moduleKey: string;
+  entityId: string;
+  userId: string;
+  originalName: string;
+  mimeType: string;
+  buffer: Buffer;
+  title?: string;
+}): Promise<StoredFileRecord> {
+  return createBinaryAsset({ ...input, kind: 'pdf' });
 }
 
 export async function deleteStoredFile(id: string): Promise<boolean> {

@@ -519,7 +519,7 @@ export default function ProjectCenter({
                     revision={filesRevision}
                   />
                   {project.canEditProject || project.canEditItems ? (
-                    <div className="mb-3 flex justify-end gap-2">
+                    <div className="mb-3 mt-4 flex justify-end gap-2">
                       {project.canEditProject ? (
                         <Button
                           type="button"

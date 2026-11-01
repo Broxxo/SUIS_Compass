@@ -245,11 +245,13 @@ export async function deleteProjectItem(projectId: string, itemId: string): Prom
   return (await readJson(response)).projects ?? [];
 }
 
+export type ProjectFileKind = 'text' | 'pdf' | 'doc' | 'docx';
+
 export type ProjectPreviewAsset = {
   id: string;
   moduleKey: string;
   entityId: string;
-  kind: 'text' | 'pdf';
+  kind: ProjectFileKind;
   title: string;
   bodyText: string;
   originalName: string;
@@ -259,6 +261,20 @@ export type ProjectPreviewAsset = {
   createdAt: string | null;
   createdByName?: string | null;
 };
+
+export const PROJECT_FILE_LIMITS = {
+  pdf: 50 * 1024 * 1024,
+  doc: 30 * 1024 * 1024,
+  docx: 30 * 1024 * 1024,
+} as const;
+
+export function detectProjectUploadKind(fileName: string): 'pdf' | 'doc' | 'docx' | null {
+  const name = fileName.toLowerCase();
+  if (name.endsWith('.pdf')) return 'pdf';
+  if (name.endsWith('.docx')) return 'docx';
+  if (name.endsWith('.doc')) return 'doc';
+  return null;
+}
 
 export type ProjectPreviewBoard = {
   assets: ProjectPreviewAsset[];
@@ -310,7 +326,8 @@ export async function updateProjectPreviewText(
   return (await readPreviewJson(response)).assets ?? [];
 }
 
-export async function uploadProjectPreviewPdf(projectId: string, file: File, title?: string): Promise<ProjectPreviewAsset[]> {
+/** 上传项目二进制文件：PDF / DOC / DOCX（接口路径仍为 /preview/pdf） */
+export async function uploadProjectFile(projectId: string, file: File, title?: string): Promise<ProjectPreviewAsset[]> {
   const token = getToken();
   const userId = getCurrentUserId();
   const form = new FormData();
@@ -326,6 +343,11 @@ export async function uploadProjectPreviewPdf(projectId: string, file: File, tit
   return (await readPreviewJson(response)).assets ?? [];
 }
 
+/** @deprecated 使用 uploadProjectFile */
+export async function uploadProjectPreviewPdf(projectId: string, file: File, title?: string): Promise<ProjectPreviewAsset[]> {
+  return uploadProjectFile(projectId, file, title);
+}
+
 export async function deleteProjectPreviewAsset(projectId: string, assetId: string): Promise<ProjectPreviewAsset[]> {
   const response = await fetch(
     apiUrl(`/api/projects/${encodeURIComponent(projectId)}/preview/${encodeURIComponent(assetId)}`),
@@ -338,10 +360,21 @@ export function projectPreviewFileUrl(projectId: string, assetId: string): strin
   return apiUrl(`/api/projects/${encodeURIComponent(projectId)}/preview/${encodeURIComponent(assetId)}/file`);
 }
 
+export function projectPreviewHtmlUrl(projectId: string, assetId: string): string {
+  return apiUrl(`/api/projects/${encodeURIComponent(projectId)}/preview/${encodeURIComponent(assetId)}/html`);
+}
+
 export async function fetchAuthedArrayBuffer(url: string): Promise<ArrayBuffer> {
   const response = await fetch(url, { headers: getHeaders() });
   if (!response.ok) throw new Error(`open failed (${response.status})`);
   return response.arrayBuffer();
+}
+
+export async function fetchAuthedJson<T = unknown>(url: string): Promise<T> {
+  const response = await fetch(url, { headers: getHeaders() });
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (!response.ok) throw new Error((data as { error?: string }).error || `open failed (${response.status})`);
+  return data;
 }
 
 export async function openAuthedFile(url: string, fallbackName = 'document.pdf'): Promise<void> {

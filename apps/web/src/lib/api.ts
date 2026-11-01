@@ -694,7 +694,7 @@ export const api = {
       id: string;
       moduleKey: string;
       entityId: string;
-      kind: 'text' | 'pdf';
+      kind: 'text' | 'pdf' | 'doc' | 'docx';
       title: string;
       bodyText: string;
       originalName: string;
@@ -716,7 +716,7 @@ export const api = {
       id: string;
       moduleKey: string;
       entityId: string;
-      kind: 'text' | 'pdf';
+      kind: 'text' | 'pdf' | 'doc' | 'docx';
       title: string;
       bodyText: string;
       originalName: string;
@@ -734,12 +734,16 @@ export const api = {
     return apiUrl(`/api/admin/stored-files/${encodeURIComponent(fileId)}/file`);
   },
 
+  storedFileHtmlUrl(fileId: string): string {
+    return apiUrl(`/api/admin/stored-files/${encodeURIComponent(fileId)}/html`);
+  },
+
   async deleteStoredFile(fileId: string): Promise<
     Array<{
       id: string;
       moduleKey: string;
       entityId: string;
-      kind: 'text' | 'pdf';
+      kind: 'text' | 'pdf' | 'doc' | 'docx';
       title: string;
       bodyText: string;
       originalName: string;
@@ -764,7 +768,7 @@ export const api = {
       id: string;
       moduleKey: string;
       entityId: string;
-      kind: 'text' | 'pdf';
+      kind: 'text' | 'pdf' | 'doc' | 'docx';
       title: string;
       bodyText: string;
       originalName: string;

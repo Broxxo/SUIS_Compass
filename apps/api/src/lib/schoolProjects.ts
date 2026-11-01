@@ -111,15 +111,9 @@ function asDate(raw: unknown): string | null {
   return text;
 }
 
-function asOwnerIds(raw: unknown, max = 12): string[] {
+function asOwnerIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  const ids = [...new Set(raw.map((id) => String(id ?? '').trim()).filter(Boolean))];
-  if (ids.length > max) {
-    const error = new Error('too_many_owners') as Error & { status?: number };
-    error.status = 400;
-    throw error;
-  }
-  return ids;
+  return [...new Set(raw.map((id) => String(id ?? '').trim()).filter(Boolean))];
 }
 
 function asLeadIds(raw: unknown): string[] | null {

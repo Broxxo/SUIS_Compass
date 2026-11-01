@@ -19,12 +19,15 @@ import {
   userCanViewProject,
 } from '../lib/schoolProjects.js';
 import {
+  BINARY_UPLOAD_LIMITS,
   PROJECT_MODULE_KEY,
   absolutePathForStoredFile,
-  createPdfAsset,
+  createBinaryAsset,
   createTextAsset,
   deleteStoredFile,
+  detectBinaryKind,
   getStoredFile,
+  isBinaryStoredFileKind,
   listEntityFiles,
   updateTextAsset,
 } from '../lib/storedFiles.js';
@@ -33,19 +36,16 @@ type ReqWithUserId = Request & { userId?: string };
 
 const router = express.Router();
 
-const PDF_MAX_BYTES = 50 * 1024 * 1024;
+/** multer 上限取各类别最大值；具体类型再按 BINARY_UPLOAD_LIMITS 校验 */
+const UPLOAD_MAX_BYTES = Math.max(...Object.values(BINARY_UPLOAD_LIMITS));
 
-const pdfUpload = multer({
+const fileUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: PDF_MAX_BYTES },
+  limits: { fileSize: UPLOAD_MAX_BYTES },
   fileFilter: (_req, file, cb) => {
-    const name = String(file.originalname || '').toLowerCase();
-    const ok =
-      file.mimetype === 'application/pdf' ||
-      file.mimetype === 'application/x-pdf' ||
-      name.endsWith('.pdf');
-    if (!ok) {
-      cb(new Error('invalid_pdf'));
+    const kind = detectBinaryKind(file.originalname || '', file.mimetype || '');
+    if (!kind) {
+      cb(new Error('invalid_file_type'));
       return;
     }
     cb(null, true);
@@ -55,8 +55,13 @@ const pdfUpload = multer({
 function fail(res: Response, error: unknown, label: string) {
   const status = (error as { status?: number }).status;
   if (status === 400 || status === 403) return res.status(status).json({ error: (error as Error).message });
-  if ((error as Error).message === 'invalid_pdf') return res.status(400).json({ error: 'invalid_pdf' });
-  if ((error as Error).message === 'File too large') return res.status(400).json({ error: 'file_too_large' });
+  const message = (error as Error).message;
+  if (message === 'invalid_pdf' || message === 'invalid_file_type') {
+    return res.status(400).json({ error: 'invalid_file_type' });
+  }
+  if (message === 'File too large' || message === 'file_too_large') {
+    return res.status(400).json({ error: 'file_too_large' });
+  }
   console.error(label, error);
   return res.status(500).json({ error: 'internal' });
 }
@@ -195,10 +200,11 @@ router.put('/:projectId/preview/:assetId', async (req: ReqWithUserId, res: Respo
   }
 });
 
+/** 上传 PDF / DOC / DOCX（路径名保留 /pdf 以兼容旧前端） */
 router.post('/:projectId/preview/pdf', (req: ReqWithUserId, res: Response) => {
-  pdfUpload.single('file')(req, res, async (err: unknown) => {
+  fileUpload.single('file')(req, res, async (err: unknown) => {
     try {
-      if (err) return fail(res, err, 'project preview pdf upload');
+      if (err) return fail(res, err, 'project file upload');
       const userId = requireUser(req, res);
       if (!userId) return;
       const projectId = String(req.params.projectId ?? '').trim();
@@ -206,20 +212,60 @@ router.post('/:projectId/preview/pdf', (req: ReqWithUserId, res: Response) => {
       const file = (req as ReqWithUserId & { file?: Express.Multer.File }).file;
       if (!file) return res.status(400).json({ error: 'missing_file' });
       const { decodeUploadFilename } = await import('../lib/uploadFilename.js');
-      const asset = await createPdfAsset({
+      const originalName = decodeUploadFilename(file.originalname);
+      const kind = detectBinaryKind(originalName, file.mimetype || '');
+      if (!kind) return res.status(400).json({ error: 'invalid_file_type' });
+      if (file.buffer.length > BINARY_UPLOAD_LIMITS[kind]) {
+        return res.status(400).json({ error: 'file_too_large' });
+      }
+      const asset = await createBinaryAsset({
         moduleKey: PROJECT_MODULE_KEY,
         entityId: projectId,
         userId,
-        originalName: decodeUploadFilename(file.originalname),
-        mimeType: file.mimetype || 'application/pdf',
+        originalName,
+        mimeType: file.mimetype || '',
         buffer: file.buffer,
         title: decodeUploadFilename(String(req.body?.title ?? '')),
+        kind,
       });
       return res.json({ asset, assets: await listEntityFiles(PROJECT_MODULE_KEY, projectId) });
     } catch (error) {
-      return fail(res, error, 'project preview pdf create');
+      return fail(res, error, 'project file create');
     }
   });
+});
+
+/** Word 在线阅读：返回 HTML（docx 用 mammoth；doc 抽正文） */
+router.get('/:projectId/preview/:assetId/html', async (req: ReqWithUserId, res: Response) => {
+  try {
+    const userId = requireUser(req, res);
+    if (!userId) return;
+    const projectId = String(req.params.projectId ?? '').trim();
+    const assetId = String(req.params.assetId ?? '').trim();
+    if (!(await userCanViewProject(projectId, userId))) return res.status(403).json({ error: 'forbidden' });
+    const existing = await getStoredFile(assetId);
+    if (
+      !existing ||
+      existing.moduleKey !== PROJECT_MODULE_KEY ||
+      existing.entityId !== projectId ||
+      (existing.kind !== 'doc' && existing.kind !== 'docx')
+    ) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    const abs = absolutePathForStoredFile(existing);
+    if (!abs || !fs.existsSync(abs)) return res.status(404).json({ error: 'file_missing' });
+    const buffer = fs.readFileSync(abs);
+    const { renderWordBufferToHtml } = await import('../lib/wordPreview.js');
+    const preview = await renderWordBufferToHtml(existing.kind, buffer);
+    return res.json({
+      id: existing.id,
+      title: existing.title,
+      originalName: existing.originalName,
+      ...preview,
+    });
+  } catch (error) {
+    return fail(res, error, 'project word html');
+  }
 });
 
 router.get('/:projectId/preview/:assetId/file', async (req: ReqWithUserId, res: Response) => {
@@ -230,15 +276,24 @@ router.get('/:projectId/preview/:assetId/file', async (req: ReqWithUserId, res: 
     const assetId = String(req.params.assetId ?? '').trim();
     if (!(await userCanViewProject(projectId, userId))) return res.status(403).json({ error: 'forbidden' });
     const existing = await getStoredFile(assetId);
-    if (!existing || existing.moduleKey !== PROJECT_MODULE_KEY || existing.entityId !== projectId || existing.kind !== 'pdf') {
+    if (
+      !existing ||
+      existing.moduleKey !== PROJECT_MODULE_KEY ||
+      existing.entityId !== projectId ||
+      !isBinaryStoredFileKind(existing.kind)
+    ) {
       return res.status(404).json({ error: 'not_found' });
     }
     const abs = absolutePathForStoredFile(existing);
     if (!abs || !fs.existsSync(abs)) return res.status(404).json({ error: 'file_missing' });
-    res.setHeader('Content-Type', existing.mimeType || 'application/pdf');
+    const fallbackName =
+      existing.kind === 'pdf' ? 'document.pdf' : existing.kind === 'docx' ? 'document.docx' : 'document.doc';
+    res.setHeader('Content-Type', existing.mimeType || 'application/octet-stream');
+    // PDF 可内嵌预览；Word 下载用附件，在线阅读走 /html 或前端 docx-preview
+    const disposition = existing.kind === 'pdf' ? 'inline' : 'attachment';
     res.setHeader(
       'Content-Disposition',
-      `inline; filename*=UTF-8''${encodeURIComponent(existing.originalName || 'document.pdf')}`,
+      `${disposition}; filename*=UTF-8''${encodeURIComponent(existing.originalName || fallbackName)}`,
     );
     return fs.createReadStream(abs).pipe(res);
   } catch (error) {

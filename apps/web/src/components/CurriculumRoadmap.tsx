@@ -217,6 +217,12 @@ interface CurriculumRoadmapProps {
   surface?: 'hub' | 'admin-course-management';
   /** 嵌在后台内时使用，避免占满视口 */
   embedded?: boolean;
+  /**
+   * 课程河流 2.0 自管顶栏和视图页签时，只渲染这一视图。
+   * 整体视图的学段筛选仍由 controlledOverviewStageTabId 控制。
+   */
+  forcedView?: ViewMode;
+  controlledOverviewStageTabId?: string;
 }
 
 export default function CurriculumRoadmap({
@@ -225,11 +231,13 @@ export default function CurriculumRoadmap({
   onToggleAI,
   surface = 'hub',
   embedded = false,
+  forcedView,
+  controlledOverviewStageTabId,
 }: CurriculumRoadmapProps) {
   const { language, t } = useLanguage();
   const { user } = useAuth();
   const isAdminSurface = surface === 'admin-course-management';
-  const showRoadmapTopBar = !embedded;
+  const showRoadmapTopBar = !embedded && !forcedView;
   const canEditFramework =
     user?.canManageCurriculum === true ||
     user?.role === 'system-admin' ||
@@ -278,7 +286,8 @@ export default function CurriculumRoadmap({
     loadCoursesData();
   }, []);
   
-  const [viewMode, setViewMode] = useState<ViewMode>('overview');
+  const [viewModeState, setViewMode] = useState<ViewMode>(forcedView ?? 'overview');
+  const viewMode = forcedView ?? viewModeState;
   const [selectedSemester, setSelectedSemester] = useState<Semester | null>(null);
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [isSemesterDialogOpen, setIsSemesterDialogOpen] = useState(false);
@@ -294,7 +303,10 @@ export default function CurriculumRoadmap({
   // For concept view, default to null (no semester selected)
   const [conceptSemester, setConceptSemester] = useState<Semester | null>(null);
   /** 整体视图学段筛选：ROADMAP_OVERVIEW_TAB_ALL 为全校；有学段时默认优先最低年段学段 */
-  const [overviewStageTabId, setOverviewStageTabId] = useState<string>(ROADMAP_OVERVIEW_TAB_ALL);
+  const [overviewStageTabIdState, setOverviewStageTabId] = useState<string>(
+    controlledOverviewStageTabId ?? ROADMAP_OVERVIEW_TAB_ALL,
+  );
+  const overviewStageTabId = controlledOverviewStageTabId ?? overviewStageTabIdState;
   const overviewSegmentDefaultAppliedRef = useRef(false);
 
   useEffect(() => {
@@ -756,7 +768,7 @@ export default function CurriculumRoadmap({
     ? (language === 'zh' ? '课程管理' : 'Course management')
     : (language === 'zh' ? '课程河流' : 'Curriculum Roadmap');
 
-  const showRoadmapTabToolbar = showRoadmapTopBar || (embedded && isAdminSurface);
+  const showRoadmapTabToolbar = !forcedView && (showRoadmapTopBar || (embedded && isAdminSurface));
 
   const adminToolbarActions = canEditFramework ? (
     <>

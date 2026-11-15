@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import CurriculumRoadmap from './components/CurriculumRoadmap'
+import CurriculumRiver2, { isCurriculumRiver2Path } from './components/CurriculumRiver2'
 import CompassHub from './components/CompassHub'
 import LoginDialog from './components/LoginDialog'
 import AIPanel from './components/AIPanel'
@@ -122,6 +123,11 @@ function AppContent() {
   // 学生账号仅使用学生画像（自有数据），不进入主 HUB 与其他应用
   if (user?.role === 'student') {
     return <StudentPortrait onBackToHub={() => {}} />;
+  }
+
+  // 课程河流 2.0：/curriculum 是独立入口，不进入 Hub。1.0 仍从主界面打开。
+  if (isCurriculumRiver2Path()) {
+    return <CurriculumRiver2 />;
   }
 
   // SUIS AI：从主界面进入，全屏

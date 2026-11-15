@@ -25,7 +25,7 @@ import { SegmentTabButton, SegmentTabGroup, SegmentTabStrip } from './ui/segment
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useAIContext } from '../contexts/AIContext';
-import { getSubjectCategoryText, getCategoryCanonicalKey } from '../lib/utils';
+import { getSubjectCategoryText, getCategoryCanonicalKey, getCourseDisplayName } from '../lib/utils';
 import type { TranslationKey } from '../locales/translations';
 import { DEFAULT_GRADE_CONFIG, SEMESTERS } from '../lib/constants';
 import {
@@ -536,7 +536,6 @@ export default function CurriculumRoadmap({
     subjectCategory: SubjectCategory,
     applicableGrades: string[],
     weeklyPeriodsByGrade: Record<string, number>,
-    textbookVersion: string,
     color: Course['color'],
     coTeaching: boolean,
     excludeFromStaffing: boolean,
@@ -548,7 +547,6 @@ export default function CurriculumRoadmap({
       subjectCategory: subjectCategory,
       applicableGrades,
       weeklyPeriodsByGrade,
-      textbookVersion: textbookVersion || '人教版',
       color: color,
       coTeaching: excludeFromStaffing ? false : Boolean(coTeaching),
       excludeFromStaffing: Boolean(excludeFromStaffing),
@@ -569,7 +567,6 @@ export default function CurriculumRoadmap({
       subjectCategory?: SubjectCategory | string;
       applicableGrades?: string[];
       weeklyPeriodsByGrade?: Record<string, number>;
-      textbookVersion?: string;
       color?: CourseColor;
       coTeaching?: boolean;
       excludeFromStaffing?: boolean;
@@ -624,7 +621,6 @@ export default function CurriculumRoadmap({
       subjectCategory: SubjectCategory;
       applicableGrades: string[];
       weeklyPeriodsByGrade: Record<string, number>;
-      textbookVersion?: string;
       color: CourseColor;
       coTeaching: boolean;
       excludeFromStaffing: boolean;
@@ -1305,6 +1301,7 @@ function CategoryColumn({
   gradeLevels,
   gradeConfig,
 }: CategoryColumnProps) {
+  const { language } = useLanguage();
   /** 随学期缓存刷新变化，触发本列重算 hasSemesterUnits；切勿写入子组件 key，否则会整格卸载导致 hover/tooltip 狂闪 */
   void refreshKey;
 
@@ -1334,7 +1331,7 @@ function CategoryColumn({
                       hasUnits={hasUnits}
                       isApplicable={isApplicable}
                       onSemesterClick={() => onSemesterClick(course, grade, semester)}
-                      getSemesterLabel={(g, s) => getSemesterLabel(course.name, g, s)}
+                      getSemesterLabel={(g, s) => getSemesterLabel(getCourseDisplayName(course, language), g, s)}
                       course={course}
                       gradeConfig={gradeConfig}
                     />
@@ -1418,7 +1415,7 @@ function SemesterSegment({
   const standardHex = getCourseCellHex(color, 'standard');
   const bgColor = hasUnits ? standardHex : baseHex;
   const hoverBg = hasUnits ? standardHex : hoverHex;
-  const subjectLine = `${getSubjectCategoryText(course.subjectCategory, language)}-${course.textbookVersion || '人教版'}`;
+  const subjectLine = getSubjectCategoryText(course.subjectCategory, language);
   const periods = getWeeklyPeriodsForGrade(course, grade, gradeConfig);
   const hoverTitle =
     language === 'zh'

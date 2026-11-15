@@ -18,7 +18,7 @@ import { Trash2, ChevronUp, ChevronDown, Plus, SlidersHorizontal } from 'lucide-
 import { useLanguage } from '../contexts/LanguageContext';
 import { COURSE_COLORS } from '../lib/constants';
 import { getColorValue } from '../lib/courseUtils';
-import { getCategoryCanonicalKey, sortCoursesLikeCurriculumRoadmap } from '../lib/utils';
+import { getCategoryCanonicalKey, sortCoursesLikeCurriculumRoadmap, getCourseDisplayName } from '../lib/utils';
 import { logError } from '../lib/errorHandler';
 import { useState, useEffect, useMemo } from 'react';
 import AddDomainDialog from './AddDomainDialog';
@@ -39,7 +39,6 @@ interface SettingsDialogProps {
       subjectCategory?: SubjectCategory | string;
       applicableGrades?: string[];
       weeklyPeriodsByGrade?: Record<string, number>;
-      textbookVersion?: string;
       color?: CourseColor;
     },
   ) => void;
@@ -431,7 +430,7 @@ export default function SettingsDialog({
                               <option value="">{language === 'zh' ? '选择课程…' : 'Select course…'}</option>
                               {unassignedCourses.map((c) => (
                                 <option key={c.id} value={c.id}>
-                                  {c.name}
+                                  {getCourseDisplayName(c, language)}
                                 </option>
                               ))}
                             </MenuSelect>
@@ -482,8 +481,8 @@ export default function SettingsDialog({
                         <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 shrink-0">
                           {language === 'zh' ? '领域' : 'Domain'}
                         </span>
-                        <span className="text-[15px] font-medium truncate flex-1 min-w-0" title={course.name}>
-                          {course.name}
+                        <span className="text-[15px] font-medium truncate flex-1 min-w-0" title={getCourseDisplayName(course, language)}>
+                          {getCourseDisplayName(course, language)}
                         </span>
                         <Button
                           type="button"
@@ -564,8 +563,8 @@ export default function SettingsDialog({
                           <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 shrink-0">
                             {language === 'zh' ? '无领域' : 'No domain'}
                           </span>
-                          <span className="text-[15px] font-medium truncate flex-1 min-w-0" title={course.name}>
-                            {course.name}
+                          <span className="text-[15px] font-medium truncate flex-1 min-w-0" title={getCourseDisplayName(course, language)}>
+                            {getCourseDisplayName(course, language)}
                           </span>
                           <div className="flex items-center gap-1.5 flex-shrink-0">
                             <Button
@@ -606,8 +605,8 @@ export default function SettingsDialog({
                   <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 shrink-0">
                     {language === 'zh' ? '按分类' : 'By category'}
                   </span>
-                  <span className="text-[15px] font-medium truncate flex-1 min-w-0" title={course.name}>
-                    {course.name}
+                  <span className="text-[15px] font-medium truncate flex-1 min-w-0" title={getCourseDisplayName(course, language)}>
+                    {getCourseDisplayName(course, language)}
                   </span>
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <Button

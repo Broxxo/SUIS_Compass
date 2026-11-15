@@ -7,6 +7,7 @@ import { SEMESTERS, SEMESTER_LABELS } from '../lib/constants';
 import { loadSemesterDataSync, saveSemesterData, loadSemesterData } from '../lib/storage';
 import { getCourseTagChrome } from '../lib/courseUtils';
 import { getGradeLabelByLevel } from '../lib/gradeConfig';
+import { getCourseDisplayName } from '../lib/utils';
 
 interface UnitViewProps {
   courses: Course[];
@@ -38,7 +39,7 @@ export default function UnitView({
   gradeConfig,
   readOnly = false,
 }: UnitViewProps) {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const [courseUnitsData, setCourseUnitsData] = useState<CourseUnitsData[]>([]);
   const [editingUnit, setEditingUnit] = useState<{ unit: Unit; courseId: string } | null>(null);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
@@ -359,7 +360,7 @@ export default function UnitView({
                               className="text-[10px] font-bold text-white line-clamp-2 leading-tight"
                               style={{ textShadow: tagChrome.labelTextShadow }}
                             >
-                              {course.name}
+                              {getCourseDisplayName(course, language)}
                             </span>
                           </div>
                         </div>

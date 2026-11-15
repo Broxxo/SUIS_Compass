@@ -73,10 +73,9 @@ export default function AIGenerateUnitsDialog({
   useEffect(() => {
     if (open && course && semester) {
       const category = getSubjectCategoryText(course.subjectCategory, language) || course.name;
-      const version = course.textbookVersion || '人教版';
       const gradeLabel = getGradeLabelByLevel(gradeConfig, semester.grade);
       const semesterLabel = SEMESTER_LABELS[semester.semester];
-      const defaultTextbookInfo = `${category}-${version}-${gradeLabel}${semesterLabel}`;
+      const defaultTextbookInfo = `${category}-${gradeLabel}${semesterLabel}`;
       setTextbookInfo(defaultTextbookInfo);
 
       setWeeklyPeriods(getWeeklyPeriodsForGrade(course, semester.grade, gradeConfig));
@@ -434,7 +433,7 @@ export default function AIGenerateUnitsDialog({
       // 构建提示词：如果有上传的教材内容，使用教材内容；否则使用搜索
       const textbookSource = uploadedFile 
         ? `【教材内容】（已上传教材文件：${uploadedFile.name}）\n${uploadedFileContent}`
-        : `教材信息：${textbookInfo}（格式：课程类别-教材版本-学期，已包含年级与学期）`;
+        : `教材信息：${textbookInfo}（格式：课程类别-年级学期，已包含年级与学期）`;
 
       const prompt = `你是一位专业的课程规划专家。请基于以下信息生成单元数据：
 
@@ -459,7 +458,7 @@ ${uploadedFile
    - 请仔细阅读上传的教材内容，理解教材的章节结构和教学安排
    - 严格按照教材中的单元顺序和名称生成，不要补充、合并或创造教材中不存在的单元
    - 如果教材单元数少于学期周数建议的数量，就按教材实际数量生成，不要为了填满学期而补充单元`
-  : `1. **必须使用联网搜索功能**：请先联网搜索"${textbookInfo}"（课程类别-教材版本-学期）的官方单元目录和教学大纲
+  : `1. **必须使用联网搜索功能**：请先联网搜索"${textbookInfo}"（课程类别-年级学期）的官方单元目录和教学大纲
    - 必须搜索市面上最新版本的教材信息，不要使用过时的教材版本
    - 确保搜索到的信息是最新、最准确的官方资料
    - 如果教材有多个版本或年份，请优先使用最新版本
@@ -470,7 +469,7 @@ ${uploadedFile
 ${uploadedFile ? '2' : '3'}. 生成符合该年级认知水平的单元数据，每个单元需要包含：
 
 【课程信息】
-教材信息：${textbookInfo}（格式：课程类别-教材版本-学期，已包含年级与学期）
+教材信息：${textbookInfo}（格式：课程类别-年级学期，已包含年级与学期）
 学期总周数：${totalWeeks}周
 
 【单元数量要求】
@@ -484,7 +483,7 @@ ${uploadedFile ? '2' : '3'}. 生成符合该年级认知水平的单元数据，
 ${getKeyConcepts().map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
 【任务要求】
-1. **必须使用联网搜索功能**：请先联网搜索"${textbookInfo}"（课程类别-教材版本-学期）的官方单元目录和教学大纲
+1. **必须使用联网搜索功能**：请先联网搜索"${textbookInfo}"（课程类别-年级学期）的官方单元目录和教学大纲
    - 必须搜索市面上最新版本的教材信息，不要使用过时的教材版本
    - 确保搜索到的信息是最新、最准确的官方资料
    - 如果教材有多个版本或年份，请优先使用最新版本
@@ -834,14 +833,14 @@ ${uploadedFile ? '7' : '8'}. 关键概念必须从提供的16个概念清单中�
               <Input
                 value={textbookInfo}
                 onChange={(e) => setTextbookInfo(e.target.value)}
-                placeholder="例如：历史-统编版-七年级上学期"
+                placeholder="例如：历史-七年级上学期"
                 disabled={isGenerating || !!uploadedFile}
                 className={uploadedFile ? 'bg-gray-50' : ''}
               />
               <p className="text-xs text-gray-500 mt-1">
                 {uploadedFile 
                   ? '已上传教材文件，此字段已禁用'
-                  : '格式：课程类别-教材版本-学期。已自动填充，可根据需要修改'}
+                  : '格式：课程类别-年级学期。已自动填充，可根据需要修改'}
               </p>
             </div>
 

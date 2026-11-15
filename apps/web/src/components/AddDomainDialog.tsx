@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { useLanguage } from '../contexts/LanguageContext';
+import { getCourseDisplayName } from '../lib/utils';
 import { COURSE_COLORS } from '../lib/constants';
 import { getColorValue } from '../lib/courseUtils';
 import type { Course, CourseColor } from '../types';
@@ -122,7 +123,7 @@ export default function AddDomainDialog({
                     checked={selectedIds.includes(course.id)}
                     onChange={() => toggleCourse(course.id)}
                   />
-                  <span className="truncate">{course.name}</span>
+                  <span className="truncate">{getCourseDisplayName(course, language)}</span>
                 </label>
               ))}
               {coursesSorted.length === 0 && (

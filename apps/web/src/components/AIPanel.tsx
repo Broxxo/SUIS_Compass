@@ -30,6 +30,7 @@ import { AI_MODELS, getSavedModelId, saveModelId, getModelCode } from '../lib/ai
 import { getApiUrl, getAuthHeaders } from '../lib/api';
 import { extractTextFromPDF } from '../lib/pdfParser';
 import { formatNavUserLabel } from '../lib/userDisplay';
+import { getCourseDisplayName } from '../lib/utils';
 import {
   Send,
   User,
@@ -68,6 +69,11 @@ interface Message {
   reasoningTime?: number;
 }
 
+/** 课程在 AI 上下文中只以学科名出现，不暴露教材版本 */
+function courseLabel(course: Course, isZh = true): string {
+  return getCourseDisplayName(course, isZh ? 'zh' : 'en');
+}
+
 function buildContextString(screenId: AIScreenId, payload: Record<string, unknown>, isZh: boolean): string {
   if (!screenId || screenId === 'hub') {
     return '当前无特定课程或学生中心等应用上下文。用户可能从 SUIS AI 主入口直接发起对话，你需要根据提问内容，在协和双语学校真实教学与校园场景下进行理解与回答。';
@@ -78,7 +84,7 @@ function buildContextString(screenId: AIScreenId, payload: Record<string, unknow
     let ctx = '当前正在使用的课程规划应用上下文：\n';
     if (p.basic) {
       ctx += '（基础模式：仅课程列表与概念库，无聚焦学期）\n';
-      ctx += `已有课程列表：${courses.map((c: Course) => c.name).join(', ')}\n`;
+      ctx += `已有课程列表：${courses.map((c: Course) => courseLabel(c, isZh)).join(', ')}\n`;
       const concepts = (p.keyConcepts || []) as string[];
       if (concepts.length > 0) {
         ctx += '\n全局关键概念库：\n';
@@ -95,7 +101,7 @@ function buildContextString(screenId: AIScreenId, payload: Record<string, unknow
       courses.forEach((course: Course) => {
         const data = loadSemesterDataSync(course.id, focusSemester.grade, focusSemester.semester as 'Semester 1' | 'Semester 2');
         if (data?.units?.length) {
-          ctx += `- 【${course.name}】：\n`;
+          ctx += `- 【${courseLabel(course, isZh)}】：\n`;
           data.units.sort((a, b) => a.order - b.order).forEach((u) => {
             ctx += `  * Unit ${u.order + 1}: ${u.title} (周次: ${u.week})\n`;
             ctx += `    核心内容: ${u.focus}\n`;
@@ -103,7 +109,7 @@ function buildContextString(screenId: AIScreenId, payload: Record<string, unknow
         }
       });
     } else {
-      ctx += `已有课程列表：${courses.map((c: Course) => c.name).join(', ')}\n`;
+      ctx += `已有课程列表：${courses.map((c: Course) => courseLabel(c, isZh)).join(', ')}\n`;
     }
     return ctx;
   }

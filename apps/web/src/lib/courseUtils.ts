@@ -32,6 +32,14 @@ export function getCourseTagChrome(color: Course['color']): {
   };
 }
 
+/** 旧课程名形如「语文-人教版」：取首段作为学科类别，避免教材版本混入类别 */
+function firstSegmentOfLegacyCourseName(name: string): string {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return '';
+  const parts = trimmed.split(/[－\-–—]/u).map((s) => s.trim()).filter(Boolean);
+  return parts[0] ?? trimmed;
+}
+
 /**
  * 规范化课程数据（学科格式、年级与周课时字段）
  */
@@ -41,7 +49,9 @@ export function migrateCourseData(course: Course): Course {
   if (typeof subjectCategory === 'string') {
     subjectCategory = { zh: subjectCategory, en: subjectCategory };
   } else if (!subjectCategory) {
-    subjectCategory = { zh: course.name, en: course.name };
+    // 无类别字段的旧数据：从「课程类别-教材版本」合成名中还原学科类别
+    const legacyCategory = firstSegmentOfLegacyCourseName(course.name);
+    subjectCategory = { zh: legacyCategory, en: legacyCategory };
   }
 
   const applicableGrades = getApplicableGrades(course);
@@ -70,7 +80,6 @@ export function migrateCourseData(course: Course): Course {
     weeklyPeriodsByGrade,
     coTeaching: Boolean(course.coTeaching),
     excludeFromStaffing: Boolean(course.excludeFromStaffing),
-    textbookVersion: course.textbookVersion || '人教版',
     color: courseColorOrDefault(course.color),
   };
 }

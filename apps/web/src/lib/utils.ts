@@ -62,6 +62,19 @@ function parseCourseCategoryZhEn(course: Course): { zh: string; en: string } {
 }
 
 /**
+ * 课程展示名：只呈现学科类别，不带教材版本等后缀。
+ * 旧数据中课程名可能形如「语文-人教版」，此处统一收敛为「语文」。
+ */
+export function getCourseDisplayName(
+  course: Pick<Course, 'name' | 'subjectCategory'>,
+  language: Language,
+): string {
+  const category = getSubjectCategoryText(course.subjectCategory, language);
+  if (category) return category;
+  return firstSegmentOfCompoundCourseName(course.name) || (course.name || '').trim();
+}
+
+/**
  * 课程下拉等：双语「中文 英文」，例如「语文 Chinese」；仅有中文时只显示中文。
  */
 export function formatCourseBilingualDisplayName(course: Course): string {

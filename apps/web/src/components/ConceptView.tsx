@@ -4,7 +4,7 @@ import { Course, GradeConfig, Unit } from '../types';
 import { Sparkles, X, Info } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { SEMESTERS, SEMESTER_LABELS } from '../lib/constants';
-import { getKeyConcepts } from '../lib/utils';
+import { getKeyConcepts, getCourseDisplayName } from '../lib/utils';
 import { loadSemesterDataSync } from '../lib/storage';
 import { getGradeLabelByLevel } from '../lib/gradeConfig';
 import { getColorGradient } from '../lib/courseUtils';
@@ -1021,7 +1021,7 @@ export default function ConceptView({ courses, selectedSemester, onSemesterChang
                       }}
                     />
                     <span className="text-xs font-semibold text-gray-700">
-                      {unitData.course.name} · G{unitData.grade} {unitData.semester === 'Semester 1' ? t('concept.firstSemester') : t('concept.secondSemester')}
+                      {getCourseDisplayName(unitData.course, language)} · G{unitData.grade} {unitData.semester === 'Semester 1' ? t('concept.firstSemester') : t('concept.secondSemester')}
                     </span>
                   </div>
                   <div className="text-sm font-medium text-gray-800">

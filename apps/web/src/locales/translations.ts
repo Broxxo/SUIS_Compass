@@ -16,7 +16,6 @@ export type TranslationKey =
   | 'course.settings'
   | 'course.subjectCategory'
   | 'course.gradeRange'
-  | 'course.textbookVersion'
   | 'course.weeklyPeriods'
   | 'course.color'
   | 'course.name'
@@ -123,10 +122,8 @@ export type TranslationKey =
   // Placeholders and hints
   | 'hint.subjectCategory'
   | 'hint.gradeRange'
-  | 'hint.textbookVersion'
   | 'hint.weeklyPeriods'
   | 'hint.courseNameAuto'
-  | 'hint.textbookInfoFormat'
   // Semester selection
   | 'semester.select'
   | 'semester.selectPlaceholder'
@@ -174,7 +171,6 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'course.settings': '设置',
     'course.subjectCategory': '课程类别',
     'course.gradeRange': '开设年级与周课时',
-    'course.textbookVersion': '教材版本',
     'course.weeklyPeriods': '周课时数',
     'course.color': '选择颜色',
     'course.name': '课程名称',
@@ -274,17 +270,15 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.deleteChatConfirm': '删除对话',
     'ai.panel.deleteChatConfirmDesc': '确定要删除这条对话记录吗？删除后无法恢复。',
     // Dialog descriptions
-    'dialog.addCourse.description': '课程名称将自动生成为"课程类别-教材版本"',
+    'dialog.addCourse.description': '课程名称即学科类别，用于课程河流列名与协同检索',
     'dialog.editCourse.description': '修改课程信息',
     'dialog.settings.description': '管理课程设置',
     'dialog.semester.description': '查看和管理该学期的单元',
     // Placeholders and hints
     'hint.subjectCategory': '例如：数学、语文、英语',
     'hint.gradeRange': '单击切换单个年级；按住拖拽可一次选中连续年级（与原先拖拽一致）。可非连续开设（如仅 G1、G3、G5），在下方为每个年级填写周课时数。',
-    'hint.textbookVersion': '例如：人教版、IGCSE0580、北师大版',
     'hint.weeklyPeriods': '按年级分别设置周课时（可为 0.5 的倍数，如 0.5、1.5 表示单双周隔周上课）；AI 生成单元与整体视图中的课时均以此为依据。',
-    'hint.courseNameAuto': '课程名称将自动生成为"课程类别-教材版本"',
-    'hint.textbookInfoFormat': '格式：课程类别-教材版本-学期。已自动填充，可根据需要修改',
+    'hint.courseNameAuto': '课程名称与课程类别保持一致',
     // Semester selection
     'semester.select': '选择学期',
     'semester.selectPlaceholder': '-- 请选择学期 --',
@@ -331,7 +325,6 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'course.settings': 'Settings',
     'course.subjectCategory': 'Subject Category',
     'course.gradeRange': 'Grades & weekly periods',
-    'course.textbookVersion': 'Textbook Version',
     'course.weeklyPeriods': 'Weekly Periods',
     'course.color': 'Color',
     'course.name': 'Course Name',
@@ -431,17 +424,15 @@ export const translations: Record<Language, Record<TranslationKey, string>> = {
     'ai.panel.deleteChatConfirm': 'Delete chat',
     'ai.panel.deleteChatConfirmDesc': 'Are you sure you want to delete this chat? This cannot be undone.',
     // Dialog descriptions
-    'dialog.addCourse.description': 'Course name will be auto-generated as "Subject Category-Textbook Version"',
+    'dialog.addCourse.description': 'Course name equals the subject category, used for roadmap columns and coordination',
     'dialog.editCourse.description': 'Edit course information',
     'dialog.settings.description': 'Manage course settings',
     'dialog.semester.description': 'View and manage units for this semester',
     // Placeholders and hints
     'hint.subjectCategory': 'e.g., Math, Chinese, English',
     'hint.gradeRange': 'Click to toggle a grade. Click and drag across cells to select a contiguous range (same as before). Non-contiguous grades are OK; enter weekly periods for each selected grade below.',
-    'hint.textbookVersion': 'e.g., People\'s Education Edition, IGCSE0580',
     'hint.weeklyPeriods': 'Weekly periods per grade in 0.5 increments (e.g. 0.5, 1.5 for alternate-week schedules); used for AI unit generation and the roadmap.',
-    'hint.courseNameAuto': 'Course name will be auto-generated as "Subject Category-Textbook Version"',
-    'hint.textbookInfoFormat': 'Format: Subject Category-Textbook Version-Semester. Auto-filled, can be modified',
+    'hint.courseNameAuto': 'Course name stays in sync with the subject category',
     // Semester selection
     'semester.select': 'Select Semester',
     'semester.selectPlaceholder': '-- Please select semester --',

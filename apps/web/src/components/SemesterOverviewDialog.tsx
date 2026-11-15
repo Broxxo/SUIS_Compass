@@ -9,6 +9,7 @@ import { Sparkles, Trash2 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { SEMESTER_LABELS } from '../lib/constants';
 import { loadGradeConfigSync, loadSemesterData, saveSemesterData } from '../lib/storage';
+import { getCourseDisplayName } from '../lib/utils';
 import { getWeeklyPeriodsForGrade } from '../lib/courseGradeUtils';
 import { getGradeLabelByLevel } from '../lib/gradeConfig';
 
@@ -265,7 +266,7 @@ export default function SemesterOverviewDialog({
           <DialogHeader className="mb-4 pb-4 border-b space-y-1.5">
             <div className="flex items-center justify-between gap-4">
               <DialogTitle className="text-2xl font-bold text-gray-800 leading-none">
-                {course.name}
+                {getCourseDisplayName(course, language)}
               </DialogTitle>
               <div className="text-sm text-gray-600 whitespace-nowrap">
                 {getGradeLabelByLevel(gradeConfig, semester.grade)} {SEMESTER_LABELS[semester.semester as 'Semester 1' | 'Semester 2']} - {t('semester.overview')} | G{semester.grade} {semester.semester} {t('semester.overview')}
